@@ -1,286 +1,274 @@
 # Web Frontend Architecture
 
-Slipstream's Web application is one Library Browser, but that page owns several
-different lifetimes: application status, File Location navigation, an open
-source and its bounded Grid, the current Photo, and admitted persistence. Those
-lifetimes must remain independently understandable as the product grows.
+The Web application uses Feature-Sliced Design (FSD) to separate Library Browser lifetimes and enforce dependency direction.
 
-The frontend uses Feature-Sliced Design (FSD) as a dependency and ownership
-model. It does not materialize every conventional FSD layer. A layer or slice
-exists only when current behavior gives it a durable responsibility.
+A layer or slice exists only when current behavior gives it a durable responsibility.
 
-This design changes source ownership only. User-visible Library Browser
-behavior remains defined by
-[Library Browsing and Selection](../library-browser/spec.md),
-and asynchronous cancellation, settlement, convergence, recovery, and failure
-presentation remain defined by [Web Async Ownership](async-ownership.md).
+[Library Browsing and Selection](../library-browser/spec.md) owns user-visible behavior. [Web Async Ownership](async-ownership.md) owns cancellation, settlement, convergence, recovery, and failure presentation.
 
-## Design Drivers
+The client remains dependency-light Vanilla TypeScript and Vite.
 
-- One page currently coordinates application-, File Location-, source-, Grid-,
-  Photo-, and persistence-owned work. A change in one lifetime must not require
-  understanding every other lifetime.
-- Source structure must use the product language in [`CONTEXT.md`](../../CONTEXT.md)
-  so that a maintainer can find Library Browser behavior without knowing an
-  implementation taxonomy.
-- FSD dependency direction and public APIs must prevent extracted code from
-  growing new implicit coupling.
-- The application remains a dependency-light Vanilla TypeScript and Vite
-  client. A source reorganization does not justify a UI framework, router,
-  state container, query cache, or dependency-injection system.
-- Original Files remain read-only, and the browser protocol, Browse Snapshot
-  coherence, admitted-write semantics, and deployment surface remain unchanged.
-- Migration must proceed in independently reviewable, working increments. A
-  directory end state is not sufficient evidence of correct behavior.
+Source structure MUST use the product language in [CONTEXT.md](../../CONTEXT.md).
+
+A source reorganization MUST NOT introduce a UI framework, router, state container, query cache, or dependency-injection system.
+
+Original Files remain read-only.
+
+Browser protocol, Browse Snapshot coherence, admitted-write semantics, and deployment boundaries remain governed by their owning contracts.
 
 ## Model
 
 ### Layers
 
-The initial architecture uses only these layers, from highest to lowest:
+The application uses `app` and `pages`, from highest to lowest.
 
-```text
-app
-pages
-```
+Dependencies MUST point downward. `app` MUST import only a page's public API, and code within a slice MUST use internal relative imports rather than its own public API.
 
-Dependencies point downward. `app` may import only the public API of a page.
-Code inside one slice uses its internal relative imports instead of importing
-its own public API.
+The `pages/library-browser` slice exposes mounting into a supplied root and an idempotent disposal handle.
 
-The initial `pages` layer contains one `library-browser` slice. That slice has
-one public API: mounting the Library Browser into a supplied root and returning
-an idempotent disposal handle. Application startup, page-hide handling, and
-global styling belong to `app`; Library Browser state and behavior do not.
+Application startup, page-hide handling, and global styling belong to `app`; Library Browser state and behavior do not.
 
-`shared`, `entities`, `features`, and `widgets` are intentionally absent
-initially:
+Additional layers are introduced only for current responsibilities:
 
-- A shared library is introduced only for a domain-neutral mechanism with a
-  current consumer outside the Library Browser. Being dependency-free alone
-  does not require promotion from its product owner.
+| Layer      | Admission boundary                                                                                                                               |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `shared`   | A domain-neutral mechanism has a current consumer outside the Library Browser; dependency-free code alone does not justify promotion.            |
+| `entities` | A Photo, Album, or Original Folder owns behavior or a stable contract consumed outside the page; page-local wire types alone are insufficient.   |
+| `features` | A product action has an independent boundary outside the page model; one-off forms, button groups, and handlers remain page-local.               |
+| `widgets`  | A self-contained page region hides meaningful behavior behind its interface or is reused; callback-heavy visual wrappers alone are insufficient. |
 
-- A Photo, Album, or Original Folder slice is introduced only when it owns
-  behavior or a stable contract consumed outside the Library Browser page.
-  Moving page-local wire types into type-only entity folders is not sufficient.
-- A feature slice is introduced only for a product action with an independent
-  boundary outside the page model. A one-off form, button group, or event
-  handler remains page-local.
-- A widget slice is introduced only for a self-contained page region whose
-  interface hides meaningful behavior or which is reused. Splitting the one
-  Library Browser into callback-heavy visual wrappers is not a widget boundary.
+When needed, layers MUST follow `pages` → `widgets` → `features` → `entities` → `shared`.
 
-If one of these layers becomes necessary, it is inserted in normal FSD order:
-`pages` -> `widgets` -> `features` -> `entities` -> `shared`. Slices in the
-same layer do not import one another. External consumers import a slice only
-through its `index.ts` public API.
+Slices in the same layer MUST NOT import one another.
+
+External consumers MUST import a slice only through its `index.ts` public API.
 
 ### Library Browser owners
 
-The Library Browser page is composed around the ownership boundaries already
-defined by Web Async Ownership:
+The Library Browser page is composed around the ownership boundaries already defined by Web Async Ownership:
 
-- The **page controller** mounts the page, coordinates its internal owners, and
-  disposes them. It owns only cross-owner interaction readiness and sequencing;
-  it does not retain another owner's mutable state or reimplement that owner's
-  transitions and async policies.
-- The **navigation owner** owns the page's browser address codec, history-entry
-  metadata, and pending destination identity under
-  [Browser Navigation](../library-browser/experience/design.md). It owns no source facts, HTTP,
-  or mutation state; the controller coordinates its destination intents.
-  The page-local destination controller resolves destinations, missing targets,
-  expired position lookups, restoration and Album Resume through existing source,
-  Photo and navigation operations. Each establishment has its own session identity:
-  a newer destination invalidates an older continuation even when both use the
-  same Browse Snapshot. Completed work remains fenced until superseded or disposed.
-- The **application-lifetime owner** owns Library Overview, publication status,
-  scan command settlement, application Recovery claims, and Summary
-  presentation state.
-- The **File Location owner** owns root binding, bounded direct-child windows,
-  retry ranges, and publication rebinding independently of source, Grid, and
-  Photo changes.
-- The **source and Grid owner** owns the selected Library Browser source, the
-  source's view order and Selection State filter, per-state Selection counts
-  for the open source, Browse Snapshot lifecycle, bounded Browse Windows, the
-  visible-range admission contract (one in-flight request and one completion
-  notification per bounded window regardless of joined consumers), the
-  retained-fact cache bound anchored to the latest visible range, Grid
-  position, Thumbnail work, and source-scoped image transfers.
-  A page-local Browse window controller maps awaited outcomes and no-waiter
-  notifications into Recovery and presentation, and replays captured exact-range
-  retries. It owns no Snapshot, Browse token, fact cache or retry records. Awaited
-  work settles through its caller; only unawaited work uses the owner notification.
-- The **Photo owner** owns the current Photo, foreground and adjacent Preview
-  work, Photo View navigation, Selection State and Rating writes, browser-local
-  undo, and Photo-scoped image transfers.
-- The **Photo details owner** keeps current-Photo membership and capture-metadata reads fenced to their Photo authority. It presents Album membership independently of decision readiness and delegates every membership write to the Album action owner; the page controller coordinates its lifecycle without duplicating those read policies.
-- The **Album action owner** keeps admitted Album create, rename, delete, and
-  membership writes alive to settlement and applies their global latest-wins
-  presentation and shared-data convergence rules.
-- The **saved-position coordinator** serializes admitted Album-position writes
-  while validating both the captured Album source and current Photo owners. It
-  does not become a general persistence service.
-- The **removal owner** owns the reviewed removal: the `Rejected` Browse
-  Snapshot under review, the operation identity its confirmation uses, the
-  confirmed operation Undo can still restore, and the admission of every
-  removal and restoration write. It never restores an operation or a Photo the
-  Library no longer holds, and it holds no Photo facts of its own. The same owner
-  also owns Trash inspection, explicit record-cleanup review, and receipt
-  recovery. It fences reads by Trash generation and inspection scope, clears
-  unsubmitted review state on every dismissal, retains an attempt identity before
-  confirmation, and keeps admitted cleanup settling to its durable database
-  result. Outcome recovery preserves retry access and converges rows, counts,
-  and Undo without issuing another confirmation. Trash never deletes Original
-  Files; external deletion belongs to the Photographer under the
-  [Trash contract](../photo-library/trash/spec.md).
-- The **Editor rendition owner** owns independent current and baseline request
-  admission, bounded polling, cancellation, retained images and object-URL
-  lifetime. Both lanes use one transfer lifecycle and the existing rendition
-  validators. The current lane follows recipe and edit-source identity; the
-  baseline is retained across saved-settings changes for the same Photo, stage
-  and source revision. Every asynchronous response/body continuation checks
-  its lane generation and Photo scope before changing presentation or admitting
-  another poll. The Editor controller provides current session identity and
-  chooses the presented lane; its save stream waits on the Photo-scoped output
-  controller's admission barrier before sending dependent writes.
-- The **page UI** owns Library Browser markup, DOM bindings, semantic rendering,
-  focus, keyboard, pointer, and responsive presentation. It reports user intent
-  to the page model; it does not issue HTTP requests or decide async ownership.
-  The page-local Grid presenter owns thumbnail size, virtualized cells, merged
-  render scheduling, keyboard focus, and captured Grid restoration. It reports
-  visible ranges as intent; the source and Grid owner alone admits Browse
-  work. It reuses the DOM nodes of Photos that stay visible and restores focus
-  to one Tab stop without taking it from another surface. See
-  [Library Browsing and Selection](../library-browser/spec.md).
-  The page-local Photo presenter owns presented Photo and Selection identities,
-  status surface identity, facts and metadata rendering, and Preview image targets.
-  It reads bounded presentation models without holding mutable Photo facts or
-  issuing HTTP. Reset and disposal invalidate its targets and cancel gestures.
-  Modal arbitration, keyboard DOM facts and responsive placement remain in the
-  page UI composition. A pure UI-local keyboard policy chooses precedence and
-  semantic actions; native range adjustment and modal cancellation remain with
-  their surfaces, while the Grid presenter owns delegated key geometry and
-  prevent-default handling.
-  The page-local Photo gesture controller owns Preview pointer capture, the
-  pending hold, the horizontal decision accelerators, the vertical navigation
-  accelerators, their transient direction feedback, and the handoff to zoom
-  panning or pinch. It reads the current Photo surface and decision readiness
-  without owning Photo facts, and emits only semantic mutation or navigation
-  intents. Resetting a Photo, leaving its surface, or disposing the view
-  cancels the hold and releases capture; a canceled or stale gesture never
-  writes a decision or navigates. Fit-state vertical movement that does not
-  commit navigation remains native Photo View scrolling, including movement in
-  letterbox regions. Manual zoom owns Preview dragging and never turns it into
-  a decision or navigation action.
-  Rating controls own the transient Wheel presentation and candidate; the
-  page UI also owns the Quick Action Dock, Photo tools, and disclosure focus.
-  None of these values become Photo owner state.
-- The **page API** owns Library Browser HTTP calls, wire response types, and
-  response decoding. It accepts cancellation inputs from the calling owner but
-  does not choose which operation supersedes another.
-  Browse, removal/restoration, and Trash share one HTTP/JSON classifier. It
-  distinguishes a failed transfer, an HTTP refusal, and unreadable JSON without
-  trusting the decoded body. Each client retains its own identity, count, and
-  Snapshot validators and maps those classifications into its existing result
-  types. Thumbnail, Preview, and other APIs retain their distinct protocols.
+#### Page controller
 
-These are responsibility boundaries, not a requirement for one file per bullet.
-An extracted module must hide meaningful state or policy behind a smaller
-interface. Otherwise the responsibility stays with its nearest existing owner.
+The **page controller** mounts the page, coordinates its internal owners, and
+disposes them. It owns only cross-owner interaction readiness and sequencing;
+it does not retain another owner's mutable state or reimplement that owner's
+transitions and async policies.
 
-Sharing the two rendition lifecycles inside the page model hides their transport
-and image-resource rules without adding a second editing session. Keeping two
-copies in the Editor controller duplicates cancellation and body-settlement
-policy. A general poller spanning rendition, Export and Development Proxy work
-would erase their different effects and settlement contracts and is not used.
+#### Navigation owner
+
+The **navigation owner** owns the page's browser address codec, history-entry metadata, and pending destination identity under [Browser Navigation](../library-browser/experience/design.md). It owns no source facts, HTTP, or mutation state. The controller coordinates its destination intents.
+
+The page-local destination controller resolves destinations, missing targets, expired position lookups, restoration, and Album Resume through existing source, Photo, and navigation operations.
+
+Each establishment has its own session identity. A newer destination invalidates an older continuation even when both use the same Browse Snapshot. Completed work remains fenced until superseded or disposed.
+
+#### Application-lifetime owner
+
+The **application-lifetime owner** owns Library Overview, publication status,
+scan command settlement, application Recovery claims, and Summary
+presentation state.
+
+#### File Location owner
+
+The **File Location owner** owns root binding, bounded direct-child windows,
+retry ranges, and publication rebinding independently of source, Grid, and
+Photo changes.
+
+#### Source and Grid owner
+
+The **source and Grid owner** owns the selected source, its view order and Selection State filter, and its per-state Selection counts. It also owns:
+
+- Browse Snapshot lifecycle and bounded Browse Windows;
+- visible-range admission, with one in-flight request and one completion notification per bounded window regardless of joined consumers;
+- the retained-fact cache bound anchored to the latest visible range;
+- Grid position, Thumbnail work, and source-scoped image transfers.
+
+A page-local Browse window controller maps awaited outcomes and no-waiter notifications into Recovery and presentation. It replays captured exact-range retries. It owns no Snapshot, Browse token, fact cache, or retry records.
+
+Awaited work settles through its caller; only unawaited work uses the owner notification.
+
+#### Photo owner
+
+The **Photo owner** owns the current Photo, foreground and adjacent Preview
+work, Photo View navigation, Selection State and Rating writes, browser-local
+undo, and Photo-scoped image transfers.
+
+#### Photo details owner
+
+The **Photo details owner** keeps current-Photo membership and capture-metadata reads fenced to their Photo authority. It presents Album membership independently of decision readiness and delegates every membership write to the Album action owner; the page controller coordinates its lifecycle without duplicating those read policies.
+
+#### Album action owner
+
+The **Album action owner** keeps admitted Album create, rename, delete, and
+membership writes alive to settlement and applies their global latest-wins
+presentation and shared-data convergence rules.
+
+#### Saved-position coordinator
+
+The **saved-position coordinator** serializes admitted Album-position writes
+while validating both the captured Album source and current Photo owners. It
+does not become a general persistence service.
+
+#### Removal owner
+
+The **removal owner** owns the reviewed removal. Its responsibilities include:
+
+- the `Rejected` Browse Snapshot under review;
+- the operation identity used by confirmation;
+- the confirmed operation Undo can still restore; and
+- admission of every removal and restoration write.
+
+It never restores an operation or Photo the Library no longer holds. It holds no Photo facts of its own.
+
+The owner also owns Trash inspection, explicit record-cleanup review, and receipt recovery. It fences reads by Trash generation and inspection scope. Every dismissal clears unsubmitted review state.
+
+The owner retains an attempt identity before confirmation. It keeps admitted cleanup settling to its durable database result. Outcome recovery preserves retry access and converges rows, counts, and Undo without issuing another confirmation.
+
+Trash never deletes Original Files; external deletion belongs to the Photographer under the [Trash contract](../photo-library/trash/spec.md).
+
+#### Editor rendition owner
+
+The **Editor rendition owner** owns independent current and baseline request admission, bounded polling, cancellation, retained images, and object-URL lifetime. Both lanes use one transfer lifecycle and the existing rendition validators.
+
+The current lane follows recipe and edit-source identity. The baseline is retained across saved-settings changes for the same Photo, stage, and source revision.
+
+Every asynchronous response or body continuation checks its lane generation and Photo scope before changing presentation or admitting another poll.
+
+The Editor controller provides current session identity and chooses the presented lane. Its save stream waits on the Photo-scoped output controller's admission barrier before sending dependent writes.
+
+#### Page UI
+
+The **page UI** owns Library Browser markup, DOM bindings, semantic rendering, focus, keyboard, pointer, and responsive presentation. It reports user intent to the page model; it does not issue HTTP requests or decide async ownership.
+
+The page-local Grid presenter owns thumbnail size, virtualized cells, merged render scheduling, keyboard focus, and captured Grid restoration. It reports visible ranges as intent; the source and Grid owner alone admits Browse work.
+
+The Grid presenter reuses the DOM nodes of Photos that stay visible. It restores focus to one Tab stop without taking it from another surface. See [Library Browsing and Selection](../library-browser/spec.md).
+
+The page-local Photo presenter owns presented Photo and Selection identities, status surface identity, facts and metadata rendering, and Preview image targets. It reads bounded presentation models without holding mutable Photo facts or issuing HTTP. Reset and disposal invalidate its targets and cancel gestures.
+
+Modal arbitration, keyboard DOM facts, and responsive placement remain in the page UI composition. A pure UI-local keyboard policy chooses precedence and semantic actions.
+
+Native range adjustment and modal cancellation remain with their surfaces. The Grid presenter owns delegated key geometry and prevent-default handling.
+
+The page-local Photo gesture controller owns Preview pointer capture and the pending hold. It owns horizontal decision and vertical navigation accelerators, transient direction feedback, and the handoff to zoom panning or pinch.
+
+The gesture controller reads the current Photo surface and decision readiness without owning Photo facts. It emits only semantic mutation or navigation intents.
+
+Resetting a Photo, leaving its surface, or disposing the view cancels the hold and releases capture. A canceled or stale gesture never writes a decision or navigates.
+
+Fit-state vertical movement that does not commit navigation remains native Photo View scrolling, including movement in letterbox regions. Manual zoom owns Preview dragging and never turns it into a decision or navigation action.
+
+Rating controls own the transient Wheel presentation and candidate. The page UI also owns the Quick Action Dock, Photo tools, and disclosure focus. None of these values become Photo owner state.
+
+#### Page API
+
+The **page API** owns Library Browser HTTP calls, wire response types, and response decoding.
+
+It accepts cancellation inputs from the calling owner but does not choose which operation supersedes another.
+
+Browse, removal/restoration, and Trash share one HTTP/JSON classifier.
+
+It distinguishes a failed transfer, an HTTP refusal, and unreadable JSON without trusting the decoded body.
+
+Each client retains its own identity, count, and Snapshot validators and maps those classifications into its existing result types.
+
+Thumbnail, Preview, and other APIs retain their distinct protocols.
+
+These are responsibility boundaries, not a requirement for one file per owner.
+
+An extracted module MUST hide meaningful state or policy behind a smaller interface.
+
+Otherwise the responsibility stays with its nearest existing owner.
+
+Sharing the two rendition lifecycles inside the page model hides their transport and image-resource rules without adding a second editing session.
+
+Keeping two copies in the Editor controller duplicates cancellation and body-settlement policy.
+
+A general poller spanning rendition, Export and Development Proxy work would erase their different effects and settlement contracts and is not used.
 
 ### Async ownership module
 
-The four mechanisms defined by Web Async Ownership remain one cohesive,
-dependency-free module inside the Library Browser page: scoped tasks,
-settlement handles, Summary notice arbitration, and Recovery claims. Splitting
-only its most reusable-looking classes would contradict that existing contract
-and create a second ownership boundary.
+The four mechanisms defined by Web Async Ownership remain one cohesive, dependency-free module inside the Library Browser page: scoped tasks, settlement handles, Summary notice arbitration, and Recovery claims.
 
-The module is not promoted to `shared`: its Recovery types currently interpret
-source and Photo ownership, and it has no consumer outside the Library Browser.
-Dependency-free implementation is valuable but is not, by itself, evidence of
-shared ownership. Browse tokens, Preview state, mutation reconciliation, and
-the actual Recovery and Summary presentation state also remain page-owned.
+Splitting only its most reusable-looking classes would contradict that existing contract and create a second ownership boundary.
+
+The module stays page-local: its Recovery types interpret source and Photo ownership, and it has no consumer outside the Library Browser.
+
+Dependency-free implementation is valuable but is not, by itself, evidence of shared ownership.
+
+Browse tokens, Preview state, mutation reconciliation, and the actual Recovery and Summary presentation state also remain page-owned.
 
 ### State and communication
 
-Each mutable state value has one owner. Another page-internal module interacts
-with that state through an explicit command, query, or result; it does not
-retain a writable reference to the owner's state.
+Each mutable state value has one owner.
 
-The page controller may coordinate internal owners, but owners do not call each
-other through cyclic imports. When coordination is necessary, the controller
-passes a narrow callback or consumes an operation result. Interfaces use
-Library Browser language and avoid exposing DOM element collections, request
-sequence counters, or other owner internals.
+Another page-internal module interacts with that state through an explicit command, query, or result; it does not retain a writable reference to the owner's state.
 
-The application-lifetime owner is the sole writer of the Library Overview data
-floor and committed Album summaries. File Location conflicts, scan completion,
-Album mutation success, and saved-position confirmation return typed outcomes
-to that owner through the page controller; they do not mutate its state or call
-it through reverse imports.
+The page controller MAY coordinate internal owners, but owners do not call each other through cyclic imports.
 
-Cross-owner connectivity and decision readiness are derived once from transport
-reachability, Recovery claims, and active interaction ownership. The
-application-lifetime owner reports the status probe's transport outcome, and the
-page controller applies it to that shared reachability state; a probe answer
-without usable content reports neither a reachable nor a lost transport. Local
-Preview inspection readiness is separate: an already loaded Preview may zoom and
-pan without transport or persistence readiness, while fit-mode decision gestures
-remain governed by decision readiness. Individual owners cannot independently
-declare the page connected or clear another owner's busy state. A presentation
-surface that must reject late settlement is represented by an opaque ownership
-token, not by an unguarded `setStatus` callback.
+When coordination is necessary, the controller passes a narrow callback or consumes an operation result.
 
-An operation's semantic owner is explicit at a module boundary. Transport
-objects such as `AbortSignal` carry cancellation only and are not used as
-cross-module identity tags.
+Interfaces use Library Browser language and avoid exposing DOM element collections, request sequence counters, or other owner internals.
 
-The source structure does not introduce a global frontend store. Browser-local
-state stays with the lifetime that invalidates it, while server-authoritative
-state continues to converge through the existing API and ordering contracts.
+The application-lifetime owner is the sole writer of the Library Overview data floor and committed Album summaries.
+
+File Location conflicts, scan completion, Album mutation success, and saved-position confirmation return typed outcomes to that owner through the page controller; they do not mutate its state or call it through reverse imports.
+
+Cross-owner connectivity and decision readiness are derived once from transport reachability, Recovery claims, and active interaction ownership.
+
+The application-lifetime owner reports the status probe's transport outcome, and the page controller applies it to that shared reachability state; a probe answer without usable content reports neither a reachable nor a lost transport.
+
+Local Preview inspection readiness is separate: an already loaded Preview can zoom and pan without transport or persistence readiness, while fit-mode decision gestures remain governed by decision readiness.
+
+Individual owners cannot independently declare the page connected or clear another owner's busy state.
+
+A presentation surface that MUST reject late settlement is represented by an opaque ownership token, not by an unguarded `setStatus` callback.
+
+An operation's semantic owner is explicit at a module boundary.
+
+Transport objects such as `AbortSignal` carry cancellation only and are not used as cross-module identity tags.
+
+The source structure does not introduce a global frontend store.
+
+Browser-local state stays with the lifetime that invalidates it, while server-authoritative state continues to converge through the existing API and ordering contracts.
 
 ### Preview presentation state
 
-The page UI owns one transient Preview zoom state for the current Photo. It
-is presentation state, not Photo state, and is reset when the current Photo
-or view changes. The page UI exposes the state through Fit Window, zoom out,
-a continuous slider, zoom in, a live percentage, and a 100% action, and
-keeps the state available to assistive technology.
+The page UI owns one transient Preview zoom state for the current Photo.
+
+It is presentation state, not Photo state, and is reset when the current Photo or view changes.
+
+The page UI keeps zoom state available to assistive technology. It exposes:
+
+- Fit Window;
+- zoom out and zoom in;
+- a continuous slider;
+- a live percentage; and
+- a 100% action.
 
 The state is one zoom percentage plus a Fit marker rather than a mode list:
 
-- `Fit` recomputes from the Preview area and the image's natural size. It owns
-  horizontal decision accelerators and vertical navigation accelerators, while
-  an uncommitted vertical movement remains native Photo View scrolling. Right
-  sets `picked`, left sets `rejected`, up opens the next Photo, and down opens
-  the previous Photo; the visible controls remain equivalent fallbacks.
-- A manual zoom percentage in `[10%, 800%]` is anchored to the Preview's
-  natural pixels: `100%` maps one Preview pixel to one CSS pixel. Pointer wheel
-  and pinch zoom keep the gesture point stationary; one-finger drag pans within
-  bounded overflow and never records a decision or navigation action.
-- Detail inspection is the manual zoom state rather than a separate mode, so
-  `D` toggles a 200% detail zoom inside the same continuous state.
+| State             | Behavior                                                                                                                                                                                                                                              |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Fit               | Recompute from Preview area and natural image size. Horizontal movement owns decision accelerators; vertical movement owns navigation accelerators. Uncommitted vertical movement remains native Photo View scrolling.                                |
+| Manual            | `[10%, 800%]` is anchored to natural Preview pixels; `100%` maps one Preview pixel to one CSS pixel. Pointer wheel and pinch keep the gesture point stationary. One-finger drag pans within bounded overflow without a decision or navigation action. |
+| Detail inspection | Manual zoom rather than a separate mode; `D` toggles 200% detail zoom.                                                                                                                                                                                |
 
-This shape is selected because the Photographer must reach any
-magnification between complete composition and honest pixel inspection
-without a second control model. The retired `Fill` cropping mode is not
-reintroduced: cropping hid composition rather than inspecting it. Explicit
-Pick and Reject controls stay available in every zoom state.
+Fit gestures set `picked` to the right and `rejected` to the left. Up opens the next Photo and down opens the previous Photo; visible controls remain equivalent fallbacks.
+
+This shape is selected because the Photographer MUST reach any magnification between complete composition and honest pixel inspection without a second control model.
+
+The presentation MUST NOT use a `Fill` cropping mode because cropping hides composition rather than inspecting it.
+
+Explicit Pick and Reject controls stay available in every zoom state.
 
 ### Mobile Photo View interaction state
 
-The mobile Photo View adds a transient action hierarchy without adding a new
-frontend lifetime. The page UI owns the Quick Action Dock, the Photo tools
-surface, and the Rating Wheel's pointer state. The Photo owner remains
-the sole owner of the current Photo, Rating and Selection State persistence,
-Undo, async authority, and settlement classification.
+The mobile Photo View adds a transient action hierarchy without adding a new frontend lifetime.
+
+The page UI owns the Quick Action Dock, the Photo tools surface, and the Rating Wheel's pointer state.
+
+The Photo owner remains the sole owner of the current Photo, Rating and Selection State persistence, Undo, async authority, and settlement classification.
 
 The transient gesture state has three meaningful values:
 
@@ -288,313 +276,135 @@ The transient gesture state has three meaningful values:
 - a pending touch hold bound to one current Photo and its Preview surface; and
 - an open Wheel with one presentation-only Rating candidate.
 
-The pending hold uses the product contract's 12 CSS-pixel movement boundary and
-450-millisecond hold threshold. Before the threshold, the page UI hands the
-pointer to horizontal decision movement, vertical navigation or native Photo
-View scrolling according to the touch region and dominant axis, or Pinch Zoom
-when those gestures take ownership. After the threshold, the Wheel owns the
-pointer until release or cancellation. The state is invalidated when the Photo
-surface, current Photo, connection readiness, or UI generation changes.
+The pending hold uses the product contract's 12 CSS-pixel movement boundary and 450-millisecond hold threshold.
 
-A Wheel release emits the same Rating intent as an explicit Rating control. It
-does not issue HTTP itself, retain a second Rating value, advance the Photo, or
-change Selection State. A late settlement is accepted only by the Photo owner
-and the current Photo presentation token, exactly like an explicit Rating
-mutation.
+Before the threshold, the page UI hands the pointer to horizontal decision movement, vertical navigation or native Photo View scrolling according to the touch region and dominant axis, or Pinch Zoom when those gestures take ownership.
 
-The Quick Action Dock is a responsive presentation of existing intents. It
-must not become a second page controller or a second persistence admission. The
-Photo tools surface presents existing Details, Album, Zoom, and Clear controls;
-each retains its existing owner, failure isolation, and focus restoration rules.
-Undo is presented once in the primary Photo action region and retains the same
-Photo action owner. Previous/Next remain in the primary navigation group.
-[Browser Navigation and Responsive Surfaces](../library-browser/experience/design.md#responsive-presentation-boundary)
-owns shared modal and disclosure lifecycle.
+After the threshold, the Wheel owns the pointer until release or cancellation.
+
+The state is invalidated when the Photo surface, current Photo, connection readiness, or UI generation changes.
+
+A Wheel release emits the same Rating intent as an explicit Rating control.
+
+It does not issue HTTP itself, retain a second Rating value, advance the Photo, or change Selection State.
+
+A late settlement is accepted only by the Photo owner and the current Photo presentation token, exactly like an explicit Rating mutation.
+
+The Quick Action Dock is a responsive presentation of existing intents.
+
+It MUST NOT become a second page controller or a second persistence admission.
+
+The Photo tools surface presents existing Details, Album, Zoom, and Clear controls; each retains its existing owner, failure isolation, and focus restoration rules.
+
+Undo is presented once in the primary Photo action region and retains the same Photo action owner.
+
+Previous/Next remain in the primary navigation group. [Browser Navigation and Responsive Surfaces](../library-browser/experience/design.md#responsive-presentation-boundary) owns shared modal and disclosure lifecycle.
 
 ### Membership presentation state
 
-The page UI also presents the current Photo's Album membership from a
-per-Photo server query, with loading, empty, and failed members of its own.
-The page controller owns that read like capture metadata: it is fenced to
-the current Photo, a late response for another Photo is discarded, and
-failure does not affect decision readiness. Membership mutations continue
-to run through the Album action owner's admitted-write contract.
+The Photo details owner presents the current Photo's Album membership from a per-Photo server query, with independent loading, empty, and failed states.
+
+Its read is fenced to the current Photo; a late response for another Photo is discarded.
+
+Membership read failure does not affect decision readiness.
+
+Membership mutations run through the Album action owner's admitted-write contract.
 
 ### Grid presentation state
 
-The page UI owns the chosen Grid thumbnail step. One layout calculation uses
-the available Grid width, step target width, gap, current font metrics/text
-scale, and selection gutter to supply both CSS and virtualization geometry.
-Choose the column count from the selected step, then distribute the remaining
-row width evenly across those columns; resizing must not change the chosen
-step. An incomplete row uses the same widths. Column count, actual cell width,
-caption height, row/column pitch, positions, canvas height, visible ranges,
-keyboard movement, and restoration must all use that calculation.
+The page UI owns the chosen Grid thumbnail step as presentation state of the open Grid. One layout calculation uses available Grid width, step target width, gap, current font metrics, text scale, and selection gutter for both CSS and virtualization geometry.
 
-Caption height must fit the required state and Rating presentations at those
-layout inputs and apply uniformly to every cell and placeholder. It must not
-depend on each Photo's text, orientation, availability, or image completion.
-Width, text scale, font metric, or selection-gutter changes recompute geometry
-and preserve the top Photo anchor and applicable focus. Content updates must
-not create variable-height rows or make a loaded image shift the Grid.
+The selected step determines column count; remaining row width MUST be distributed evenly across those columns without changing the chosen step on resize. An incomplete row MUST use the same widths. This fills available width without changing density or cropping.
 
-A size change re-anchors the Grid on the topmost visible row, re-renders
-through the same merged render as scrolling, and reports the new range
-through the normal admission path. It is not a source open: it changes no
-wire contract, keeps the current Browse Snapshot, and leaves Selection State,
-Rating, and Album state untouched.
+Column count, actual cell width, caption height, row and column pitch, positions, canvas height, visible ranges, keyboard movement, and restoration MUST use that calculation. Caption height MUST fit required state and Rating presentations and apply uniformly to every cell and placeholder.
+
+Caption height MUST NOT depend on each Photo's text, orientation, availability, or image completion. Width, text scale, font metric, or selection-gutter changes MUST recompute geometry and preserve the top Photo anchor and applicable focus. Content updates MUST NOT create variable-height rows or make a loaded image shift the Grid.
+
+A size change re-anchors the Grid on the topmost visible row, re-renders through the same merged render as scrolling, and reports the new range through the normal admission path.
+
+It is not a source open: it changes no wire contract, keeps the current Browse Snapshot, and leaves Selection State, Rating, and Album state untouched.
 
 Thumbnail requests keep the single `thumbnail-512` derivative at every step.
-Actual cell width and device pixel ratio may require display upscaling; that
-does not establish extra source detail. The Grid must not request per-step
-renditions or upscale stored derivatives to fill a row. Such renditions would
-fragment the rebuildable cache without changing the composition contract.
-Preview scheduling priority in [Scalable Library Browsing](../library-browser/design.md)
-is unchanged.
+
+Actual cell width and device pixel ratio MAY require display upscaling; that does not establish extra source detail. The Grid MUST NOT request per-step renditions or upscale stored derivatives to fill a row. Per-step renditions would fragment the rebuildable cache without changing the composition contract.
+
+Preview scheduling priority in [Scalable Library Browsing](../library-browser/design.md) is unchanged.
 
 ### Destination and restoration policy
 
-One page-local model module answers how a browser address relates to the live
-source. It owns no state and issues no HTTP: it reads the open source's shape,
-the open Snapshot's readiness, and the File Location binding through narrow
-queries, and the page controller remains the only coordinator that commits
-what it answers.
+One page-local model module answers how a browser address relates to the live source.
 
-It decides the destination the open Snapshot presents, the wire order an
-address requests (an omitted order and an Album's own order both leave the
-order to the server), whether the open Snapshot can serve a traversal without
-reopening the source, and the display name of a Folder Location whose parent
-window may not be loaded. A captured Grid restoration resolves through the
-same module: the anchor's stable Photo identity is confirmed before its index
-hint is trusted, an anchor the Snapshot no longer holds clamps to the captured
-position and restores geometry without naming a focused cell, and a retryable
-lookup keeps the resolved position instead of presenting the Photo as gone.
+It owns no state and issues no HTTP: it reads the open source's shape, the open Snapshot's readiness, and the File Location binding through narrow queries, and the page controller remains the only coordinator that commits what it answers.
+
+The module decides:
+
+- the destination the open Snapshot presents;
+- the wire order an address requests;
+- whether the open Snapshot can serve a traversal without reopening the source; and
+- the display name of a Folder Location whose parent window can be unloaded.
+
+An omitted order and an Album's own order both leave the wire order to the server.
+
+The same module resolves captured Grid restoration:
+
+| Condition                           | Result                                                                             |
+| ----------------------------------- | ---------------------------------------------------------------------------------- |
+| Anchor is available                 | Confirm its stable Photo identity before trusting its index hint.                  |
+| Snapshot no longer holds the anchor | Clamp to the captured position and restore geometry without naming a focused cell. |
+| Lookup is retryable                 | Keep the resolved position instead of presenting the Photo as gone.                |
 
 ### Source opening settlement
 
-One page-local model boundary classifies source-open results for both a new
-destination and an expired Snapshot reopen. It binds a Folder request to the
-current File Location publication, captures the source authority established
-by the request, and admits the returned Grid position only for that authority.
-A publication conflict may rebind File Locations only while the source remains
-current; after rebinding, both source and File Location authorities must still
-match before the page receives a publication notice. Only a confirmed `404`
-identifies a missing source. Other failures remain retryable.
+One page-local model boundary classifies source-open results for both a new destination and an expired Snapshot reopen.
 
-The page coordinates Photo rebinding, the first bounded window, Recovery,
-presentation, and history. It checks authority again when consuming an awaited
-result, because another destination may supersede it between continuations.
+It binds a Folder request to the current File Location publication, captures the source authority established by the request, and admits the returned Grid position only for that authority.
+
+A publication conflict MAY rebind File Locations only while the source remains current; after rebinding, both source and File Location authorities MUST still match before the page receives a publication notice.
+
+Only a confirmed `404` identifies a missing source.
+
+Other failures remain retryable.
+
+The page coordinates Photo rebinding, the first bounded window, Recovery, presentation, and history.
+
+It checks authority again when consuming an awaited result, because another destination can supersede it between continuations.
+
 The source and Grid owner remains the only owner of Snapshot state and release.
 
 Source replacement and retained-source reopening keep separate orchestration.
-Replacement binds Photo to the new source before opening and commits readiness
-before rendering. Reopening first detaches Photo from pending work under the
-old source, retains Grid cells, renders the covering window, then commits
-readiness and resumes Photo. Page-local helpers share the Folder publication
-precondition, covering-window fence, readiness commit, failure mapping and
-empty-source presentation without owning another source lifecycle.
 
-Reopening returns established authority, confirmed missing, retryable failure
-or superseded explicitly. Destination resolution retries only the established
-authority, preserves a failed destination for Retry, and explains a missing
-source before falling back. Every awaited continuation and busy release checks
-the captured source and destination; disposed work cannot change presentation.
+Replacement binds Photo to the new source before opening and commits readiness before rendering.
+
+Reopening first detaches Photo from pending work under the old source, retains Grid cells, renders the covering window, then commits readiness and resumes Photo.
+
+Page-local helpers share the Folder publication precondition, covering-window fence, readiness commit, failure mapping and empty-source presentation without owning another source lifecycle.
+
+Reopening returns established authority, confirmed missing, retryable failure or superseded explicitly.
+
+Destination resolution retries only the established authority, preserves a failed destination for Retry, and explains a missing source before falling back.
+
+Every awaited continuation and busy release checks the captured source and destination; disposed work cannot change presentation.
 
 ### Styling
 
 Global tokens, reset rules, and the application mount surface belong to `app`.
-Library Browser layout and component styles remain within the page slice. CSS
-is split by ownership only when doing so creates a navigable boundary; the
-migration does not create one stylesheet per element and does not change the
-selected neutral dark appearance.
+
+Library Browser layout and component styles remain within the page slice.
+
+CSS is split by ownership only when doing so creates a navigable boundary. The selected appearance remains neutral and dark.
 
 ## Semantics
 
 Application startup mounts exactly one Library Browser into the configured root.
-Disposal is idempotent. It detaches presentation continuations, stops owned
-application and page scopes, removes browser-managed image transfers, and
-starts or preserves Browse-token cleanup and admitted-write settlement exactly
-as required by Web Async Ownership.
 
-Moving an operation between source modules never changes its ownership key,
-generation, transport policy, settlement rule, ordering rule, Recovery claim,
-or presentation surface. If an extraction reveals that one of those contracts
-must change, that behavior change stops and receives its own governing design
-and review instead of entering the architecture migration.
+Disposal is idempotent.
 
-Wire routes, request and response values, persistence, server boundaries, and
-deployment verification remain unchanged. Composite responses used only by the
-Library Browser stay in its `api` segment. A wire type moves to an entity only
-when an entity slice already has an independent consumer and can expose a
-stable domain-facing contract rather than the server response wholesale.
+It detaches presentation continuations, stops owned application and page scopes, removes browser-managed image transfers, and starts or preserves Browse-token cleanup and admitted-write settlement exactly as required by Web Async Ownership.
 
-Architecture transitions do not preserve obsolete import paths. A migration
-increment first changes all consumers, verifies them, and then removes the old
-module or re-export in the same increment.
+Disposal MUST perform each cleanup at most once and start at most one release for a known Browse token.
 
-## Options
+Composite responses used only by the Library Browser stay in its `api` segment.
 
-### Selected: Incremental page-first FSD
+A wire type belongs in an entity only when that slice has an independent consumer and exposes a stable domain-facing contract rather than the server response wholesale.
 
-Establish the application/page boundary, keep the cohesive async ownership
-module page-local, and then move one async owner at a time behind a deep
-page-internal interface. Every increment keeps a working application and the
-existing behavioral gates.
-
-This approach directly reduces change amplification while keeping temporary
-and permanent abstractions to a minimum.
-
-### Rejected: Full textbook FSD tree in one migration
-
-Creating `widgets`, `features`, and `entities` immediately would classify the
-current page without proving independent ownership. It would also combine many
-file moves with the highest-risk async boundaries and make regressions harder
-to localize.
-
-### Rejected: Technical `components`, `services`, and `stores` split
-
-That structure separates file types but leaves Library Browser ownership and
-lifetimes implicit. It tends to move domain state into a shared store and HTTP
-policy into broad services, so a maintainer still needs cross-directory context
-for one product change.
-
-### Rejected: Framework or state-management migration
-
-A framework could change rendering mechanics but would not define Browse,
-Photo, File Location, or persistence ownership. It adds a second migration,
-new runtime concepts, and new failure modes without solving the current
-boundary problem.
-
-### Mobile Photo View interaction state options
-
-#### Selected: page-local transient interaction state
-
-Keep the Wheel, Dock, and disclosure state in the existing Library Browser page
-UI, and send only semantic Rating, Selection State, navigation, and Album
-intents to the page controller. This fits the current ownership model because
-only Photo View consumes the state, the state is invalidated by the current
-Photo surface, and no external consumer needs the interaction protocol.
-
-#### Rejected: move Wheel state into the Photo owner
-
-The Photo owner owns durable Photo mutations and async authority, not pointer
-geometry or responsive presentation. Moving a pending hold or candidate into it
-would make a transient gesture survive the wrong UI lifetime and would couple
-Photo persistence to DOM timing.
-
-#### Rejected: create a reusable gesture feature or mobile state store
-
-The Rating Wheel and Dock have one current consumer and depend on Preview zoom,
-Photo identity, focus, and existing page gestures. A new feature slice or
-frontend store would add an ownership boundary without an independent contract
-or second consumer. Reuse can be considered only when another current product
-surface has the same complete interaction semantics.
-
-#### Rejected: replace explicit Rating controls with the Wheel
-
-A Wheel is efficient for touch but is a poor keyboard and assistive-technology
-surface. Keeping explicit controls as the fallback preserves discoverability,
-programmatic state, and non-gesture operation while the Wheel remains an
-accelerator.
-
-## Risks and Trade-offs
-
-- A page slice may remain large during migration. That is preferable to
-  inventing shallow layers; the next extraction occurs only when one owner can
-  present a smaller interface than the state and policy it hides.
-- The page controller could become a renamed monolith. It may coordinate owner
-  results, but it does not retain their mutable state, request bookkeeping, or
-  error policy.
-- File movement can conceal behavioral edits. Each increment isolates one
-  owner, keeps protocol and presentation behavior unchanged, and is reviewed
-  against the async ownership matrix before merge.
-- Layer direction and page public-API rules are enforced with existing tooling
-  as soon as the skeleton exists. The final audit adds owner-internal cycle and
-  API-boundary checks; another dependency is justified only by a concrete rule
-  the existing toolchain cannot express.
-- Omitting conventional FSD layers makes the tree less symmetrical. This is an
-  intentional trade-off: fewer concepts are easier to navigate than empty or
-  type-only slices, and a missing layer can be added when an owner appears.
-
-## Migration
-
-1. Establish an `app` entrypoint and a `pages/library-browser` public mounting
-   API while keeping the current page implementation intact. Add the minimum
-   existing-ESLint rules that prevent higher-layer imports and public-API
-   bypasses in the new structure.
-2. Move the existing four-mechanism ownership module and its focused tests
-   intact into the Library Browser page model. Update the unit-test command so
-   all seventeen ownership characterization cases remain discovered.
-3. Extract the independent File Location owner, preserving root binding,
-   publication coherence, bounded windows, and exact-range retry behavior.
-4. Extract the application-lifetime owner, preserving Library Overview,
-   publication status, scan settlement, Recovery, and Summary semantics.
-5. Extract the source/Grid owner, including Browse Snapshot release, bounded
-   windows, Thumbnail work, and browser-managed Grid image transfers.
-6. Extract the Album action owner without changing its admitted-write,
-   latest-wins notice, connectivity, or overview-convergence behavior.
-7. Extract the Photo owner without changing current Preview, navigation,
-   Selection State, Rating, undo, or image-transfer behavior.
-8. Extract saved-position coordination without changing its source-and-Photo
-   ownership, serialization, Recovery, or stale-settlement behavior.
-9. Move remaining page markup, DOM binding, and styles behind page-internal UI
-   interfaces; remove the obsolete monolithic entrypoint.
-10. Audit the resulting downward import direction and public APIs with the
-    existing lint toolchain. Add a dedicated architecture dependency only if
-    the existing tooling cannot express a concrete rule that has already been
-    violated.
-
-Each owner extraction is a vertical, behavior-preserving integration increment:
-it moves that owner's model, API adapter, and smallest necessary UI adapter
-together. The shared source-navigation UI remains page-owned until a later
-owner can consume a semantic interface without element bags or callback soup.
-Each increment updates tests only where ownership or import paths move, runs
-focused checks and the full repository gate, and is independently revertible.
-There is no data, protocol, or deployment migration.
-
-## Verification
-
-Verification must prove:
-
-- application startup imports only the Library Browser public API and contains
-  no Library Browser state or HTTP behavior;
-- no `shared`, entity, feature, or widget layer exists without a demonstrated
-  current owner or consumer;
-- page-internal owners have no cyclic imports or shared writable state;
-- disposing one mounted page twice is harmless, performs each cleanup at most
-  once, suppresses late presentation, and starts at most one release for a
-  known Browse token;
-- every operation named by Web Async Ownership retains its scope, key,
-  cancellation or settlement policy, ordering, Recovery, and failure behavior
-  as a characterized rule of its model owner, proven by the page-model unit
-  tests rather than by a browser scenario;
-- the browser smoke suite proves the assembled real stack end to end against
-  the Rust server and the built Web assets: the access boundary, startup scan
-  and Grid rendering, Photo View, decisions persisted through the real write
-  path, Album management, a responsive surface, the CLI-to-Web flow, and the
-  opt-in real-camera scenario. The suite stays smoke-sized and runs fully
-  parallel; it is not the home of behavior or race regression, and
-  [`CONTRIBUTING.md`](../../CONTRIBUTING.md#browser-suite-policy) owns that rule;
-- presentational and browser-real rules keep required coverage wherever they
-  live. A behavior domain leaves the browser suite only when it keeps
-  required coverage with an explicit owner and destination: a page-model unit
-  assertion, a dedicated slower suite, or the open Issue that owns the work
-  until one of those exists. Until
-  issue [#410](https://github.com/suraciii/slipstream/issues/410) closes, the
-  Zoom, Dock, and Rating Wheel interaction rules, pointer and gesture state,
-  Grid geometry and focus movement, filmstrip presentation, viewport and
-  200%-text space budgets, browser history/bfcache/pagehide semantics,
-  40,000-Photo in-browser boundedness, and the rendered-DOM halves of the
-  recovery and windowing families have no executing coverage; they remain
-  required coverage, and #410 owns restoring each of them;
-- mobile Photo View checks prove Quick Action Dock and Photo tools focus,
-  safe-area, and ownership behavior, and Rating Wheel checks prove the
-  450-millisecond hold, 12 CSS-pixel handoff, release-only mutation, explicit
-  fallback, cancellation, and stale-settlement rules — as unit tests of the
-  extracted interaction module once it exists, and through issue
-  [#410](https://github.com/suraciii/slipstream/issues/410)'s dedicated
-  slower suite until then;
-- the complete repository verification gate passes with nonzero test discovery;
-  and
-- an independent read-only review checks FSD placement, dependency direction,
-  public APIs, obsolete paths, and accidental behavioral changes before merge.
+Architecture transitions MUST update all consumers and remove obsolete modules, import paths, and re-exports.

@@ -1,0 +1,764 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Slipstream CLI target result shapes — results-query",
+  "description": "Target CLI output data shapes, not an assertion that current runtime carriers implement them. Definitions are selected by command. Operation and cross-field semantics remain in the CLI reference.",
+  "$defs": {
+    "ScanStatus": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "enum": [
+            "initializing",
+            "discovering",
+            "inspecting",
+            "recovering",
+            "applying",
+            "idle",
+            "failed"
+          ]
+        },
+        "updatedAt": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "publication": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "completed": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "total": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "updatedMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "lastRecovery": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "relocatedPhotos": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "fingerprintedOriginals": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "unavailablePhotos": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "relocatedPhotos",
+                "fingerprintedOriginals",
+                "unavailablePhotos"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fingerprints": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "enrolled": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "pending": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": ["enrolled", "pending"]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "state",
+        "updatedAt",
+        "publication",
+        "completed",
+        "total",
+        "updatedMs",
+        "lastRecovery",
+        "fingerprints"
+      ]
+    },
+    "StatusData": {
+      "type": "object",
+      "properties": {
+        "clientVersion": {
+          "type": "string"
+        },
+        "serverVersion": {
+          "type": "string"
+        },
+        "cliContractVersion": {
+          "type": "integer",
+          "const": 2
+        },
+        "published": {
+          "type": "boolean"
+        },
+        "publication": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "photoCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "scan": {
+          "$ref": "#/$defs/ScanStatus"
+        }
+      },
+      "required": [
+        "clientVersion",
+        "serverVersion",
+        "cliContractVersion",
+        "published",
+        "publication",
+        "photoCount",
+        "scan"
+      ]
+    },
+    "LibraryCheckData": {
+      "type": "object",
+      "properties": {
+        "scan": {
+          "$ref": "#/$defs/ScanStatus"
+        }
+      },
+      "required": ["scan"],
+      "additionalProperties": false
+    },
+    "AlbumSummary": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string"
+        },
+        "photoCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "hasSavedPosition": {
+          "type": "boolean"
+        },
+        "albumVersion": {
+          "type": "string",
+          "minLength": 1
+        },
+        "webUrl": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https?://"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "photoCount",
+        "hasSavedPosition",
+        "albumVersion",
+        "webUrl"
+      ]
+    },
+    "MissingItem": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "state": {
+          "const": "missing"
+        }
+      },
+      "required": ["id", "state"],
+      "additionalProperties": false
+    },
+    "FolderItem": {
+      "type": "object",
+      "properties": {
+        "location": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "photoCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "hasDescendantFolders": {
+          "type": "boolean"
+        }
+      },
+      "required": ["location", "name", "photoCount", "hasDescendantFolders"]
+    },
+    "FolderListData": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FolderItem"
+          }
+        },
+        "total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "nextCursor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evaluatedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "expiresAt": {
+          "type": "null"
+        },
+        "publication": {
+          "type": "string"
+        },
+        "parent": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "items",
+        "total",
+        "nextCursor",
+        "evaluatedAt",
+        "expiresAt",
+        "publication",
+        "parent"
+      ]
+    },
+    "AlbumListData": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/AlbumSummary"
+              },
+              {
+                "$ref": "#/$defs/MissingItem"
+              }
+            ]
+          }
+        },
+        "total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "nextCursor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evaluatedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "expiresAt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": ["items", "total", "nextCursor", "evaluatedAt", "expiresAt"],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "nextCursor": {
+                "type": "null"
+              }
+            },
+            "required": ["nextCursor"]
+          },
+          "then": {
+            "properties": {
+              "expiresAt": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "expiresAt": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "PreviewFacts": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "enum": ["inspection-pending", "ready", "failed", "unavailable"]
+        },
+        "source": {
+          "anyOf": [
+            {
+              "enum": ["jpeg-original", "raw-embedded-jpeg"]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sourceRevision": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "width": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "height": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "detailLimited": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "state",
+        "source",
+        "sourceRevision",
+        "width",
+        "height",
+        "detailLimited"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "ready"
+              }
+            },
+            "required": ["state"]
+          },
+          "then": {
+            "properties": {
+              "source": {
+                "enum": ["jpeg-original", "raw-embedded-jpeg"]
+              },
+              "sourceRevision": {
+                "type": "string",
+                "minLength": 1
+              },
+              "width": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "height": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "detailLimited": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "PhotoItem": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "filename": {
+          "type": "string"
+        },
+        "originalId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "location": {
+          "type": "string"
+        },
+        "originalKind": {
+          "enum": ["raw", "jpeg"]
+        },
+        "originalAvailable": {
+          "type": "boolean"
+        },
+        "selectionState": {
+          "enum": ["unflagged", "picked", "rejected"]
+        },
+        "rating": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5
+        },
+        "decisionVersion": {
+          "type": "string",
+          "minLength": 1
+        },
+        "removedAtMs": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "captureTime": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "preview": {
+          "$ref": "#/$defs/PreviewFacts"
+        },
+        "webUrl": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https?://"
+        }
+      },
+      "required": [
+        "id",
+        "filename",
+        "originalId",
+        "location",
+        "originalKind",
+        "originalAvailable",
+        "selectionState",
+        "rating",
+        "decisionVersion",
+        "removedAtMs",
+        "captureTime",
+        "preview",
+        "webUrl"
+      ]
+    },
+    "PhotoListData": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/PhotoItem"
+              },
+              {
+                "$ref": "#/$defs/MissingItem"
+              }
+            ]
+          }
+        },
+        "total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "nextCursor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evaluatedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "expiresAt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": ["items", "total", "nextCursor", "evaluatedAt", "expiresAt"],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "nextCursor": {
+                "type": "null"
+              }
+            },
+            "required": ["nextCursor"]
+          },
+          "then": {
+            "properties": {
+              "expiresAt": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "expiresAt": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "PhotoMetadata": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "enum": ["pending", "known", "missing", "invalid", "failed"]
+        },
+        "captureTime": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "aperture": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "shutterSpeed": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "focalLength": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "iso": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "state",
+        "captureTime",
+        "aperture",
+        "shutterSpeed",
+        "focalLength",
+        "iso"
+      ]
+    },
+    "PhotoGetData": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/PhotoItem"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "metadata": {
+              "$ref": "#/$defs/PhotoMetadata"
+            }
+          },
+          "required": ["metadata"]
+        }
+      ]
+    },
+    "PreviewDownloadData": {
+      "type": "object",
+      "properties": {
+        "photoId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "path": {
+          "type": "string"
+        },
+        "source": {
+          "enum": ["jpeg-original", "raw-embedded-jpeg"]
+        },
+        "sourceRevision": {
+          "type": "string",
+          "minLength": 1
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "detailLimited": {
+          "type": "boolean"
+        },
+        "webUrl": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https?://"
+        },
+        "fileCommitted": {
+          "const": true
+        }
+      },
+      "required": [
+        "photoId",
+        "path",
+        "source",
+        "sourceRevision",
+        "width",
+        "height",
+        "detailLimited",
+        "webUrl",
+        "fileCommitted"
+      ]
+    }
+  }
+}

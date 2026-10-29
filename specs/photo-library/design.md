@@ -1,36 +1,52 @@
 # Physical File Locations and Virtual Albums
 
-Slipstream must expose the Photographer's existing directory organization without implying that ordinary product actions manage Original Files. It must also provide a virtual grouping model whose membership can cross directories. The two axes may share display names but must not share ownership, identity, lifecycle, or mutation semantics.
+Slipstream MUST expose the Photographer's existing directory organization without implying that ordinary product actions manage Original Files.
+
+It MUST also provide a virtual grouping model whose membership can cross directories.
+
+The two axes MAY share display names but MUST NOT share ownership, identity, lifecycle, or mutation semantics.
 
 [Photo Library and Albums](spec.md) owns product behavior. [Library Identity](identity.md) owns stable identity and Library Folder expansion. [Capture-Time Ordering](ordering.md) owns source ordering and its metadata authority.
 
-## Design Drivers
+The filesystem owns Original Files and physical directories; SQLite owns virtual organization and user state.
 
-- The filesystem owns Original Files and their physical directories.
-- SQLite owns virtual organization and user state.
-- Original Files remain descriptor-confined and read-only.
-- One Photo represents one independently managed Original File.
-- A Photo may belong to multiple virtual groups without copying bytes.
-- A Library may contain tens of thousands of Photos and directories.
-- No browser route may materialize a complete Library, complete Album membership, or complete Folder tree without a bound.
-- Ordinary rescan restores a moved Original only from exact content-fingerprint evidence and never transfers state by another heuristic.
-- The current need does not justify Folder persistence, Album hierarchy, rule-defined membership, or general asset management.
+Folder navigation and source loading MUST remain bounded for Libraries containing tens of thousands of Photos and directories.
+
+Foreground source and current-Photo work MUST take priority over cancelable Folder, thumbnail, and Preview background work.
 
 ## Model
 
 ### Original Folder
 
-An Original Folder is the admitted Library Folder itself or one of its real descendant filesystem directories. Descendant Folders are derived from the parent components of known Original Locations. The Library Folder owns confinement and discovery; an Original Folder owns no identity or user state.
+[Original Folders](../../CONTEXT.md#library) are derived from parent components of known Original Locations.
 
-The Library Folder always participates as the root File Location and is presented with the product label `Library Folder`, not its absolute server path. Other directories participate only when represented by at least one known Original Location. A remembered unavailable Original keeps its last known Location and therefore keeps its Folder projection. Other empty directories and directories containing no supported known Original do not become product objects.
+An Original Folder owns no identity or user state.
 
-An Original Folder path is a mutable Location, not identity. The root uses one explicit empty relative Folder Location. A descendant uses normalized valid UTF-8 components relative to the Library Folder. It never contains an absolute host path, `.` or `..`, an empty descendant component, or a NUL byte.
+The Library Folder always participates as the root File Location and is presented with the product label `Library Folder`, not its absolute server path.
+
+Other directories participate only when represented by at least one known Original Location.
+
+A remembered unavailable Original keeps its last known Location and therefore keeps its Folder projection.
+
+Other empty directories and directories containing no supported known Original do not become product objects.
+
+An Original Folder path is a mutable Location, not identity.
+
+The root uses one explicit empty relative Folder Location.
+
+A descendant uses normalized valid UTF-8 components relative to the Library Folder.
+
+It never contains an absolute host path, `.` or `..`, an empty descendant component, or a NUL byte.
 
 ### Photo Folder Projection
 
-A Photo projects to one Original Folder through its own Original Location. Independent Photos that share a directory or base name project separately, so each Photo is counted once.
+A Photo projects to one Original Folder through its own Original Location.
 
-A Folder source contains every Photo whose projected Folder equals the selected Folder or has it as a component-aware ancestor. Prefix text alone is insufficient: `a` is not an ancestor of `ab`.
+Independent Photos that share a directory or base name project separately, so each Photo is counted once.
+
+A Folder source contains every Photo whose projected Folder equals the selected Folder or has it as a component-aware ancestor.
+
+Prefix text alone is insufficient: `a` is not an ancestor of `ab`.
 
 ### Album
 
@@ -42,9 +58,15 @@ An Album is a Photographer-owned virtual group with:
 - explicitly positioned Photo memberships; and
 - optional saved Photo position.
 
-An Album may be empty. One Photo may belong to multiple Albums. Album membership refers to stable Photo IDs and does not own Selection State, Rating, Preview facts, Original Locations, or Original Files.
+An Album MAY be empty.
 
-Deleting an Album deletes its memberships and saved position. It does not delete or modify a Photo, Original File, Original Folder, Selection State, Rating, or Preview fact.
+One Photo MAY belong to multiple Albums.
+
+Album membership refers to stable Photo IDs and does not own Selection State, Rating, Preview facts, Original Locations, or Original Files.
+
+Deleting an Album deletes its memberships and saved position.
+
+It does not delete or modify a Photo, Original File, Original Folder, Selection State, Rating, or Preview fact.
 
 ### Library Browser Source
 
@@ -54,281 +76,298 @@ The Library Browser opens one of three source kinds:
 - `Original Folder`: one recursive Folder subtree filtered from that same order; or
 - `Album`: one persisted explicit membership order.
 
-`All Photos` is a system source, not an Album. Original Folder and `All Photos` positions remain browser-local. Album saved position remains durable.
+`All Photos` is a system source, not an Album.
 
-An open source copies one immutable ordered Photo-ID sequence into the existing hidden Browse Snapshot boundary. A later publication may change File Location navigation and newly opened sources, but it cannot insert, remove, or reorder an existing Browse Snapshot.
+Original Folder and `All Photos` positions remain browser-local.
+
+Album saved position remains durable.
+
+An open source copies one immutable ordered Photo-ID sequence into the existing hidden Browse Snapshot boundary.
+
+A later publication MAY change File Location navigation and newly opened sources, but it cannot insert, remove, or reorder an existing Browse Snapshot.
 
 ## Semantics
 
 ### File Location Navigation
 
-File Location navigation reads one Published Library generation. It returns bounded windows of direct child Folders for one parent Folder. Each item exposes only:
+File Location navigation reads one Published Library generation.
+
+It returns bounded windows of direct child Folders for one parent Folder.
+
+Each item exposes only:
 
 - relative Folder Location;
 - display name;
 - recursive Photo count; and
 - whether known descendant Folders exist.
 
-A response also reports its parent, requested range, total direct-child count, and one opaque publication value. The first request may omit publication and binds to the current Published Library. Every retained later window and Folder-source open supplies that exact value. The server enforces a small maximum window. No Overview or File Location route returns every Folder or every Photo in a Folder subtree.
+A response also reports its parent, requested range, total direct-child count, and one opaque publication value.
 
-Direct-child Folder ordering uses relative Folder component bytes after UTF-8 validation. Folder count counts Photos, not Original Files, and counts each Photo once.
+The first request MAY omit publication and binds to the current Published Library.
 
-When a rescan replaces the current publication, a request carrying the old value fails as expired. The browser discards the old File Location tree and reloads one current publication instead of combining pages from different generations. The server need not retain an old complete Folder tree or create a second durable snapshot. Opening an Original Folder immediately creates a stable Browse Snapshot from the validated current publication.
+Every retained later window and Folder-source open supplies that exact value.
+
+The server enforces a small maximum window.
+
+No Overview or File Location route returns every Folder or every Photo in a Folder subtree.
+
+Direct-child Folder ordering uses relative Folder component bytes after UTF-8 validation.
+
+Folder count counts Photos, not Original Files, and counts each Photo once.
+
+When a rescan replaces the current publication, a request carrying the old value fails as expired.
+
+The browser discards the old File Location tree and reloads one current publication instead of combining pages from different generations.
+
+The server need not retain an old complete Folder tree or create a second durable snapshot.
+
+Opening an Original Folder immediately creates a stable Browse Snapshot from the validated current publication.
 
 ### Folder Source Opening
 
-The client submits one validated relative Original Folder Location, including the explicit empty value for the Library Folder root, together with the publication value that produced the navigation item. The server rejects an expired publication and an absolute, malformed, unknown, or non-directory projection. It does not reinterpret a stale Folder against a newer publication or open an arbitrary filesystem path supplied by the client.
+The client submits one validated relative Original Folder Location, including the explicit empty value for the Library Folder root, together with the publication value that produced the navigation item.
 
-The server filters the Published Library's ordered Photos by component-aware Folder ancestry and stores only their Photo IDs in the existing bounded-lifecycle Browse Snapshot. Window traversal, Preview hydration, expiration, reconnect, cancellation, and current-fact refresh use the existing browsing contracts.
+The server rejects an expired publication and an absolute, malformed, unknown, or non-directory projection.
 
-A completed rescan may add or remove Folder nodes and may change newly opened Folder membership. An already open Folder source keeps its copied ID order. A rescan restores a moved Original File only when one persisted Content Fingerprint identifies exactly one unclaimed same-kind candidate; otherwise the prior Photo remains unavailable at its remembered Folder and a file discovered at a new Location receives a new identity.
+It does not reinterpret a stale Folder against a newer publication or open an arbitrary filesystem path supplied by the client.
+
+The server filters the Published Library's ordered Photos by component-aware Folder ancestry and stores only their Photo IDs in the existing bounded-lifecycle Browse Snapshot.
+
+Window traversal, Preview hydration, expiration, reconnect, cancellation, and current-fact refresh use the existing browsing contracts.
+
+A completed rescan MAY add or remove Folder nodes and MAY change newly opened Folder membership.
+
+An already open Folder source keeps its copied ID order.
+
+A rescan restores a moved Original File only when one persisted Content Fingerprint identifies exactly one unclaimed same-kind candidate. Otherwise the prior Photo remains unavailable at its remembered Folder, and a file discovered at a new Location receives a new identity.
 
 ### Location Recovery Application
 
-Automatic Location Recovery runs inside the scan application, before any new Original or Photo is allocated. Manual Location Recovery reuses the same rules from an explicit Photographer-approved batch.
+Automatic Location Recovery runs inside the scan application, before any new Original or Photo is allocated.
 
-A recovery batch runs in one `BEGIN IMMEDIATE` transaction. Before writing, it revalidates every remembered Original File, its kind, and its destination Location against current state. It assigns affected Original associations through temporary unique Location values, so known associations may exchange Locations without violating the unique Location constraint; it never moves the filesystem files. A batch is all-or-nothing: a stale, colliding, or occupied destination without a permitted Retire and Bind rejects the whole batch with per-mapping reasons and no partial association.
+Manual Location Recovery reuses the same rules from an explicit Photographer-approved batch.
 
-A destination Location may already belong to a Photo discovered by an earlier scan. Retire and Bind is allowed only when that destination Photo is otherwise unreferenced: it has default decisions, no Album membership, no Trash removal, and no retained workspace state, Edit Recipe, or referenced Processing Artifact. The eligibility check reads the authoritative workspace and processing records at proposal and commit, not only a scan-time summary. The transaction removes exactly that record before binding the recovered Original. It must not delete a filesystem file. When the destination Photo has independent user state, a retained development reference, or a removal, the transaction preserves both records and reports the conflict.
+A recovery batch runs in one `BEGIN IMMEDIATE` transaction.
 
-A moving record must be an active Photo of the Library. Location Recovery never restores a Photo from Trash and never reverses Trash Record Cleanup; a removed record keeps its own restore contract. A file discovered after cleanup first follows normal Location Recovery for other retained identities; only an unclaimed file receives a new identity. Neither case recovers the cleaned-up Photo's identity or state.
+Before writing, it revalidates every remembered Original File, its kind, and its destination Location against current state.
 
-A relocation resets the affected Original's derived Capture Time facts to `pending` and invalidates location-derived Preview facts. Selection State, Rating, Album membership and order, and saved Album positions remain unchanged.
+It assigns affected Original associations through temporary unique Location values, so known associations MAY exchange Locations without violating the unique Location constraint; it never moves the filesystem files.
+
+A batch is all-or-nothing: a stale, colliding, or occupied destination without a permitted Retire and Bind rejects the whole batch with per-mapping reasons and no partial association.
+
+A destination Location MAY already belong to a Photo discovered by an earlier scan.
+
+Retire and Bind is allowed only when that destination Photo is otherwise unreferenced: it has default decisions, no Album membership, no Trash removal, and no retained workspace state, Edit Recipe, or referenced Processing Artifact.
+
+The eligibility check reads the authoritative workspace and processing records at proposal and commit, not only a scan-time summary.
+
+The transaction removes exactly that record before binding the recovered Original.
+
+It MUST NOT delete a filesystem file.
+
+When the destination Photo has independent user state, a retained development reference, or a removal, the transaction preserves both records and reports the conflict.
+
+A moving record MUST be an active Photo of the Library.
+
+Location Recovery never restores a Photo from Trash and never reverses Trash Record Cleanup; a removed record keeps its own restore contract.
+
+A file discovered after cleanup first follows normal Location Recovery for other retained identities; only an unclaimed file receives a new identity.
+
+Neither case recovers the cleaned-up Photo's identity or state.
+
+A relocation resets the affected Original's derived Capture Time facts to `pending` and invalidates location-derived Preview facts.
+
+Selection State, Rating, Album membership and order, and saved Album positions remain unchanged.
 
 ### Reviewed Location Recovery Access
 
-Web and CLI share one review-and-confirm protocol over the same rules. A Photographer may review a correspondence directly or delegate preparation and application of explicitly authorized mappings to an external Agent. Neither client owns eligibility, evidence, or outcome rules of its own, and delegated use never requires browser automation or the server database.
+Web and CLI share one review-and-confirm protocol over the same rules.
 
-Unavailable Photos are inspected through bounded reviews. Opening a review evaluates the current set of active unavailable Photos once and retains the ordered Original IDs with their Photo IDs. Later pages resolve current facts for the retained identities, so a recovered, newly unavailable, or removed Photo cannot silently shift another item out of its reviewed position. A review reports its evaluated total, evaluation time, and continuation. A continuation expires after the advertised idle period and then fails explicitly instead of returning a different set.
+A Photographer MAY review a correspondence directly or delegate preparation and application of explicitly authorized mappings to an external Agent.
 
-A proposal is read-only. It evaluates one correspondence per unavailable Original: a remembered Location under one Folder prefix mapped onto another prefix with the same suffix, or one remembered Original File mapped onto one Location. Every evaluated mapping carries an opaque reviewed mapping identity. That identity is a deterministic function of the reviewed facts: Original File and Photo identity, remembered and proposed Location, kind, content evidence, the observed destination revision, the identified destination Photo a Retire and Bind may replace, and any reason that blocks the mapping. Equal facts produce an equal identity, so no durable proposal record is required: a reviewed mapping stays confirmable across a service restart and loses validity when any reviewed fact changes.
+Neither client owns eligibility, evidence, or outcome rules of its own, and delegated use never requires browser automation or the server database.
 
-Confirmation names the reviewed mapping identity of every submitted mapping. Apply recomputes each mapping from current facts and refuses the complete submitted batch when a recomputed identity differs from the submitted one. This single rule binds confirmation to the reviewed Original, Location, content evidence, and destination revision, and it prevents a retired permission from transferring to a different Photo that later occupies the same Location.
+Unavailable Photos are inspected through bounded reviews.
 
-A destination that holds no readable file has no content evidence. Its reviewed revision is the observed destination state, and the corresponding confirmation must explicitly acknowledge that historical content cannot be verified. A destination that changes after review refuses the mapping instead of inheriting that acknowledgement. A missing, unreadable, wrong-kind, or content-mismatched destination is never an acceptable unverified match.
+Opening a review evaluates the current set of active unavailable Photos once and retains the ordered Original IDs with their Photo IDs.
 
-Retire and Bind requires one explicit choice for the identified destination Photo. The request names that Photo, and apply refuses an absent or different occupant even when the mapping identity matches. A destination Photo with independent decisions, Album membership, saved Edit Recipe, retained workspace state, referenced Processing Artifacts, or a Trash removal is never disposable, and its conflict is reported instead of resolved.
+Later pages resolve current facts for the retained identities, so a recovered, newly unavailable, or removed Photo cannot silently shift another item out of its reviewed position.
 
-A Folder-prefix proposal reports its complete evaluated scope. A scope larger than the advertised mapping bound is refused before any continuation is issued instead of being truncated to one page or one apply operation. Apply accepts only the explicit confirmed mappings of one request and commits them atomically; separate requests are separate commits, and a later refusal never rolls back an earlier committed batch.
+A review reports its evaluated total, evaluation time, and continuation.
 
-A lost apply response leaves the outcome unknown. The caller inspects the same Photo identities and compares current Location and availability; current state is not evidence of which attempt changed it. New work requires a fresh proposal and confirmation, and no client replays an unconfirmed request.
+A continuation expires after the advertised idle period and then fails explicitly instead of returning a different set.
+
+A proposal is read-only.
+
+It evaluates one correspondence per unavailable Original: a remembered Location under one Folder prefix mapped onto another prefix with the same suffix, or one remembered Original File mapped onto one Location.
+
+Every evaluated mapping carries an opaque reviewed mapping identity.
+
+The reviewed mapping identity is a deterministic function of:
+
+- Original File and Photo identity;
+- remembered and proposed Locations;
+- kind and content evidence;
+- observed destination revision;
+- the destination Photo that Retire and Bind MAY replace; and
+- any reason that blocks the mapping.
+
+Equal facts produce an equal identity, so no durable proposal record is required: a reviewed mapping stays confirmable across a service restart and loses validity when any reviewed fact changes.
+
+Confirmation names the reviewed mapping identity of every submitted mapping.
+
+Apply recomputes each mapping from current facts and refuses the complete submitted batch when a recomputed identity differs from the submitted one.
+
+This single rule binds confirmation to the reviewed Original, Location, content evidence, and destination revision, and it prevents a retired permission from transferring to a different Photo that later occupies the same Location.
+
+When an unavailable Original has no persisted fingerprint, its historical content cannot be verified against the destination. Confirmation MUST explicitly acknowledge that limitation.
+
+The reviewed destination revision is its observed state. A destination that changes after review MUST refuse the mapping instead of inheriting that acknowledgement.
+
+A missing, unreadable, wrong-kind, or content-mismatched destination MUST NOT be accepted as an unverified match.
+
+Retire and Bind requires one explicit choice for the identified destination Photo.
+
+The request names that Photo, and apply refuses an absent or different occupant even when the mapping identity matches.
+
+A destination Photo with independent decisions, Album membership, saved Edit Recipe, retained workspace state, referenced Processing Artifacts, or a Trash removal is never disposable, and its conflict is reported instead of resolved.
+
+A Folder-prefix proposal reports its complete evaluated scope.
+
+A scope larger than the advertised mapping bound is refused before any continuation is issued instead of being truncated to one page or one apply operation.
+
+Apply accepts only the explicit confirmed mappings of one request and commits them atomically; separate requests are separate commits, and a later refusal never rolls back an earlier committed batch.
+
+A lost apply response leaves the outcome unknown.
+
+The caller inspects the same Photo identities and compares current Location and availability; current state is not evidence of which attempt changed it.
+
+New work requires a fresh proposal and confirmation, and no client replays an unconfirmed request.
 
 ### Fingerprint Persistence
 
-The state store persists one Content Fingerprint per Original File: a SHA-256 digest with the size and modification time observed while hashing. The digest is recovery evidence, not a unique key, and independent Originals may share one.
-
-Fingerprint enrollment runs after the structural migration and after every scan as bounded background work. It never holds a migration or scan transaction open. A fingerprint whose observed size or modification time no longer matches the discovered revision is dropped. Hash reads use the existing confined read-only descriptor and verify revision stability before and after hashing. An Original File larger than 4 GiB keeps no fingerprint and therefore no automatic recovery evidence.
+[Content Fingerprints](../../CONTEXT.md#library) are revision-bound recovery evidence, not unique keys. [Photo Library Identity](identity.md#content-fingerprint) owns persistence and enrollment.
 
 ### Album Mutations
 
 Album create, rename, delete, membership, reorder, and saved-position mutations run through the existing single SQLite owner and admitted `BEGIN IMMEDIATE` boundary.
 
-New members append in supplied order. Adding an existing member is an idempotent product action and must not create a duplicate row or position. Removing one member compacts later positions while preserving relative order. Only explicit reorder changes existing relative positions.
+New members append in supplied order.
 
-A bounded batch membership result identifies `addedPhotoIds` and
-`alreadyMemberPhotoIds` in request order:
+Adding an existing member is an idempotent product action and MUST NOT create a duplicate row or position.
 
-```json
-{
-  "albumId": "album-1",
-  "addedPhotoIds": ["photo-1"],
-  "alreadyMemberPhotoIds": ["photo-2"],
-  "albums": [
-    {
-      "id": "album-1",
-      "name": "Review",
-      "photoCount": 2,
-      "hasSavedPosition": false
-    }
-  ]
-}
-```
+Removing one member compacts later positions while preserving relative order.
 
-The browser may retain the returned `addedPhotoIds` as a page-level
-compensation record. The dedicated bounded command
-`POST /api/albums/{albumId}/members/batch-remove` accepts only that record,
-removes the listed members that are still present, and reports
-`removedPhotoIds` and `alreadyAbsentPhotoIds`:
+Only explicit reorder changes existing relative positions.
 
-```json
-{
-  "albumId": "album-1",
-  "removedPhotoIds": ["photo-1"],
-  "alreadyAbsentPhotoIds": ["photo-2"],
-  "albums": [
-    {
-      "id": "album-1",
-      "name": "Review",
-      "photoCount": 1,
-      "hasSavedPosition": false
-    }
-  ]
-}
-```
+A bounded batch membership result MUST identify `addedPhotoIds` and `alreadyMemberPhotoIds` in request order.
 
-It is idempotent for retries, never removes an ID that was reported as already
-a member, and is not part of global Selection State Undo. The browser expires
-the record on source change, a new membership operation, target Album deletion,
-page teardown, page reload, or application teardown. Removing the saved Photo
-updates the Album's saved position through the existing removal-compaction rule.
+The browser MAY retain `addedPhotoIds` as a page-level compensation record.
 
-The browser may update presentation after confirmation. It must not abort an
+`POST /api/albums/{albumId}/members/batch-remove` accepts only that record.
+
+It removes listed members still present and reports `removedPhotoIds` and `alreadyAbsentPhotoIds`.
+
+Compensation MUST be idempotent for retries and MUST NOT remove an ID reported as already a member.
+
+It is not part of global Selection State Undo.
+
+The browser MUST expire the compensation record on source change, a new membership operation, target Album deletion, page teardown, page reload, or application teardown.
+
+Removing the saved Photo updates the Album's saved position through the removal-compaction rule.
+
+The browser MAY update presentation after confirmation.
+
+It MUST NOT abort an
 admitted Album or Photo-state persistence operation solely because the current
-source or Photo changes. UI continuation still belongs to the generation that
-initiated it and cannot overwrite a newer current source or error. A late
+source or Photo changes.
+
+UI continuation still belongs to the generation that
+initiated it and cannot overwrite a newer current source or error.
+
+A late
 compensation result is applied only while its page-level record and Album
 source remain current.
 
 ### Folder-to-Album Add
 
 The Folder source owns the input set for an explicit bulk membership action.
+
 The browser supplies the validated relative Folder Location and the exact
-Published Library value used to open that source. The server resolves the
+Published Library value used to open that source.
+
+The server resolves the
 Folder recursively from that publication and appends the resulting ordered
-Photo IDs in one SQLite transaction. The browser never materializes or sends
+Photo IDs in one SQLite transaction.
+
+The browser never materializes or sends
 the complete Folder membership list.
 
-The operation is bounded at 100,000 Photos. It validates the Album, every
+The operation is bounded at 100,000 Photos.
+
+It validates the Album, every
 resolved Photo identity, and the publication before committing any membership.
-Existing members are skipped without changing their positions. The operation
-returns matched, added, and already-member counts. An expired publication,
+
+Existing members are skipped without changing their positions.
+
+The operation
+returns matched, added, and already-member counts.
+
+An expired publication,
 unknown Folder, unknown Album, or limit violation fails without changing Album
-membership. A successful operation does not bind the Album to the Folder;
+membership.
+
+A successful operation does not bind the Album to the Folder;
 later scans do not add future Photos automatically.
 
 ### Empty Albums
 
-An empty Album remains a valid source with total count zero and position zero. The Web application must not disable it. Opening it creates an ordinary empty Browse Snapshot and displays a usable empty Grid with Album management controls.
+An empty Album remains a valid source with total count zero and position zero.
+
+The Web application MUST NOT disable it.
+
+Opening it creates an ordinary empty Browse Snapshot and displays a usable empty Grid with Album management controls.
 
 ### Persistence Migration
 
-The v5-to-v6 migration establishes the independent-Photo baseline. SQLite schema version 6 stores exactly one `original_id` (`TEXT NOT NULL UNIQUE`) on each Photo row and adds the `original_fingerprints` table keyed by Original File ID. It replaces the v5 paired-Photo columns and the retired Preview Source names.
+SQLite schema version 6 stores exactly one `original_id` (`TEXT NOT NULL UNIQUE`) on each Photo row and adds `original_fingerprints` keyed by Original File ID. It replaces the v5 paired-Photo columns and retired Preview Source names.
 
-The admitted v5-to-v6 migration runs in one `BEGIN IMMEDIATE` transaction and preserves:
+The admitted v5-to-v6 migration runs in one `BEGIN IMMEDIATE` transaction. [Identity and expansion](identity.md#persistence-and-cache-semantics) owns its preservation, Preview, enrollment, and rollback rules.
 
-- every Album ID, name, and creation order, the admitted Library Folder binding, every membership position and saved Photo, Selection State, Rating, Preview, and Capture Time fact;
-- every singleton and remembered unavailable Photo ID, Original File ID, user state value, and membership;
-- the legacy Photo ID and every user state reference on the RAW Original of a legacy pair, even when that RAW is unavailable;
-- the JPEG Original File ID of a legacy pair, which receives a new independent Photo ID with default decisions and no inherited Album memberships; and
-- every remembered unavailable record.
+Legacy `Photo Set` names remain only in immutable v2-v4 compatibility fixtures and the v4-to-v5 migration reader.
 
-A Preview survives the migration only when its legacy source matches the kept Original's kind and its revision matches current facts. A sibling-JPEG-derived Preview for a kept RAW is invalidated. Fingerprint enrollment starts after the migration transaction commits and never holds it open.
+Legacy paired-Photo values and the old Preview Source names remain only in immutable v5 fixtures and the v5-to-v6 migration reader.
 
-The later migrations extend the writable state through schema version 15. Older binaries reject v6 as newer state. Rollback restores the verified pre-migration backup and compatible image. There is no in-place down migration.
+Active Rust, protocol, Web, tests, and documentation use Album language and independent-Photo language.
 
-Legacy `Photo Set` names remain only in immutable v2-v4 compatibility fixtures and the v4-to-v5 migration reader. Legacy paired-Photo values and the old Preview Source names remain only in immutable v5 fixtures and the v5-to-v6 migration reader. Active Rust, protocol, Web, tests, and documentation use Album language and independent-Photo language. Legacy HTTP routes and browse-source values return `404` or validation failure rather than becoming indefinite aliases.
+Legacy HTTP routes and browse-source values return `404` or validation failure rather than becoming indefinite aliases.
 
 ### Presentation
 
-Wide and narrow navigation both use separate `Folders` and `Albums` sections. `Folders` is the UI label for the File Location source defined by this document. A same-name Folder and Album remain distinguishable by section and current-source labeling. Folder sources identify that they include subfolders. Album deletion confirmation identifies that Photos and Original Files remain unchanged.
+Wide and narrow navigation both use separate `Folders` and `Albums` sections. `Folders` is the UI label for the File Location source defined by this document.
+
+A same-name Folder and Album remain distinguishable by section and current-source labeling.
+
+Folder sources identify that they include subfolders.
+
+Album deletion confirmation identifies that Photos and Original Files remain unchanged.
 
 The first management surface supports Album create, rename, delete, current-Photo add, current-Album removal, adding the current recursive Folder to an Album, and the Grid's multi-selection for batch Selection State decisions and one batch Album addition. Drag-and-drop, visual bulk reorder, Album covers, sharing, Album Groups, and Smart Albums are not required.
 
 ## Failure Behavior
 
-A malformed or unknown Original Folder source fails without opening a different source or exposing an absolute path. A failed Folder window retains already loaded sibling navigation and identifies its failed range. An expired File Location publication replaces the retained tree with one current publication instead of mixing generations.
+A malformed or unknown Original Folder source fails without opening a different source or exposing an absolute path.
 
-An Album mutation conflict or persistence failure leaves Original Files and unrelated state unchanged. The Web retains a recoverable source and identifies the failed action. It must not report a mutation as complete before confirmation.
+A failed Folder window retains already loaded sibling navigation and identifies its failed range.
 
-A schema migration fails closed before service admission when the source shape is not canonical, a sidecar exists, a transaction fails, or the resulting current-schema shape is not exact. The pre-migration database remains recoverable from the required verified backup.
+An expired File Location publication replaces the retained tree with one current publication instead of mixing generations.
 
-## Options
+An Album mutation conflict or persistence failure leaves Original Files and unrelated state unchanged.
 
-### Selected: Album as the Canonical Virtual Group
+The Web retains a recoverable source and identifies the failed action.
 
-`Album` is familiar product language and directly expresses virtual photo grouping. It avoids implying a favorite state and works for one Photo belonging to multiple groups.
+It MUST NOT report a mutation as complete before confirmation.
 
-### Rejected: Retain Photo Set Internally and Rename Only the UI
+A schema migration fails closed before service admission when the source shape is not canonical, a sidecar exists, a transaction fails, or the resulting current-schema shape is not exact.
 
-This leaves one concept with different product, protocol, persistence, and code names. It amplifies every future change and conflicts with the repository rule against preserving obsolete paths without a required compatibility contract.
-
-### Rejected: Collection or Favorites
-
-`Collection` is specialized Lightroom Classic language, while `Favorites` implies a preference state. Both conflict with Slipstream's Selection State and Rating language.
-
-### Selected: Derive Original Folders from Published Original Locations
-
-The directory hierarchy is filesystem-owned and rebuildable. Deriving it preserves one source of truth, includes remembered unavailable Locations, and avoids migration or synchronization rules for a second Folder model.
-
-### Rejected: Persist Folder Entities and Membership
-
-Persistent Folder IDs, parent rows, membership rows, rename reconciliation, and empty-directory lifecycle would duplicate filesystem facts and introduce an asset-management model without a current requirement.
-
-### Selected: Recursive Folder Sources
-
-A Photographer opening a shoot directory normally expects Photos in nested camera or date directories. One fixed recursive rule is visible and predictable.
-
-### Rejected: Direct Children Only or a Persistent Include-Subfolders Toggle
-
-Direct-only sources make common project directories appear empty. A toggle adds hidden state that changes counts, order, navigation, and resume behavior without solving a demonstrated workflow.
-
-### Selected: Bounded Direct-Child Folder Windows
-
-This keeps transfer and retained navigation proportional to the visible tree while preserving ordinary hierarchical exploration.
-
-### Rejected: Complete Folder Tree in Library Overview
-
-Folder count grows with Library layout. Returning the complete tree would make startup transfer and browser memory Library-size dependent and would recreate the unbounded protocol shape already retired for Photos.
-
-### Selected: Confirmation Bound to Reviewed Facts
-
-One opaque identity derived from the reviewed facts ties a confirmation to what
-the caller actually saw: the remembered Original, the proposed Location, the
-content evidence, the observed destination revision, and any destination Photo
-to retire. It needs no durable proposal state, survives a service restart, and
-makes a changed destination revision an explicit refusal instead of a silent
-recovery.
-
-### Rejected: Durable Recovery Operations
-
-A persisted proposal, attempt, or recovery-operation record adds lifecycle,
-expiry, cleanup, and historical-attribution semantics the current product does
-not need. Current-state reconciliation through the same Photo identities is
-sufficient and cheaper to reason about, and it does not promise exactly-once
-history that the product does not provide.
-
-### Selected: Library-Scoped Recovery and Transient Results
-
-Location Recovery stays within the admitted Library Folder and changes only the association owned by Slipstream. Scan status, bounded reviews, and apply results expose current facts without adding an external-file index or a durable recovery ledger. This preserves one Library boundary and keeps recovery reconciliation tied to stable Photo and Original File identities.
-
-### Rejected: External Candidate Search and File Restoration
-
-Searching recycle areas, backups, or unrelated directories would create a second storage boundary and require rules for arbitrary paths, admission, and file ownership. Copying a candidate back into the Library would make Slipstream a filesystem mutation tool and violate Original safety. The Photographer or an operator may restore a file outside Slipstream; a later Library Check can then evaluate it.
-
-### Rejected: Durable Recovery Dashboard
-
-A retained recovery history would add proposal, attempt, expiry, cleanup, and historical-attribution semantics. Current scan status and the reviewed apply result identify committed effects without another durable state owner.
-
-### Rejected: Boolean Confirmation Alone
-
-A bare retirement boolean cannot prove which destination Photo the caller
-reviewed, and no boolean can detect a destination revision that changed after
-review. Both cases must refuse instead of applying an unreviewed change.
-
-### Rejected: Automatic Folder-to-Album Synchronization
-
-A synchronized object has ambiguous ownership when the filesystem changes and makes Album removal appear to fight rescan. Explicit Album membership keeps physical and virtual organization independent.
-
-## Verification
-
-Verification must prove:
-
-- exact v5-to-v6 migration and rollback preservation, including the RAW-first pair split, independent JPEG defaults, singleton and unavailable records, and invalidated sibling-derived Previews;
-- exact v4-to-v5 and v3-to-v4 migration and rollback preservation;
-- a recovery batch is atomic, revalidates at commit using authoritative workspace and processing records, refuses stale, colliding, or occupied destinations without a permitted Retire and Bind, retires only a destination with default decisions and no Album, Trash, workspace, Edit Recipe, or Processing Artifact references, and never deletes a filesystem file;
-- a reviewed confirmation refuses the complete batch when any recomputed mapping identity differs from the submitted one, when unverifiable content was not explicitly acknowledged, when the named retire Photo is absent or different, when the destination entered Trash, or when the moving Photo is no longer active;
-- unavailable inspection and Folder-prefix proposals page over retained membership with an explicit total and continuation, keep a recovered or removed item in its evaluated position, fail an expired continuation explicitly, and refuse an over-bound prefix scope instead of truncating it;
-- a lost apply response is reported as an unknown outcome whose caller inspects the same Photo identities; current Location and availability are not presented as historical success;
-- a relocation resets Capture Time facts and invalidates location-derived Preview facts while preserving user state;
-- absence of active `Photo Set` names outside legacy migration inputs;
-- Album identity, unique names, empty state, order, saved position, idempotent add, removal compaction, and deletion safety;
-- recursive Folder-to-Album add preserves Folder-source order, is atomic and idempotent, reports counts, and rejects stale publications or over-limit Folders before mutation;
-- empty-Library root, root-level Photos, nested, Unicode, same-prefix, independent RAW and JPEG, remembered unavailable Folder projection;
-- bounded direct-child Folder windows, single-publication pagination, expiration refresh, and rejection of malformed or absolute Locations;
-- no complete Folder tree or complete Folder membership route;
-- Folder source filtering by component-aware ancestry in Capture Time order;
-- stable open Folder and Album Browse Snapshots through rescan;
-- same-name File Location and Album presentation on wide and narrow viewports;
-- bounded browser-retained facts and DOM for a generated Library with at least 40,000 Photos and a large Folder hierarchy;
-- foreground source and current-Photo priority while Folder, thumbnail, and Preview work remains cancelable background work; and
-- unchanged representative Original File hashes before and after migration, browsing, Album mutations, rescan, backup restore, and rollback rehearsal.
+The pre-migration database remains recoverable from the required verified backup.

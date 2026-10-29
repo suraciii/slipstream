@@ -1,46 +1,55 @@
 # Browser Navigation and Responsive Surfaces
 
-The Library Browser needs addressable Grid and Photo destinations without
-creating another owner of source data, Photo mutations, or Browse Snapshots.
-History restoration must remain bounded even when the Library contains tens
-of thousands of Photos. Responsive presentation must not reproduce every
-control in a second mobile tree.
+Addressable Grid and Photo destinations use the existing source, Photo, and Browse Snapshot owners.
 
-[Library Browser Experience](spec.md) owns the
-observable layout and navigation rules. [Web Async Ownership](../../web-application/async-ownership.md)
-owns transport, settlement, recovery, and stale-result policy. This design
-connects those contracts without changing the server's HTTP API.
+History metadata stays bounded independently of Library size.
+
+[Library Browser Experience](spec.md) owns the observable layout and navigation rules.
+
+[Web Async Ownership](../../web-application/async-ownership.md) owns transport, settlement, recovery, and stale-result policy.
+
+This design connects those contracts without changing the server's HTTP API.
 
 ## Model and Ownership
 
-A destination is a validated source reference, view order, filter conditions,
-and optional stable Photo ID. Absence of a Photo ID means Grid. It is
-not a Browse token, Photo array, or saved mutation.
+A destination is a validated source reference, view order, filter conditions, and optional stable Photo ID.
 
-A browser entry has an opaque page-generated identifier and bounded
-restoration metadata. A Grid anchor contains a stable Photo ID, an index hint,
-and a CSS-pixel offset relative to its row. A focus target is a Photo ID or the
-Grid itself. A Photo entry may identify the immediately preceding Grid entry
-that opened it. That relationship is evidence for in-app return, not permission
-to infer history from its length or the referrer.
+Absence of a Photo ID means Grid.
 
-A page-local navigation owner owns URL decoding/encoding, the current browser
-entry, pending destination identity, and history transitions. It reports a
-destination intent to the page controller. It issues no HTTP calls and owns no
-Photo facts or mutable source projection. The controller coordinates existing
-source/Grid and Photo owners and reports a committed or failed transition.
+It is not a Browse token, Photo array, or saved mutation.
 
-The source/Grid owner remains authoritative for source identity, options,
-Snapshot readiness, range loading, and anchor lookup. The Photo owner remains
-authoritative for Photo commitment and mutation settlement. The UI owns
-geometry, focus, panels, and pointer state. Panels emit existing semantic
-intents and never become another API client or persistence coordinator.
+A browser entry has an opaque page-generated identifier and bounded restoration metadata.
+
+A Grid anchor contains a stable Photo ID, an index hint, and a CSS-pixel offset relative to its row.
+
+A focus target is a Photo ID or the Grid itself.
+
+A Photo entry MAY identify the immediately preceding Grid entry that opened it.
+
+That relationship is evidence for in-app return, not permission to infer history from its length or the referrer.
+
+A page-local navigation owner owns URL decoding/encoding, the current browser entry, pending destination identity, and history transitions.
+
+It reports a destination intent to the page controller.
+
+It issues no HTTP calls and owns no Photo facts or mutable source projection.
+
+The controller coordinates existing source/Grid and Photo owners and reports a committed or failed transition.
+
+The source/Grid owner remains authoritative for source identity, options, Snapshot readiness, range loading, and anchor lookup.
+
+The Photo owner remains authoritative for Photo commitment and mutation settlement.
+
+The UI owns geometry, focus, panels, and pointer state.
+
+Panels emit existing semantic intents and never become another API client or persistence coordinator.
 
 ## Browser Address Contract
 
-Addresses use the existing application path `/` and query parameters. The
-server continues to serve the same application document, so copied addresses
-and refresh do not require a new path fallback or a deployment route change.
+Addresses use the existing application path `/` and query parameters.
+
+The server continues to serve the same application document, so copied addresses and refresh do not require a new path fallback or a deployment route change.
+
 The codec uses URL and URLSearchParams, with decoding performed exactly once.
 
 The recognized parameters are:
@@ -61,372 +70,252 @@ The recognized parameters are:
 - `captured-from` and `captured-before`: camera-local
   `YYYY-MM-DDTHH:MM:SS`; omission applies no Capture Time bound.
 
-IDs and Folder Locations must satisfy the existing API validators. A Location
-must remain relative and component-valid; an encoded slash is a separator
-after the single decode, not an escape from containment. Absolute Locations,
-`.` or `..` components, duplicate recognized parameters, empty required IDs,
-an empty value for an optional parameter, and source-incompatible options
-are invalid. An optional filter parameter is additionally invalid when its
-value fails its own fact validation: an out-of-range or inverted Rating range,
-an unknown `kind` or `available` value, or a malformed or reversed Capture
-Time bound. An encoded reserved character
-inside a valid Location must round-trip without double decoding.
+IDs and Folder Locations MUST satisfy the existing API validators.
 
-Unknown query keys are ignored and removed on canonicalization; startup
-canonicalization performs that same single replacement of the current URL.
-Known invalid values produce an invalid-link explanation and the All Photos
-Grid, with one replacement of the current URL. This occurs before any request
-for the invalid source. The encoder omits defaults and emits recognized parameters
-in the order above. It must not place filenames, absolute paths, transient
-publication tokens, arbitrary return URLs, or UI panels in an address.
+A Location MUST remain relative and component-valid; an encoded slash is a separator after the single decode, not an escape from containment.
 
-Examples use illustrative IDs that satisfy the identifier shape:
+Absolute Locations, `.` or `..` components, duplicate recognized parameters, empty required IDs, an empty value for an optional parameter, and source-incompatible options are invalid.
 
-```text literal
-/
-/?source=folder&folderPath=
-/?source=folder&folderPath=RAW%2F26-spring&selection=unflagged
-/?source=album&albumId=00000000-0000-4000-8000-000000000001
-/?source=album&albumId=00000000-0000-4000-8000-000000000001&photoId=00000000-0000-4000-8000-000000000004&order=capture-time-desc
-/?photoId=00000000-0000-4000-8000-000000000009
-/?selection=rejected&rating-min=4&rating-max=5&kind=raw
-/?source=library&available=false&captured-from=2026-01-01T00%3A00%3A00&captured-before=2026-02-01T00%3A00%3A00
-```
+An optional filter parameter is additionally invalid when its value fails its own fact validation: an out-of-range or inverted Rating range, an unknown `kind` or `available` value, or a malformed or reversed Capture Time bound.
 
-These examples define browser addresses, not new HTTP endpoints. Wire values
-remain those of [Scalable Library Browsing](../design.md#source-opening).
-An implementation must test parsing, rejection, canonicalization, and round
-trips from these examples.
+An encoded reserved character inside a valid Location MUST round-trip without double decoding.
+
+Unknown query keys are ignored and removed on canonicalization; startup canonicalization performs that same single replacement of the current URL.
+
+Known invalid values produce an invalid-link explanation and the All Photos Grid, with one replacement of the current URL.
+
+This occurs before any request for the invalid source.
+
+The encoder omits defaults and emits recognized parameters in the order above.
+
+It MUST NOT place filenames, absolute paths, transient publication tokens, arbitrary return URLs, or UI panels in an address.
+
+Addresses define browser destinations, not new HTTP endpoints.
+
+Wire values remain those of [Scalable Library Browsing](../design.md#source-opening).
 
 ## History Mechanism
 
-Use the History API with one page-local navigation owner. Initialize the
-current valid document entry with replaceState; never push a duplicate entry
-on startup. A same-document traversal is observed through one popstate
-subscription, removed on disposal.
+Use the History API with one page-local navigation owner.
 
-Navigation controls must use real same-origin anchors where a destination is
-known. The handler intercepts only an unmodified primary activation. New-tab,
-copy-link, download, and external-link behavior remain native. Buttons remain
-appropriate for decisions, panels, and operations whose destination requires
-resolution, such as Album Resume.
+The application MUST NOT ship parallel navigation implementations for the same behavior.
 
-The browser owns the stack. The application must not mirror it with an
-unbounded in-memory history array. State under a versioned `slipstream`
-namespace stores only the entry identifier, optional Grid anchor/focus,
-optional known parent Grid relationship, and optional Folder publication
-provenance. Merge that namespace without overwriting other history.state
-fields. Treat absent, malformed, or unknown-version state as a direct entry.
+Initialize the current valid document entry with replaceState; never push a duplicate entry on startup.
 
-Store no Photo facts, thumbnails, tokens, request objects, pending writes,
-multi-selection, or Undo descriptions in history.state. No new localStorage
-or server persistence is required. Each entry has constant-size metadata;
-there is no per-visited-Photo cache outside existing bounded owners.
+A same-document traversal is observed through one popstate subscription, removed on disposal.
 
-Before leaving Grid, capture its anchor and focus from the UI and replace
-only its entry metadata. A Photo opened from that Grid receives its own entry
-and the parent relationship. Subsequent same-source Photo navigation preserves
-that relationship while replacing the Photo URL. In-app return traverses one
-entry only when the current Photo has this known parent; otherwise it replaces
-the Photo entry with its source Grid. A direct link must not call history.back
-based solely on history.length or a same-origin referrer.
+Navigation controls MUST use real same-origin anchors where a destination is known.
 
-Source selection creates one Grid entry. Resume from another source first
-commits that source's Grid entry and then resolves and opens its saved Photo;
-Resume from its current Grid adds only the Photo entry. A plain Grid open
-starts at index zero unless a restoration anchor is being restored; the initial
-saved position in the existing Browse response is used for Resume, not as an
-instruction to switch every Album open into Photo View. With no available
-saved position, keep the Grid and explain that Resume is unavailable. An
-empty Album must never create an artificial Photo entry.
+The handler intercepts only an unmodified primary activation.
+
+New-tab, copy-link, download, and external-link behavior remain native.
+
+Buttons remain appropriate for decisions, panels, and operations whose destination requires resolution, such as Album Resume.
+
+The browser owns the stack.
+
+The application MUST NOT mirror it with an unbounded in-memory history array.
+
+State under a versioned `slipstream` namespace stores only the entry identifier, optional Grid anchor/focus, optional known parent Grid relationship, and optional Folder publication provenance.
+
+Merge that namespace without overwriting other history.state fields.
+
+Treat absent, malformed, or unknown-version state as a direct entry.
+
+Store no Photo facts, thumbnails, tokens, request objects, pending writes, multi-selection, or Undo descriptions in history.state.
+
+No new localStorage or server persistence is required.
+
+Each entry has constant-size metadata; there is no per-visited-Photo cache outside existing bounded owners.
+
+Before leaving Grid, capture its anchor and focus from the UI and replace only its entry metadata.
+
+A Photo opened from that Grid receives its own entry and the parent relationship.
+
+Subsequent same-source Photo navigation preserves that relationship while replacing the Photo URL.
+
+In-app return traverses one entry only when the current Photo has this known parent; otherwise it replaces the Photo entry with its source Grid.
+
+A direct link MUST NOT call history.back based solely on history.length or a same-origin referrer.
+
+Source selection creates one Grid entry.
+
+Resume from another source first commits that source's Grid entry and then resolves and opens its saved Photo; Resume from its current Grid adds only the Photo entry.
+
+A plain Grid open starts at index zero unless a restoration anchor is being restored; the initial saved position in the existing Browse response is used for Resume, not as an instruction to switch every Album open into Photo View.
+
+With no available saved position, keep the Grid and explain that Resume is unavailable.
+
+An empty Album MUST NOT create an artificial Photo entry.
 
 ## Destination Establishment
 
-The navigation owner serializes presentation through one latest destination
-identity. A newer intent or traversal invalidates older continuations. It
-passes no mutation through the route decoder.
+The navigation owner serializes presentation through one latest destination identity.
 
-A source selection or applied view change may establish its address and a
-truthful pending Grid shell before the source is ready. Retained content must
-be identified as previous content and unavailable for decisions; it must not
-appear to satisfy the requested source or filter. A failed establishment
-keeps that requested destination retryable.
+A newer intent or traversal invalidates older continuations.
 
-Opening a Photo from Grid, stepping to a neighbor, and decision-driven
-advancement commit their Photo address only after the Photo owner commits the
-corresponding bounded facts. Failed steps create no new Photo address and keep
-the existing Photo Retry target. Preview-byte completion is not a prerequisite
-for addressing a Photo whose bounded facts are ready. Persistence-driven
-advancement keeps its existing save-before-advance requirement.
+It passes no mutation through the route decoder.
 
-Direct entry and browser traversal have already selected a URL. They must
-render a destination shell while resolving it. They must not undo traversal
-with history.go, overwrite it with the old Photo, or admit a mutation against
-previously visible content. A transport failure leaves the target URL and
-Retry plus a source-return action. Only confirmed invalid or missing targets
-use the product's explained fallback and replace that current entry.
+A source selection or applied view change MAY establish its address and a truthful pending Grid shell before the source is ready.
 
-Startup must elect exactly one source bootstrap from the committed Overview.
-The initial destination replaces the unconditional All Photos bootstrap; it
-must not race a second source open. An unpublished Library waits for the
-existing publication workflow before attempting that destination.
+Retained content MUST be identified as previous content and unavailable for decisions; it MUST NOT appear to satisfy the requested source or filter.
 
-A same-source Grid/Photo traversal reuses the live Browse Snapshot when its
-source, filter, and order match. This preserves frozen membership after a
-decision. No Snapshot is retained merely because its source has an older
-browser entry. Once the source is left, its ordinary release rules apply.
+A failed establishment keeps that requested destination retryable.
 
-When a new Snapshot is necessary, open it with the selected source/options
-and the preferred Photo ID where applicable. Resolve the target using the
-existing bounded position endpoint. A preferred Photo is a hint to source
-opening, so a fallback position returned by open is not proof that the
-requested Photo exists. Confirm the stable ID before presenting it. A null
-position produces the specified source-Grid fallback, not another Photo
-silently shown under the missing Photo's URL.
+Opening a Photo from Grid, stepping to a neighbor, and decision-driven advancement commit their Photo address only after the Photo owner commits the corresponding bounded facts.
 
-For Folder links, a direct entry binds to the current Published Library and
-opens only a valid current relative Location. A history entry from a prior
-Folder publication must not silently reinterpret that Location: if its
-provenance differs, show the changed-Folder explanation and require an
-explicit Open current Folder action after current publication binding. That
-action replaces the entry's provenance; it does not add a history loop.
-A missing current Folder returns to All Photos only after the bounded server
-answer confirms it is absent. Neither a Folder tree download nor scanning
-client-side windows to discover a Photo is permitted.
+Failed steps create no new Photo address and keep the existing Photo Retry target.
+
+Preview-byte completion is not a prerequisite for addressing a Photo whose bounded facts are ready.
+
+Persistence-driven advancement keeps its existing save-before-advance requirement.
+
+Direct entry and browser traversal have already selected a URL.
+
+They MUST render a destination shell while resolving it.
+
+They MUST NOT undo traversal with history.go, overwrite it with the old Photo, or admit a mutation against previously visible content.
+
+A transport failure leaves the target URL and Retry plus a source-return action.
+
+Only confirmed invalid or missing targets use the product's explained fallback and replace that current entry.
+
+Startup MUST elect exactly one source bootstrap from the committed Overview.
+
+The initial destination replaces the unconditional All Photos bootstrap; it MUST NOT race a second source open.
+
+An unpublished Library waits for the existing publication workflow before attempting that destination.
+
+A same-source Grid/Photo traversal reuses the live Browse Snapshot when its source, filter, and order match.
+
+This preserves frozen membership after a decision.
+
+No Snapshot is retained merely because its source has an older browser entry.
+
+Once the source is left, its ordinary release rules apply.
+
+When a new Snapshot is necessary, open it with the selected source/options and the preferred Photo ID where applicable.
+
+Resolve the target using the existing bounded position endpoint.
+
+A preferred Photo is a hint to source opening, so a fallback position returned by open is not proof that the requested Photo exists.
+
+Confirm the stable ID before presenting it.
+
+A null position produces the specified source-Grid fallback, not another Photo silently shown under the missing Photo's URL.
+
+For Folder links, a direct entry binds to the current Published Library and opens only a valid current relative Location.
+
+A history entry from a prior Folder publication MUST NOT silently reinterpret that Location: if its provenance differs, show the changed-Folder explanation and require an explicit Open current Folder action after current publication binding.
+
+That action replaces the entry's provenance; it does not add a history loop.
+
+A missing current Folder returns to All Photos only after the bounded server answer confirms it is absent.
+
+Neither a Folder tree download nor scanning client-side windows to discover a Photo is permitted.
 
 ## Restoration and Persistence
 
-Set browser scroll restoration to manual while the mounted Library Browser
-owns its internal Grid scroller, and restore the previous setting on disposal.
+Set browser scroll restoration to manual while the mounted Library Browser owns its internal Grid scroller, and restore the previous setting on disposal.
+
 The UI captures a top-row Photo anchor and its offset, not a window scrollY.
-After source establishment, resolve that Photo against the active Snapshot,
-admit only the bounded window covering its row, and restore geometry after
-the current size step determines column count. Then restore cell focus with
-preventScroll, or focus the Grid when that cell no longer exists.
+
+After source establishment, resolve that Photo against the active Snapshot, admit only the bounded window covering its row, and restore geometry after the current size step determines column count.
+
+Then restore cell focus with preventScroll, or focus the Grid when that cell no longer exists.
 
 An index hint is usable only after a stable-ID check in the same Snapshot.
-If the anchor is absent, clamp the prior index hint to the new source and use
-that bounded position; an empty source uses its empty-state focus target.
-If state is absent or invalid, start at the source's first Grid row. Restoration
-must finish once for the current destination and may not continually fight
-subsequent user scrolling. Lookup failure is retryable, not evidence that the
-Photo disappeared.
 
-A destination change supersedes only the read/presentation scopes it actually
-leaves. A Grid/Photo change does not gratuitously reopen the source or discard
-valid same-source Undo. A source change or reload keeps existing Undo and
-multi-selection invalidation rules. Traversal never reconstructs those states
-from browser history.
+If the anchor is absent, clamp the prior index hint to the new source and use that bounded position; an empty source uses its empty-state focus target.
 
-Admitted Photo, Album, saved-position, and recovery writes retain the exact
-settlement policies of Web Async Ownership. A route change may detach their
-presentation but must not abort them as a navigation shortcut. Late responses
-cannot repaint the new destination or enqueue advancement. History restores
-no prior mutation intent. A newly committed Album Photo may admit its ordinary
-current saved-position write once; restoring a Grid never does so. Test that
-exception separately from the prohibition on replaying decisions.
+If state is absent or invalid, start at the source's first Grid row.
 
-Application teardown must remove browser listeners and cancel navigation
-continuations while preserving the existing release and admitted-write
-settlement behavior. For pagehide/pageshow with the browser back-forward
-cache, the app must resume or remount exactly one usable Library Browser and
-revalidate its destination. It must not leave an inert restored document or
-duplicate subscriptions. A full page return is not assumed to be popstate.
+Restoration MUST finish once for the current destination and MUST NOT continually fight subsequent user scrolling.
+
+Lookup failure is retryable, not evidence that the Photo disappeared.
+
+A destination change supersedes only the read/presentation scopes it actually leaves.
+
+A Grid/Photo change does not gratuitously reopen the source or discard valid same-source Undo.
+
+A source change or reload keeps existing Undo and multi-selection invalidation rules.
+
+Traversal never reconstructs those states from browser history.
+
+Admitted Photo, Album, saved-position, and recovery writes retain the exact settlement policies of Web Async Ownership.
+
+A route change MAY detach their presentation but MUST NOT abort them as a navigation shortcut.
+
+Late responses cannot repaint the new destination or enqueue advancement.
+
+History restores no prior mutation intent.
+
+A newly committed Album Photo MAY admit its ordinary current saved-position write once; restoring a Grid never does so.
+
+Application teardown MUST remove browser listeners and cancel navigation continuations while preserving the existing release and admitted-write settlement behavior.
+
+For pagehide/pageshow with the browser back-forward cache, the app MUST resume or remount exactly one usable Library Browser and revalidate its destination.
+
+It MUST NOT leave an inert restored document or duplicate subscriptions.
+
+A full page return is not assumed to be popstate.
 
 ## Responsive Presentation Boundary
 
-Use a single semantic action binding for each product intent. A control may
-move or be rendered for a different layout, but hidden variants must be
-unavailable to accessibility, focus, input, and image-loading paths. There must
-not be duplicate mutation admission or independent mobile Rating/Undo state.
+Use a single semantic action binding for each product intent.
 
-Use native dialog.showModal for modal surfaces. One page UI controller owns
-which surface is active, its invoker, its local subview, and draft values.
-It does not own a stack of routes or server state. A content transition within
-Photo tools replaces the modal content and restores a meaningful focus target.
-The modal owner first classifies a close request under the experience contract:
-contextual Album form cancellation returns locally; whole-surface dismissal
-uses one cleanup and outer-focus restoration path. Handle native cancel before
-the dialog closes when that request means local return. History traversal
-always dismisses the whole surface. Use edge focus handling if needed to keep
-Tab contained, and destroy pending gesture candidates before opening.
+A control MAY move or be rendered for a different layout, but hidden variants MUST be unavailable to accessibility, focus, input, and image-loading paths.
 
-Browser history traversal closes the current modal before destination
-rendering. The UI must not add dummy history to emulate native close requests.
-The existing Chromium support contract applies; do not add a CloseWatcher
-polyfill or a second back-stack implementation for unsupported engines.
+There MUST NOT be duplicate mutation admission or independent mobile Rating/Undo state.
 
-A supporting surface may grow to a bounded fraction of dynamic viewport
-height and scroll internally. The primary Grid/Photo layout uses dynamic
-viewport units, minmax/overflow constraints, and safe-area padding. Normal
-state region budgets come from the Product Spec. Larger text and error
-content must reflow rather than rely on fixed heights that hide controls.
+Use native dialog.showModal for modal surfaces.
 
-Loaded Preview inspection remains local during disconnection. Opening a panel
-must not change Photo readiness; readiness still derives from existing owners.
-Closed Nearby Photos releases strip thumbnails and admits no windows. Opening
-it uses the same bounded neighbor facts and five-entry limit as the wide strip.
+One page UI controller owns which surface is active, its invoker, its local subview, and draft values.
 
-### Filter drafts and summaries
+It does not own a stack of routes or server state. A content transition within Photo tools replaces the modal content and restores a meaningful focus target.
 
-View options owns one draft of the committed filter, order, and size. Reset
-filters changes only that draft's filter; direct zero-result Clear filters is
-an applied-view intent to the existing source/navigation owner. Counts and
-header summaries project committed choices, never unsent drafts. The compact
-summary counts condition groups from that same filter; it has no parallel
-query model. Immediate Browse or Source actions discard the draft and capture
-the committed scope before leaving options. No URL parameter or endpoint is added.
+The modal owner classifies close requests under the [experience contract](spec.md#supporting-surfaces). Contextual Album form cancellation returns locally; whole-surface dismissal uses one cleanup and outer-focus restoration path.
 
-### Contextual Album creation and choice
+Handle native cancel before the dialog closes when it means local return. History traversal always dismisses the whole surface before destination rendering.
 
-The single modal owner retains a bounded local return context: its initiating
-surface and focus target, source/Photo generation, and, for a batch chooser,
-the existing at-most-100 selected stable IDs. It is not browser history or a
-new Album store. New Album replaces the chooser or membership content locally.
-Create uses the existing Album owner and form identity; successful creation
-returns only while that initiating context remains current. Membership is a
-later explicit action, never a continuation automatically sent after create.
+Use edge focus handling if needed to keep Tab contained, and destroy pending gesture candidates before opening. The UI MUST NOT add dummy history to emulate native close requests.
 
-Closing or changing destination detaches the local return context, not the
-admitted write. Late creation can update shared Album facts through existing
-settlement but cannot reopen a surface or restore selection. At batch-add
-admission, the existing Album owner captures the chosen Album and eligible
-selected IDs; no selector or late response may change that captured target.
-Known missing Photos remain in the result/count under the batch contract but
-are excluded from a new request. Unknown creation is reconciled through Album
-inspection, not an automatic create retry or inferred membership.
+The existing Chromium support contract applies; do not add a CloseWatcher polyfill or a second back-stack implementation for unsupported engines.
 
-## Options
+A supporting surface MAY grow to a bounded fraction of dynamic viewport height and scroll internally. The primary Grid/Photo layout uses dynamic viewport units, minmax/overflow constraints, and safe-area padding.
 
-### Selected: History API and a bounded page navigation owner
+Normal state region budgets come from the Product Spec. Larger text and error content MUST reflow rather than rely on fixed heights that hide controls.
 
-The application has one page slice, two view kinds, and existing source/Photo
-owners. Native URL/history calls plus one codec fit that boundary without a
-routing dependency or another store. Explicit commit timing preserves the
-existing rule that a failed next-Photo read retains the prior current Photo.
-Query addresses keep server and deployment routing unchanged.
+Loaded Preview inspection remains local during disconnection. Opening a panel MUST NOT change Photo readiness; readiness still derives from existing owners.
 
-### Not selected: Navigation API as a required runtime boundary
+Closed Nearby Photos releases strip thumbnails and admits no windows. Opening it uses the same bounded neighbor facts and five-entry limit as the wide strip.
 
-Navigation API offers centralized interception, entry identity, and transition
-coordination. It became Baseline Newly available in January 2026, including
-Firefox 147; it must not be dismissed as Chromium-only. It is a reasonable
-future replacement for the browser adapter, but adopting it here adds a
-runtime requirement without removing the source-readiness, virtual Grid
-restoration, or admitted-write coordination this design must implement.
-Do not ship two parallel navigation implementations to obtain the same behavior.
+### Filter Drafts and Summaries
 
-### Rejected: Framework router migration
+View options owns one draft of the committed filter, order, and size. Reset filters changes only that draft's filter; direct zero-result Clear filters is an applied-view intent to the existing source/navigation owner.
 
-React Router and Next.js demonstrate useful gallery semantics, but changing
-rendering frameworks to obtain those semantics would broaden the migration
-without improving Slipstream's ownership boundary. Hash routing also adds no
-value: query addresses already refresh through the existing application path.
+Counts and header summaries project committed choices, never unsent drafts. The compact summary counts condition groups from that same filter; it has no parallel query model.
 
-### Rejected: Put every panel and Photo step in history
+Immediate Browse or Source actions discard the draft and capture the committed scope before leaving options. No URL parameter or endpoint is added.
 
-This makes continuous culling require many Back actions and reopens incidental
-panels on Forward. It also confuses platform close requests with browser
-traversal. Destinations and transient surfaces have separate lifetimes.
+### Contextual Album Creation and Choice
 
-### Rejected: Shrink or wrap the existing toolbar stack
+The single modal owner retains a bounded local return context: its initiating surface and focus target, source/Photo generation, and, for a batch chooser, the existing at-most-100 selected stable IDs. It is not browser history or a new Album store.
 
-Smaller controls violate touch targets. Wrapping every control can preserve
-reachability while removing the Photo's usable space. Contextual action
-regions and actual closed panels make the space contract testable.
+New Album replaces the chooser or membership content locally. Create uses the existing Album owner and form identity; successful creation returns only while that initiating context remains current. Membership is a later explicit action, never a continuation automatically sent after create.
 
-### Selected: Counted narrow summary, explicit full conditions
+Closing or changing destination detaches the local return context, not the admitted write. Late creation can update shared Album facts through existing settlement but cannot reopen a surface or restore selection.
 
-A counted summary inside the existing View options entry keeps complete action
-labels, the 88px budget, and one keyboard disclosure path. Expanding the header
-for every condition defeats the space contract; an internally scrollable micro
-strip makes review depend on precision scrolling. Wide layouts retain explicit
-condition text. Full committed values remain programmatically described and
-visible when options opens, so compactness does not change filter meaning.
+At batch-add admission, the existing Album owner captures the chosen Album and eligible selected IDs. A selector or late response MUST NOT change that captured target.
 
-### Selected: Separate creation and explicit membership
+Known missing Photos remain in the result/count under the batch contract but are excluded from a new request.
 
-Reusing one contextual form preserves Photo or batch context and the existing
-Album write boundary. A combined create-and-add action would need new atomicity,
-partial-success, and retry semantics. Sending the user to Sources avoids those
-semantics but loses the initiating task. Contextual create followed by an
-explicit membership choice needs neither a new transaction nor a collection mode.
+Unknown creation is reconciled through Album inspection, not an automatic create retry or inferred membership.
 
-### Selected: On-demand batch target selection
+## Design Rationale
 
-One Album chooser preserves the first-level action budget and makes the target
-explicit. A permanently embedded selector consumes narrow tray space even when
-the next action is Pick or Reject. Both can use existing membership writes;
-the chooser adds only bounded presentation state and no second operation owner.
+Native URL and history calls with one bounded page navigation owner preserve source and Photo ownership.
 
-## Verification
+Explicit commit timing preserves the current Photo when a next-Photo read fails; query addresses keep server and deployment routing unchanged.
 
-Focused automated coverage must derive from the product examples and prove:
-
-- codec round trips, invalid/duplicate values, encoded Locations, defaults,
-  canonicalization, and direct URL startup through the real server, including
-  the Rating, kind, availability, and Capture Time parameters, their invalid
-  and empty values, and their canonical position after `selection`;
-- source/Grid/Photo push and replace behavior, Back, Forward, reload, direct
-  entry, known-parent return, duplicate activation, and leaving the site;
-- one initial source bootstrap, delayed facts, rapid Back/Forward, stale
-  success/failure, expired snapshots, removed targets, and Folder publication
-  confirmation without an unbounded read;
-- **Open a random Photo** uses the current source, order, and filter, can
-  target an unloaded bounded window, commits one ordinary Photo
-  destination only after target facts are ready, allows repeated results, and
-  leaves no history entry after an expired or failed attempt;
-- Grid anchor and focus restoration across resize and eviction in a generated
-  Library of at least 40,000 Photos, with no retained historical Snapshots;
-- no decision or membership replay, no aborted admitted write, no stale
-  advancement, and the separate current Album saved-position rule;
-- same-source frozen filter membership and Undo through view traversal;
-- one modal, no hidden focus or duplicate live announcements, correct close
-  focus after re-render, and no primary shortcuts behind modal content;
-- region budgets, 44-pixel targets, safe areas, 200% text, reduced motion,
-  rotation, desktop/touch input, all batch outcomes, and independent failures;
-- the primary review controls, one navigation group, and one review dock stay
-  inside the safe viewport at 375 by 667, 390 by 844, and the short-landscape
-  viewports while the Preview keeps its reserved region, with supporting
-  content yielding first and no 44-pixel target shrinking;
-- opening the compact status entry keeps the current Photo, its zoom state, and
-  the Grid anchor;
-- external page navigation and browser return do not break mount/disposal;
-- query deep links still pass the production host's existing health, static
-  asset, and bounded browsing verification without a route migration; and
-- the canonical repository gate passes after each implementation slice.
-
-Additional hierarchy evidence must cover:
-
-- all five filter groups, each range with one or both bounds, custom order,
-  default filters, narrow summaries, keyboard disclosure, draft reset/cancel,
-  immediate clear, and Source actions with unapplied drafts;
-- contextual Album creation from Photo membership and a batch chooser, an
-  empty Album list, cancelled and invalid names, unknown creation, failed
-  membership after successful creation, close or source change during writes,
-  and no implicit add, source transition, or second modal;
-- cancelled, committed, lost-capture, and superseded gestures on touch-only,
-  hover, and hybrid inputs, with no resting direction labels;
-- the title and return path of each Photo tools subview, including Help,
-  keyboard focus, and hidden controls;
-- all batch outcome classes with on-demand Album choice, all-already-member
-  results, scoped compensation expiry, one announcement, and visible final-row
-  captions; and
-- every thumbnail size, widths around column transitions, resized Sources,
-  selection gutters, long names, unloaded cells, and 200% text using consistent
-  geometry and identity-based restoration.
-
-Physical Android Chromium evidence must identify device, browser version,
-viewport, system Back versus toolbar traversal, keyboard/safe-area behavior,
-and observed results. Emulated Pointer Events alone do not prove platform
-close behavior. Other engines are exploratory until the support contract
-explicitly expands.
-
-## References
-
-- [Next.js intercepting routes](https://nextjs.org/docs/app/api-reference/file-conventions/intercepting-routes): addressable gallery content and Back/Forward semantics.
-- [React Router navigation](https://reactrouter.com/api/hooks/useNavigate): known-history traversal and replacement.
-- [React Router scroll restoration](https://reactrouter.com/api/components/ScrollRestoration): restoration keyed by entry.
-- [Navigation API](https://developer.mozilla.org/en-US/docs/Web/API/Navigation_API) and [January 2026 platform update](https://web.dev/blog/web-platform-01-2026): modern platform alternative.
-- [CloseWatcher](https://developer.mozilla.org/en-US/docs/Web/API/CloseWatcher): native close requests versus navigation.
-- [WAI-ARIA modal dialogs](https://www.w3.org/WAI/ARIA/apg/patterns/dialog-modal/): focus and background interaction.
+Destinations and temporary surfaces have separate lifetimes: putting panels or every Photo step in history would impede continuous review and reopen incidental surfaces on Forward.

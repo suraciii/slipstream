@@ -1,114 +1,28 @@
 # Container Build Inputs
 
-Slipstream supports one Linux amd64 container deployment. A release candidate
-must not receive different native libraries merely because a base-image tag,
-APT mirror, or CI runner changed after review.
+The supported Linux amd64 image MUST resolve the same native inputs for the same candidate. This is source reproducibility, not a promise of byte-identical output images.
 
-## Design Drivers
+## Input Ownership
 
-- The supported image needs native build and runtime libraries from Ubuntu
-  26.04.
-- A normal dependency update must be visible in review.
-- Release qualification must build the same container definition that an
-  operator deploys.
-- The repository must not add a release service or image publication path.
+- The [Dockerfile](../../Dockerfile) selects each non-scratch base image index by immutable digest.
+- The [Ubuntu source configuration](../../docker/apt/ubuntu.sources) selects a signed official Ubuntu snapshot for amd64.
+- The [build and runtime locks](../../docker/apt/) pin direct native packages; the snapshot and base digest fix transitive choices.
+- The Dockerfile pins the upstream LibRaw release archive by SHA-256 for both build headers and the service's runtime library.
 
-## Model
+Ubuntu 26.04 supplies the native build and runtime packages. The Rust image supplies the CA bundle used to contact the HTTPS snapshot before Ubuntu installs its locked `ca-certificates` package.
 
-The checked-in container input contract has three owners:
+APT MUST verify the archive signature and TLS certificate. A certificate failure, unavailable snapshot, partial update, or missing package version MUST fail the build instead of using a stale index or fallback source.
 
-- [`../Dockerfile`](../../Dockerfile) selects the Bun, Rust, and Ubuntu image
-  indexes by immutable digest.
-- [`../docker/apt/ubuntu.sources`](../../docker/apt/ubuntu.sources) selects one
-  signed official Ubuntu snapshot for amd64.
-- The build and runtime lock lists in [`../docker/apt/`](../../docker/apt/) pin
-  direct native packages. The snapshot and digest-pinned base image fix their
-  transitive package choices.
-- The SHA-256-verified LibRaw release archive and version in the
-  [`../Dockerfile`](../../Dockerfile) pin the RAW container decoder. The same
-  release supplies the build headers and the runtime shared library.
+The LibRaw archive MUST be hash-verified during the build. An unavailable archive or mismatched hash MUST fail the build.
 
-The Rust image supplies the CA bundle needed to contact the Ubuntu HTTPS
-snapshot before Ubuntu installs its own locked `ca-certificates` package. That
-bundle is itself an input of a digest-pinned stage. APT always verifies the
-Ubuntu archive signature and TLS certificate. A failed certificate check,
-missing package version, or unavailable snapshot fails the image build. APT
-updates use `--error-on=any`, so a partial snapshot failure cannot leave a
-stale index available to satisfy a lock.
+The service MUST resolve the matching LibRaw runtime from its isolated `LD_LIBRARY_PATH`. Ubuntu's LibRaw package MAY satisfy other native package dependencies but MUST NOT silently replace the service's decoder.
 
-## Semantics
+A LibRaw pin change MUST advance the persisted RAW decoder revision so previously unavailable RAW Photos are re-inspected once. This boundary avoids mixing headers and runtime binaries while allowing the decoder to change independently of the Ubuntu snapshot.
 
-Source reproducibility means the same candidate resolves the same base-image
-indexes, Ubuntu snapshot, direct package versions, and APT dependency choices.
-It does not promise a byte-identical final image from separate builds: build
-tools and image assembly may add output-specific metadata.
+## Updates and Qualification
 
-Qualification builds the repository Dockerfile for `linux/amd64`. It records
-the resulting image separately from the input contract. The ordinary GitHub
-Actions runner may remain `ubuntu-latest` because it verifies repository source
-and tests only. It is not a release-image input and it does not qualify a
-container build. Qualification uses an explicit `docker buildx build` command
-for `linux/amd64`; it does not use Compose. The Compose service declares
-`linux/amd64` but has no `build` input: the supported entry point runs only the
-digest-pinned `SLIPSTREAM_IMAGE` defined by [Deployment](spec.md),
-with no repository-source fallback.
+A change to a base digest, snapshot timestamp or suite, direct package lock, or LibRaw pin and checksum MUST be reviewed as one dependency update. The update MUST cover every affected input and recheck the input contract.
 
-Changing a base digest, snapshot timestamp or suite, or direct package lock is
-one container dependency update. The same review must update every affected
-input and rerun the container input contract. No mutable mirror, image tag, or
-fallback source is permitted.
+Mutable image tags, moving archives, mirrors, and fallback sources MUST NOT replace the pinned inputs. Release qualification MUST build the repository Dockerfile for `linux/amd64` and record the resulting image separately from its source inputs.
 
-The LibRaw release archive is fetched and hash-checked during the image build;
-an unavailable archive or mismatched hash fails the build. The service links
-against that release and resolves its runtime shared library from the image's
-dedicated `LD_LIBRARY_PATH`. Ubuntu's LibRaw package remains available for
-other native package dependencies but must not silently replace the service's
-version. This keeps camera support independent of the Ubuntu snapshot without
-mixing LibRaw headers and runtime binaries. When the release pin changes, bump
-the persisted RAW decoder revision in `crates/slipstream-core/src/persistence/migrations.rs`
-so previously unavailable RAW Photos get re-inspected once.
-
-## Options
-
-### Selected: Digest, Snapshot, and Direct Locks
-
-An image digest makes the image index immutable. One Ubuntu snapshot fixes the
-available package repository, while the two small direct locks show the native
-libraries Slipstream intentionally requests. This keeps ordinary updates
-reviewable without hand-maintaining a duplicate lock for every APT dependency.
-
-### Selected: Verified LibRaw Release Alongside Ubuntu Packages
-
-The supported camera's Preview requires a LibRaw version newer than the
-snapshot's package. Pinning the upstream release archive by SHA-256 and
-isolating its build and runtime paths keeps the deployment reproducible while
-allowing the container's other native packages to remain snapshot-pinned.
-
-### Rejected: Parse Sony TIFF Preview Offsets in the Service
-
-An independent TIFF parser would add a second RAW container authority with
-camera-specific offset, bounds, and orientation rules. Updating the selected
-decoder instead preserves one bounded extraction path.
-
-### Rejected: Pin Direct Packages Against a Moving Archive
-
-Exact direct versions alone leave index metadata and dependency resolution
-dependent on archive timing. They can disappear or resolve differently after
-review.
-
-### Rejected: Treat `ubuntu-latest` as the Image Contract
-
-The CI runner is a source-test environment owned by GitHub. Its operating
-system and its installed APT dependencies neither select nor prove the Docker
-image's native inputs.
-
-## Verification
-
-`bun run test:container-input` verifies the checked-in input contract. It runs
-through `just ci-fast` and `just ci-full`. The Compose focused
-contract verifies the digest-only service wiring. Release qualification builds
-the same Dockerfile for Linux amd64 and records output traceability separately
-from source reproducibility, as defined by the
-[deployment guide](spec.md). It must extract a Preview from a
-representative camera Original through the built service and confirm its
-Original bytes remain unchanged.
+The ordinary CI runner is not an image input or release-image qualification. Supported Compose runs the digest-pinned image without a build or source fallback, as defined by [Deployment](spec.md#storage-rules).

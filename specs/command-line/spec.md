@@ -1,304 +1,143 @@
 # Command-Line Use
 
-A Photographer may use Slipstream directly or ask their own Agent to use it.
-Both need access to the same Photos, Albums, and recorded decisions. Delegated
-work must not depend on driving the browser or reading application storage.
+Slipstream provides the `slipstream` client for a Photographer or their external Agent. It shares service-owned facts and domain rules with the Web and does not require browser automation or direct storage access.
 
-Slipstream provides a first-class `slipstream` command-line client. The Web
-application remains the visual workspace for browsing, judgment, and direct
-control. Both clients use the same service-owned facts and domain rules.
-
-[CLI Reference](reference.md) owns command syntax and machine results.
-[CLI Candidate Installation](../../docs/cli-install.md) describes local candidate verification;
-[Agent Use](../../docs/agent-cli.md) describes the bounded Agent workflow.
-[Command-Line Architecture](design.md) owns client/service
-boundaries and concurrency. Existing Photo, Album, Preview, and Destination
-contracts remain authoritative.
+[Command-Line Architecture](design.md) owns the client boundary and concurrency. [CLI Reference](reference.md) owns common command syntax and machine results. [darktable CLI](../photo-development/darktable/cli.md) owns the independent editor and its optional Slipstream integration.
 
 ## Product Boundary
 
-Slipstream must expose discoverable, composable operations that an external
-Agent can use on behalf of the Photographer. It must not include an Agent,
-model provider, chat session, planner, prompt runner, or autonomous workflow
-engine. It must not send Photos to an AI provider itself.
+Slipstream MUST expose discoverable, composable operations for delegated use. It MUST NOT include an Agent, model provider, conversation, planner, prompt runner, or autonomous workflow engine, or send Photos to an AI provider itself.
 
-The external Agent owns interpretation, task planning, visual judgments, and
-communication with the Photographer. Slipstream owns valid operations,
-Original safety, persistence, and truthful results. Model judgments must not
-be presented as measured Photo metadata.
+The external Agent owns interpretation, planning, visual judgment, and communication with the Photographer. Slipstream owns valid operations, Original safety, persistence, and truthful results. Model judgments MUST NOT be presented as measured Photo metadata.
 
-A task-specific shortlist can be an ordinary Album. Not choosing a Photo for
-that Album must not imply `rejected`, and an Agent's confidence must not become
-Rating. Selection State and Rating remain Photo-wide facts shared by every
-Album. Slipstream does not add a suggestion, review-task, or Agent-memory model.
+A shortlist MAY be an ordinary Album. Not choosing a Photo for it MUST NOT imply `rejected`, and Agent confidence MUST NOT become Rating. Slipstream does not add a suggestion, review-task, or Agent-memory model.
 
 ## Supported Work
 
-The CLI must let its caller:
+The CLI MUST let its caller:
 
-- inspect service compatibility, Library availability, and scan status;
-- discover Albums and read-only Original Folders;
-- query Photos by source, Selection State, Rating, Original kind,
-  availability, and camera-local Capture Time;
-- obtain current facts and Album membership for an identified Photo;
-- download one Photo's thumbnail or review Preview;
-- change Selection State or Rating for identified Photos;
-- [read and save standard metadata](../photo-library/metadata/spec.md) with explicit provenance and checked Sidecar changes;
-- create, rename, and delete Albums and add, remove, or order their members;
-- remove explicitly identified eligible Photos into Trash and Restore observed removals;
-- query and print Trash Original Locations for external user action, explicitly request Trash Record Cleanup, and recover its outcomes;
-- inspect unavailable Photos, review proposed Original Locations, and apply explicitly confirmed Location Recovery mappings;
-- request a Library check;
-- return a browser Destination for a Photo or Album;
-- create/reopen a real Photo Workspace and list, inspect, download or safely remove its artifacts; and
-- edit, preview, inspect, and export through an independent local file/state tool or the optional full [darktable command group](../photo-development/darktable/editing.md) operating on the same directory/state.
+- Inspect service compatibility, Library availability, and scan status.
+- Discover Albums and read-only Original Folders.
+- Query Photos by source, Selection State, Rating, Original kind, availability, and camera-local Capture Time.
+- Obtain current Photo facts and Album membership.
+- Download one Photo's thumbnail or review Preview.
+- Change Selection State or Rating for identified Photos.
+- [Read and save metadata](../photo-library/metadata/spec.md) with provenance and checked Sidecar changes.
+- Create, rename, and delete Albums and add, remove, or order their members.
+- Remove explicitly identified eligible Photos and Restore observed removals under the [Removal contract](../photo-library/removal/spec.md).
+- Inspect Trash Locations for external action, explicitly request record cleanup, and recover its outcomes under the [Trash contract](../photo-library/trash/spec.md).
+- Inspect unavailable Photos and review and apply confirmed [Location Recovery](../photo-library/spec.md#manual-recovery) mappings.
+- Request a Library check and return a browser Destination for a Photo or Album.
+- Open a [Photo Workspace](../photo-development/workspace/spec.md), inspect its files, download or safely remove artifacts, and use independent tools or the optional [darktable integration](../photo-development/darktable/editing.md).
 
-[Composable Removal and Restore](../photo-library/removal/spec.md) defines
-explicit-set mutations and their effect recovery. [Trash](../photo-library/trash/spec.md)
-owns Trash Record Cleanup and its record-only effects; Slipstream never deletes
-Original Files.
-[Manual Recovery](../photo-library/spec.md#manual-recovery) owns Location Recovery
-inspection, reviewed evidence, content confirmation, permitted retirement,
-atomic batch effects, and uncertainty. These operations restore associations;
-they do not restore Photos from Trash or write Original Files. Command help must
-make those differences explicit and advertise inspection and application limits.
+Help MUST distinguish Location Recovery from Trash Restore and explain that neither writes Original Files. It MUST advertise inspection and application limits.
 
-Trash inspection must expose the Photo identity, removal marker, remembered
-Original identity and Location needed to review a bounded selection. Help must
-describe selection and batch limits, fresh absence and identity checks,
-workspace or active-work blockers, per-item outcomes, and how to inspect or
-replay the same attempt. Cleanup requires an explicit request for the selected
-records; a query, external file deletion, removal, or Restore does not imply
-that request. It must refuse stale, present, replaced, inaccessible, or unsafe
-targets, and must not claim that absence at a Location proves deletion of all
-copies. Cleanup removes no Original, Sidecar, workspace, or export file, and
-cannot be undone. Exact command syntax belongs to the CLI Reference when
-specified.
+Trash inspection MUST expose the Photo identity, removal marker, Original identity, and remembered Location needed for review. Cleanup help MUST describe selection and batch limits, fresh checks, blockers, per-item outcomes, and attempt inspection or replay.
 
-These capabilities do not include arbitrary Library Original download or mutation, XMP synchronization, or Library Expansion. Those operations retain their own product and operator boundaries. Workspace input/result downloads follow the explicit workspace contract and do not grant access to arbitrary Library paths. The CLI does not expose SQL or an arbitrary server-path/shell argument.
-
-[Headless darktable Editing](../photo-development/darktable/editing.md) owns general editing through the independent proposed `darktable-edit` file/state tool and the accepted full `slipstream darktable` integration namespace. Exact grammar is in [darktable CLI Reference](../photo-development/darktable/cli.md). [Photo Workspace](../photo-development/workspace/spec.md) owns persistent input/state/output directories and direct file handoff. Tools own semantic editing state and native parsing; Slipstream owns Library facts and workspace file visibility. Editing commands must not reinterpret camera Preview commands.
+The CLI MUST NOT expose arbitrary Original downloads or mutation, XMP synchronization, Library Expansion, SQL, an arbitrary server path, or a shell argument. Workspace downloads follow the workspace contract and do not grant arbitrary Library access.
 
 ## Starting and Discovering Capabilities
 
-Instance credentials are managed with `auth login`, `auth status`, `auth use`,
-and `auth logout`; the complete syntax and storage contract is defined in the
-[CLI Reference](reference.md#local-authentication).
+[Local Authentication](reference.md#local-authentication) owns instance credential commands and storage. One invocation addresses one explicit or default service URL and MUST NOT silently start or select another service.
 
-The client must run on the machine where the Photographer or their Agent uses
-it. That machine does not need the Original Files, native Preview libraries,
-or the server's SQLite database. One invocation addresses one explicit or
-default service URL; it must not silently start or select another service.
+The client MUST run without Original Files, server SQLite, or native Preview libraries on its host. Top-level help MUST describe command groups. Command help MUST describe required inputs, effects, limits, and result inspection.
 
-Top-level help must explain the command groups. Command help must explain
-required inputs, mutation effects, limits, and result inspection. Help and
-version information must work without a server. A versioned reference and a
-short Agent usage guide must ship with the client; they must not require an
-Agent to read the source repository.
+Help and version MUST work offline. A versioned reference and short Agent guide MUST ship with the client without requiring repository access.
 
-Operational commands must default to structured JSON. A human-readable output
-option must be explicit. Piping output or attaching a terminal must not change
-its schema. Commands must not open a browser, editor, pager, or confirmation
-prompt. Supplying a complete mutation command expresses the caller's intent;
-the CLI must not claim that this proves human authorization.
+Operational commands MUST default to structured JSON. Human-readable output MUST be explicit; terminal attachment or piping MUST NOT change the schema.
 
-Album names and filenames are data. Output and help must never encourage
-executing text obtained from a Library as shell commands or Agent instructions.
+Commands MUST NOT open a browser, editor, or pager. Commands other than `auth login` MUST NOT open a confirmation prompt. [Local Authentication](reference.md#local-authentication) defines login's optional terminal interaction and noninteractive forms.
+
+A complete mutation command expresses caller intent, not proof of human authorization.
+
+Album names and filenames are data. Output and help MUST NOT encourage executing Library text as shell commands or Agent instructions.
 
 ## Working in a Photo Workspace
 
-An indexed Photo ID is handed once to workspace open. The result must identify the actual directory, read-only input snapshot, execution host, access mode and available supervised tools. Returning a remote server path must not imply local access on the client. Independent tools run in an authorized environment with filesystem access; service-supervised editing is an optional alternative, not an arbitrary remote shell.
+Workspace open accepts the indexed Photo ID and MUST identify the actual directory, read-only input, execution host, access mode, and available supervised tools. A server path MUST NOT imply local client access.
 
-The input and tool-owned state remain in the same workspace while the caller adjusts parameters, renders previews and exports. Tool initialization records explicitly supplied preview/output paths once. A completed output appears through normal Slipstream file reconciliation without upload, registration, commit or synchronization. Ordinary users must not assemble stable metadata or manifests for visibility. Another independent tool can consume that path directly after its own compatibility checks. Tool names and state formats remain independent of Slipstream.
+The [workspace contract](../photo-development/workspace/spec.md) owns shared tool state, file discovery, protected inputs, retention, and safe cleanup. Independent tools use authorized filesystem access; service supervision MUST NOT provide an arbitrary remote shell.
 
-Web and CLI adjustments share the same tool state and per-state lock. GUI read-modify-write and Agent writes based on inspected values must carry observed state guards; a stale guard refuses rather than silently refreshing. Focused direct current-state commands may validate fresh intent under the lock. Normal commands generate request IDs; explicit IDs support exact recovery when callers retain them before sending. Previews/exports capture current or explicitly named state revision before execution/admission. Standalone commands own synchronous processes; only admitted durable service-supervised jobs continue after client disconnection.
-
-Previous complete previews remain during another render, saved changes survive rendering errors, and incomplete files never appear as ready results. Downloads are optional for final delivery or remote viewing. Workspace file removal must refuse protected inputs and retained dependencies; transient receipts/cache can expire independently of kept inputs/states/outputs. The [workspace lifecycle](../photo-development/workspace/spec.md#lifetime-and-recovery) owns safe cleanup and source refresh. Historical saved state and artifacts remain available non-destructively; old generic recipe routes may project canonical tool state but cannot create duplicate parameter ownership.
+Web and Agent edits share tool state and guarded concurrency under the [workspace design](../photo-development/workspace/design.md#editing-and-execution). Editing MUST NOT reinterpret camera Preview commands.
 
 ## Finding Photos
 
-A query must apply its filters and order on the service before pagination.
-Loaded client windows must not determine matching membership or counts.
+The service MUST apply filters and order before pagination. A query selects All Photos, one Album by ID, or one recursive Original Folder by Library-relative Location; filters combine with logical AND.
 
-A query selects All Photos, one Album by ID, or one recursive Original Folder
-by Library-relative Location. Filters combine with logical AND. Photo and Album
-IDs are opaque references; display names and filenames must not substitute for
-identity. Album name lookup must use the existing Album naming comparison.
+Photo and Album IDs are opaque references. Display names and filenames MUST NOT substitute for identity, and Album lookup MUST use the existing naming comparison.
 
-An exact Library-relative Original Location must be resolvable to its indexed
-Photo through `photos resolve`. The result supplies the same opaque Photo ID
-as a query item. Resolution must not import a file or accept an arbitrary host
-path. Duplicate filenames require a Folder or exact Location; the service must
-not choose the first match. A missing, unindexed, or Removed Photo must not
-resolve to another Photo. Library scan readiness and an absent match must remain
-distinct. A caller may request a Library check and then perform fresh lookup.
+`photos resolve` MUST resolve an exact Library-relative Original Location to the same Photo ID as a query. It MUST NOT import a file, accept a host path, or select the first duplicate filename. Scan readiness and an absent, unindexed, or Removed Photo MUST remain distinct.
 
-Capture Time ranges use camera-local time, with an inclusive lower bound and
-exclusive upper bound. They must not convert offsets or guess filesystem time.
-Photos without Capture Time do not match a supplied time bound. With no time
-bound they remain eligible and follow the existing missing-time ordering rule.
+Capture Time ranges use camera-local time, an inclusive lower bound, and an exclusive upper bound. A bounded query MUST exclude missing Capture Time and MUST NOT convert offsets or guess filesystem time. Without a bound, missing values remain eligible under the existing ordering rule.
 
-The first page must establish a fixed ordered set of matching Photo IDs.
-Continuation pages must traverse that same set. The result must identify the
-match count, whether another page exists, and when the query was evaluated.
-It must distinguish fixed membership from current Photo facts: a Photo can
-change after matching and still appear in a later page with its current state.
+The first page MUST fix the ordered matching Photo IDs and count. Later pages MUST traverse that set while reporting current facts. Results MUST identify continuation and evaluation time.
 
-An expired continuation must fail explicitly. The CLI must not silently start
-a new query or claim that an incomplete traversal was complete. An empty match
-must return a successful empty result. A missing source must return a distinct
-failure. No default or omitted limit may mean the complete Library.
+An expired continuation MUST fail explicitly without silently starting a new query. An empty match succeeds, a missing source fails distinctly, and no omitted limit means the complete Library.
 
-The CLI must not offer an unbounded `--all` or accept a query as a write target.
-The caller materializes the IDs it intends to change and submits explicit
-bounded operations. Multiple operations are separate commits, not one hidden
-transaction over the entire query.
+The CLI MUST NOT offer unbounded query-wide writes. Callers submit explicit bounded IDs; multiple commands are separate commits, not one hidden transaction.
 
 ## Viewing Photos
 
-Preview retrieval must produce a local JPEG that the external Agent can read
-with its image tools. A private server URL alone is insufficient. The response
-must identify the Photo, Preview Source, actual pixel dimensions, detail limit,
-source revision, and local output path.
+Preview retrieval MUST provide a local JPEG, not only a private server URL. It MUST identify the Photo, Preview Source, actual dimensions, detail limit, source revision, and local path.
 
-[Photo Previews](../photo-library/previews/spec.md) owns source selection and quality. A thumbnail
-must not be described as sufficient for precise focus judgment. The client
-must not substitute a sibling JPEG, develop RAW sensor data, upscale evidence,
-or silently return a stale Preview as current.
+[Photo Previews](../photo-library/previews/spec.md) owns source selection and quality. A thumbnail MUST NOT be described as precise focus evidence, and the CLI MUST NOT substitute a sibling JPEG, develop RAW data, upscale evidence, or silently return stale data.
 
-The caller chooses the local output path. The CLI must refuse an existing
-file and a symbolic-link destination. It must not truncate or replace a local
-Original. Before final publication, failure must remove only the command's own
-temporary file and must not leave a completed-looking JPEG. Final no-replace
-publication commits the local effect. A later reporting failure must preserve
-the completed JPEG and explicitly distinguish that committed effect from a
-failed download. Image transfer must be bounded and must not place binary data
-in JSON stdout.
+The caller chooses the output path. The CLI MUST refuse an existing file or symbolic link and MUST NOT truncate or replace a local Original. [Preview Transfer](design.md#preview-transfer-and-local-files) owns publication and failure handling.
 
-One command downloads one image. The Agent decides which images to inspect.
-The CLI must not precompute the whole Library or upload images to another
-service. Reading a Preview must not change Selection State, Rating, membership,
-or an Album's saved browsing position.
+One command downloads one image; the Agent chooses what to inspect. Preview reads MUST NOT change decisions, membership, or saved browsing position, precompute the Library, or upload images elsewhere.
 
 ## Changing Photo Decisions
 
-A Photo decision command must identify each Photo and the observed decision
-version against which the caller intends to write. A concurrent change to
-Selection State or Rating must make an outdated write conflict, even when the
-value has changed away and back. The version covers those two decision fields;
-Preview completion and scan progress alone must not create decision conflicts.
+Each Photo decision write MUST carry the observed decision version. A concurrent Selection State or Rating change invalidates it even if the value changes away and back. Preview completion and scan progress alone MUST NOT cause conflicts.
 
-A command changes one field. Clearing Selection State means `unflagged`;
-clearing Rating means zero. Neither action changes the other field. No CLI
-Photo mutation advances a browsing position.
+A command changes one field. Clearing Selection State means `unflagged`; clearing Rating means zero. Neither changes the other field or a browsing position.
 
-A bounded Photo batch must report one result for every requested Photo:
-changed, unchanged, conflict, or missing. Conflicting and missing Photos must
-not be overwritten and must not block valid sibling decisions. Invalid syntax,
-duplicate IDs, or an over-limit batch must reject the complete request before
-any write. A storage failure must roll back the transaction.
+A bounded batch MUST report changed, unchanged, conflict, or missing for every requested Photo. Conflicts and missing Photos MUST NOT block valid siblings. Invalid syntax, duplicate IDs, and over-limit batches MUST be refused before writing; storage failure MUST roll back the transaction.
 
-The result must contain the prior and resulting decisions for confirmed
-changes and enough current facts to investigate conflicts. It must not describe
-partial success as complete success. A later correction is another checked
-write. The browser's one-level Undo remains browser-local; the CLI does not
-promise a durable undo history.
+Confirmed changes MUST report prior and resulting decisions. Conflicts MUST provide enough current facts to investigate. A later correction is another checked write; browser Undo remains local and the CLI does not promise durable undo history.
 
 ## Managing Albums
 
-[Photo Library and Albums](../photo-library/spec.md#physical-and-virtual-organization)
-owns naming, membership, order, and deletion safety.
+[Photo Library and Albums](../photo-library/spec.md#physical-and-virtual-organization) owns naming, membership, order, and deletion safety.
 
-All CLI changes to an existing Album must carry its observed Album version.
-That version covers name, membership, and membership order. Merely browsing a
-Photo and updating the saved position must not invalidate it.
+A change to an existing Album MUST carry its observed version. The version covers name, membership, and order, but not saved browsing position.
 
-Membership additions append new Photos in supplied order, keep existing member
-positions, and return newly added and already-member IDs separately. Removals
-return removed and already-absent IDs. An Album membership operation must be
-atomic: a stale Album version or missing requested Photo rejects the operation
-without applying a subset.
+Additions append new Photos in supplied order and preserve existing positions. Results MUST distinguish new from existing members and removed from already-absent members. A stale version or missing requested Photo MUST refuse the entire membership operation.
 
-Reorder must provide every current member exactly once. The bounded first CLI
-contract supports complete reorder only within its documented request limit;
-it must refuse a larger Album rather than reorder a prefix. Larger Albums
-remain queryable and support bounded additions and removals.
+Reorder MUST name every current member exactly once. Albums exceeding the documented request limit MUST be refused rather than reordered partially; they remain queryable and support bounded additions and removals.
 
-Album creation must not silently reuse an existing name. A name conflict must
-identify the existing Album so the caller can inspect it. Deletion must report
-that only the Album was deleted. Additions, decision writes, and CLI reads must
-not move the Photographer's saved position. Removal of the saved member and
-Album deletion retain the existing saved-position rules and report their result.
+Creation MUST NOT silently reuse an existing name; a conflict identifies the existing Album. Deletion MUST report that only the Album was deleted.
+
+CLI reads, additions, and decision writes MUST NOT move saved position. Removal of the saved member and Album deletion follow the existing saved-position rules and report their result.
 
 ## Checking the Library
 
-A Library check must use the service's existing shared scan lifecycle. A client
-timeout or interruption must not be described as cancelling a scan already
-admitted by the service. The caller can inspect status afterward. A completed
-check changes future query membership; it does not extend an already open
-query. The CLI must distinguish an initializing Library, a failed check with
-prior data retained, and an empty published Library.
+A check uses the shared scan lifecycle. Timeout or interruption MUST NOT be described as cancelling an admitted scan; status remains available afterward.
+
+A completed check changes future query membership, not an open query. The CLI MUST distinguish initialization, failed checking with prior data retained, and an empty published Library.
 
 ## Results and Recovery
 
-Every completed command must return confirmed data or an actionable failure.
-A write response must identify its effects. A transport failure after a write
-may have been sent must report an unknown outcome. Local Preview publication is
-separate from server-write admission: if the file committed before output
-failed, recovery must preserve and identify that file rather than report no
-effect. The CLI must never transparently retry a write, overwrite a Preview,
-split a batch, or change its target after failure.
+Every completed command MUST return confirmed data or an actionable failure. Writes MUST identify effects; possible admission without a trustworthy response MUST report an unknown outcome. [CLI Reference](reference.md#output-envelope) owns the envelope and [Error Details](reference.md#error-details) owns recovery classifications.
 
-After an unknown outcome, the caller inspects affected objects. Seeing the
-intended state proves the present state, not which caller produced it. A new
-write requires fresh versions and a new decision to proceed. This bounded
-recovery does not require an operation ledger or an exactly-once claim.
+The CLI MUST NOT transparently retry a write, overwrite a Preview, split a batch, or change its target after failure. A committed local Preview MUST remain identifiable after reporting failure.
 
-A multi-command task can stop after some commands succeed. Slipstream must not
-pretend to roll back that task. The Agent must report which effects it has
-confirmed and which work remains unresolved.
+After an unknown outcome, the caller inspects affected objects. Present state does not prove which caller produced it. A new write requires fresh versions and a new decision; ordinary decision and Album writes do not require an operation ledger or exactly-once claim.
+
+A multi-command task can stop after some commands succeed. Slipstream MUST NOT claim to roll back the task, and the Agent MUST report confirmed effects and unresolved work.
 
 ## Moving Between CLI and Web
 
-Photo and Album results must include a browser Destination where one is
-available. [Library Browser Experience](../library-browser/experience/spec.md#destinations-and-browser-history)
-owns how these links resolve. A link is a current view, not a historical result
-or a grant of access.
+Photo and Album results MUST include an available browser Destination. [Destinations](../library-browser/experience/spec.md#destinations-and-browser-history) are current views, not historical results or access grants.
 
-A query using filters absent from the Web must not return a link that appears
-to preserve them. Individual Photo links and a deliberately created Album
-provide the handoff. No new Web filter is implied by a CLI query capability.
+A query with filters absent from the Web MUST NOT return a link that appears to preserve them. Individual Photo links and an explicitly created Album provide handoff without implying new Web filters.
 
-The Web must expose current CLI-written decisions and membership when affected
-facts are reloaded. The first CLI contract does not promise live push updates
-or alter a currently fixed browser source order. Existing browser refresh,
-conflict, and saved-position rules continue to apply.
+Reloading affected Web facts MUST reveal CLI-written decisions and membership. This contract does not promise live push or alter an open browser source's fixed order; existing refresh, conflict, and saved-position rules apply.
 
 ## Support Boundary
 
-The first qualified CLI target is Linux amd64. It must be distributed as a
-versioned client binary with checksums, reference documentation, and an Agent
-usage guide. It must not require LibRaw, libvips, Bun, or a mounted Library on
-the client machine. Client/server incompatibility must fail before a mutation.
-Other platforms require their own build and end-to-end evidence.
+The first qualified CLI target is Linux amd64. It MUST ship as a versioned binary with checksums, reference documentation, and an Agent guide, without client-side LibRaw, libvips, Bun, or a mounted Library. Incompatibility MUST fail before mutation.
 
-[Instance Access](../access/spec.md) applies equally to the CLI and browser. The CLI uses instance-wide credentials; it does not introduce per-person scopes, public sharing, or remote Agent hosting. The 0.1 support contract remains a separate release boundary; documenting CLI behavior does not publish a release.
+Other platforms require their own build and end-to-end qualification evidence.
 
-## Acceptance Scenarios
-
-- A caller finds picked Photos rated four or five, creates an Album, adds
-  those IDs in Capture Time order, and opens the same Album in the Web.
-- A query spanning several pages receives no new members after a rescan or
-  decision change. Expiration produces a recoverable error without omissions.
-- A Photographer changes a queried Photo in the Web. A stale CLI write reports
-  conflict and leaves the newer decision intact.
-- A caller reads its own RAW Preview, obtains a usable local JPEG, and leaves
-  Original bytes and all browsing positions unchanged.
-- A lost response leaves an unknown result. Reading the affected object allows
-  the caller to inspect present state without an automatic duplicate write.
-- One conflicted Photo produces a partial batch result with explicit successful
-  siblings. A stale Album change commits nothing.
-- A caller opens a RAW Photo's workspace, adjusts instances/masks/curves, renders previews and exports into that same directory. Slipstream sees the completed output without a publication step; the caller downloads it or hands its path to another compatible independent tool.
-- The same standalone executable edits a supported arbitrary local file without Slipstream credentials, IDs or database, preserving the read-only input.
-- A remote caller receives honest host/access facts, and cannot mistake a service path for a local file. A local interrupted process is not described as a detached job.
-- Web and Agent writes use the same state; a stale guarded write refuses, and a late older-revision preview cannot replace the latest relevant rendition.
+[Instance Access](../access/spec.md) applies to both clients without per-person scopes, public sharing, or remote Agent hosting. The 0.1 support contract is a separate release boundary; this target does not publish a release.

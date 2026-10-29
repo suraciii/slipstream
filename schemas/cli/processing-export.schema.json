@@ -1,0 +1,925 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Slipstream CLI target retained processing adapter shapes — processing-export",
+  "description": "Target-only adapter carriers; operation semantics, UTF-8 byte limits, duplicate-key rejection, and cross-field comparisons remain in the CLI reference. No runtime conformance is implied.",
+  "$defs": {
+    "Work": {
+      "type": "object",
+      "properties": {
+        "photoId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "requestId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "stepId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "module": {
+          "type": "string",
+          "minLength": 1
+        },
+        "recipeRevision": {
+          "type": "string",
+          "minLength": 1
+        },
+        "adapterSchemaVersion": {
+          "type": "string",
+          "minLength": 1
+        },
+        "bundleId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourceRevision": {
+          "type": "string"
+        },
+        "parameters": {
+          "$ref": "processing-recipe.schema.json#/$defs/Parameters"
+        },
+        "input": {
+          "$ref": "processing-recipe.schema.json#/$defs/Binding"
+        },
+        "state": {
+          "enum": ["accepted", "executing", "succeeded", "failed", "cancelled"]
+        },
+        "acceptedAt": {
+          "type": "integer"
+        },
+        "attempt": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "sequence": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "beganAt": {
+                  "type": "integer"
+                }
+              },
+              "required": ["sequence", "beganAt"]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "artifactId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "failureReason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "terminalAt": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "retainUntil": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "photoId",
+        "requestId",
+        "stepId",
+        "module",
+        "recipeRevision",
+        "adapterSchemaVersion",
+        "bundleId",
+        "sourceRevision",
+        "parameters",
+        "input",
+        "state",
+        "acceptedAt",
+        "attempt",
+        "artifactId",
+        "failureReason",
+        "terminalAt",
+        "retainUntil"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "succeeded"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "artifactId": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "artifactId": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "failed"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "failureReason": {
+                "type": "string"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "failureReason": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": ["succeeded", "failed", "cancelled"]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "terminalAt": {
+                "type": "integer"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "terminalAt": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "Artifact": {
+      "type": "object",
+      "properties": {
+        "artifactId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "photoId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "stepId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "module": {
+          "type": "string",
+          "minLength": 1
+        },
+        "adapterSchemaVersion": {
+          "type": "string",
+          "minLength": 1
+        },
+        "bundleId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "filename": {
+          "type": "string"
+        },
+        "parameters": {
+          "$ref": "processing-recipe.schema.json#/$defs/Parameters"
+        },
+        "input": {
+          "type": "object",
+          "properties": {
+            "binding": {
+              "$ref": "processing-recipe.schema.json#/$defs/Binding"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "not": {
+                "pattern": "[^0-9a-f]"
+              }
+            },
+            "byteLength": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "required": ["binding", "sha256", "byteLength"]
+        },
+        "outputContract": {
+          "$ref": "processing-recipe.schema.json#/$defs/ImageContract"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "not": {
+            "pattern": "[^0-9a-f]"
+          }
+        },
+        "byteLength": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "publishedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "expiresAt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "webUrl": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https?://"
+        }
+      },
+      "required": [
+        "artifactId",
+        "photoId",
+        "stepId",
+        "module",
+        "adapterSchemaVersion",
+        "bundleId",
+        "filename",
+        "parameters",
+        "input",
+        "outputContract",
+        "sha256",
+        "byteLength",
+        "publishedAt",
+        "expiresAt"
+      ]
+    },
+    "ExportAcceptedData": {
+      "type": "object",
+      "properties": {
+        "photoId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "requestId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,128}$",
+          "not": {
+            "pattern": "[^A-Za-z0-9._-]"
+          }
+        },
+        "stepId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "outcome": {
+          "enum": ["accepted", "replayed"]
+        },
+        "state": {
+          "enum": ["accepted", "executing", "succeeded", "failed", "cancelled"]
+        },
+        "receipt": {
+          "$ref": "#/$defs/Work"
+        },
+        "webUrl": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https?://"
+        }
+      },
+      "required": [
+        "photoId",
+        "requestId",
+        "stepId",
+        "outcome",
+        "state",
+        "receipt",
+        "webUrl"
+      ]
+    },
+    "ExportPublishedData": {
+      "type": "object",
+      "properties": {
+        "photoId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "requestId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,128}$",
+          "not": {
+            "pattern": "[^A-Za-z0-9._-]"
+          }
+        },
+        "stepId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "outcome": {
+          "enum": ["published", "replayed"]
+        },
+        "artifact": {
+          "$ref": "#/$defs/Artifact"
+        },
+        "webUrl": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https?://"
+        }
+      },
+      "required": [
+        "photoId",
+        "requestId",
+        "stepId",
+        "outcome",
+        "artifact",
+        "webUrl"
+      ]
+    },
+    "WorkWithWebUrl": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/Work"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "webUrl": {
+              "type": "string",
+              "format": "uri",
+              "pattern": "^https?://"
+            }
+          },
+          "required": ["webUrl"]
+        }
+      ]
+    },
+    "CancelSucceededData": {
+      "type": "object",
+      "properties": {
+        "photoId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "requestId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,128}$",
+          "not": {
+            "pattern": "[^A-Za-z0-9._-]"
+          }
+        },
+        "stepId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "outcome": {
+          "const": "succeeded"
+        },
+        "replayed": {
+          "type": "boolean"
+        },
+        "artifact": {
+          "$ref": "#/$defs/Artifact"
+        },
+        "webUrl": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https?://"
+        }
+      },
+      "required": [
+        "photoId",
+        "requestId",
+        "stepId",
+        "outcome",
+        "replayed",
+        "artifact",
+        "webUrl"
+      ]
+    },
+    "HistoricalArtifact": {
+      "type": "object",
+      "properties": {
+        "exportId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "filename": {
+          "type": "string"
+        },
+        "orientation": {
+          "type": "string"
+        },
+        "sampleFormat": {
+          "type": "string"
+        },
+        "colorSpace": {
+          "type": "string"
+        },
+        "profileIdentity": {
+          "type": "string"
+        },
+        "target": {
+          "enum": ["development-tiff", "film-jpeg"]
+        },
+        "stage": {
+          "enum": ["develop", "film"]
+        },
+        "contentType": {
+          "enum": ["image/tiff", "image/jpeg"]
+        },
+        "iccEmbedded": {
+          "type": "boolean"
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "byteLength": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "not": {
+            "pattern": "[^0-9a-f]"
+          }
+        },
+        "expiresAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "exportId",
+        "filename",
+        "orientation",
+        "sampleFormat",
+        "colorSpace",
+        "profileIdentity",
+        "target",
+        "stage",
+        "contentType",
+        "iccEmbedded",
+        "width",
+        "height",
+        "byteLength",
+        "sha256",
+        "expiresAt"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "target": {
+                "const": "development-tiff"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "stage": {
+                "const": "develop"
+              },
+              "contentType": {
+                "const": "image/tiff"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "stage": {
+                "const": "film"
+              },
+              "contentType": {
+                "const": "image/jpeg"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "HistoricalExport": {
+      "type": "object",
+      "properties": {
+        "exportId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "photoId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "recipeVersion": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourceRevision": {
+          "type": "string"
+        },
+        "bundleId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "target": {
+          "enum": ["development-tiff", "film-jpeg"]
+        },
+        "state": {
+          "enum": ["queued", "running", "succeeded", "failed", "cancelled"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "settledAt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "terminalOutcome": {
+          "anyOf": [
+            {
+              "enum": ["succeeded", "failed", "cancelled"]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "failureReason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "receiptExpiresAt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "artifact": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HistoricalArtifact"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "exportId",
+        "photoId",
+        "recipeVersion",
+        "sourceRevision",
+        "bundleId",
+        "target",
+        "state",
+        "createdAt",
+        "settledAt",
+        "terminalOutcome",
+        "failureReason",
+        "receiptExpiresAt",
+        "artifact"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": ["succeeded", "failed", "cancelled"]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "settledAt": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "terminalOutcome": {
+                "enum": ["succeeded", "failed", "cancelled"]
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "settledAt": {
+                "type": "null"
+              },
+              "terminalOutcome": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "failed"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "failureReason": {
+                "type": "string"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "failureReason": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "not": {
+                  "const": "succeeded"
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "artifact": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "ExportListData": {
+      "type": "object",
+      "properties": {
+        "photoId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "exports": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Work"
+          },
+          "maxItems": 64
+        },
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Artifact"
+          },
+          "maxItems": 64
+        },
+        "historicalExports": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HistoricalExport"
+          },
+          "maxItems": 64
+        },
+        "webUrl": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https?://"
+        }
+      },
+      "required": [
+        "photoId",
+        "exports",
+        "artifacts",
+        "historicalExports",
+        "webUrl"
+      ]
+    },
+    "ArtifactInspectData": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/Artifact"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "webUrl": {
+              "type": "string",
+              "format": "uri",
+              "pattern": "^https?://"
+            }
+          },
+          "required": ["webUrl"]
+        }
+      ]
+    },
+    "ArtifactDownloadData": {
+      "type": "object",
+      "properties": {
+        "artifactId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "photoId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "stepId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "module": {
+          "type": "string",
+          "minLength": 1
+        },
+        "bundleId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "adapterSchemaVersion": {
+          "type": "string",
+          "minLength": 1
+        },
+        "filename": {
+          "type": "string"
+        },
+        "expiresAt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "byteLength": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "not": {
+            "pattern": "[^0-9a-f]"
+          }
+        },
+        "path": {
+          "type": "string"
+        },
+        "webUrl": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https?://"
+        },
+        "fileCommitted": {
+          "const": true
+        }
+      },
+      "required": [
+        "artifactId",
+        "photoId",
+        "stepId",
+        "module",
+        "bundleId",
+        "adapterSchemaVersion",
+        "filename",
+        "expiresAt",
+        "width",
+        "height",
+        "byteLength",
+        "sha256",
+        "path",
+        "webUrl",
+        "fileCommitted"
+      ]
+    },
+    "HistoricalDownloadData": {
+      "type": "object",
+      "properties": {
+        "exportId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "photoId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "historical": {
+          "const": true
+        },
+        "artifact": {
+          "$ref": "#/$defs/HistoricalArtifact"
+        },
+        "path": {
+          "type": "string"
+        },
+        "fileCommitted": {
+          "const": true
+        },
+        "webUrl": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https?://"
+        }
+      },
+      "required": [
+        "exportId",
+        "photoId",
+        "historical",
+        "artifact",
+        "path",
+        "fileCommitted",
+        "webUrl"
+      ]
+    }
+  }
+}

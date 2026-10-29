@@ -1,121 +1,132 @@
-# Library Management: Trash and Record Cleanup
+# Trash and Record Cleanup
 
-Photographers need to inspect discarded Photos, delete unwanted files with their own filesystem tools, and then remove the corresponding Slipstream records. Trash separates reversible Library removal, external file deletion, and irreversible record cleanup.
-
-[Photo Library and Albums](../spec.md) owns Photo identity and Album membership. [Composable Removal and Restore](../removal/spec.md) owns reversible operation evidence and recovery.
+[Photo Library and Albums](../spec.md) owns Photo identity and Album membership. [Removal and Restore](../removal/spec.md) owns reversible effects, attempt evidence, and recovery. Trash owns inspection and explicit record cleanup after external file deletion.
 
 ## Capability boundary
 
-Slipstream must not delete, move, rename, or rewrite an Original File. This rule has no Trash exception. Neither Web nor CLI may offer physical deletion, empty operating-system trash, run a shell deletion command, or obtain additional Original write permissions for cleanup.
+Slipstream MUST NOT delete, move, rename, or rewrite an Original File.
 
-The workflow has three distinct actions:
+Web and CLI MUST NOT offer physical deletion, empty operating-system trash, run a shell deletion command, or obtain additional Original write permissions for cleanup.
 
-1. **Remove from Library** puts eligible Photos in Trash while preserving their records and Original Files.
-2. The Photographer inspects or prints the Trash Locations and deletes the intended physical files outside Slipstream.
-3. **Clean up records** explicitly removes selected Slipstream records after their Originals are confirmed absent at their remembered Locations.
-
-Listing, printing, refreshing, a Library Check, a missing Original, or external deletion alone must not authorize record cleanup. Slipstream must not claim that it deleted files or reclaimed disk space.
+Listing, printing, refreshing, a Library Check, a missing Original, or external deletion alone MUST NOT authorize record cleanup. Slipstream MUST NOT claim that it deleted files or reclaimed disk space.
 
 ## Trash
 
-The Library Browser must provide a persistent, named **Trash** entry on desktop and mobile. It shows all Removed Photos whose records have not been restored or cleaned up, across Albums and sessions. Existing Removed Photos appear without another removal action. Trash must not inherit the active Album, Folder, or Selection State filter.
+The Library Browser MUST provide a persistent named **Trash** entry on desktop and mobile. It MUST show all Removed Photos whose records have not been restored or cleaned up, across Albums and sessions. Existing Removed Photos MUST appear without another removal; Trash MUST NOT inherit an active Album, Folder, or Selection State filter.
 
-Trash must show the complete item count and support progressively browsing every item, newest removal first. Each item shows its Photo identity, filename, relative Original Location, kind, removal time, Original availability, and a thumbnail when available. An unavailable Original or thumbnail must not hide the record. An empty Trash must state that there are no Photos in Trash.
+Trash MUST show the complete item count and support progressive browsing of every item, newest removal first.
 
-Loading, failed, and empty reads must remain distinct. A failed read offers Retry. The count and available removal Undo must come from the same successful read; an absent or empty removal operation must withdraw the previous Undo.
+Each item MUST show:
 
-Trash persists across reload and restart. It has no automatic expiration, physical emptying, or record cleanup. Deleting a file outside Slipstream does not automatically put its Photo in Trash or remove its record.
+- Photo identity;
+- filename and relative Original Location;
+- kind and removal time;
+- Original availability; and
+- a thumbnail when available.
 
-On narrow screens, filenames, Locations, facts, and Restore remain readable without horizontal scrolling. Long Locations may wrap. Counts, selection actions, listing output, and available Undo remain reachable without scrolling through the entire list.
+An unavailable Original or thumbnail MUST NOT hide the record.
 
-The ordinary list must lead with recognizable filename, removal time, and
-Restore, retaining the relative Original Location and availability. Existing
-thumbnails may support recognition; unavailable or failed delivery uses a
-truthful placeholder and must not hide the row or imply Original absence.
-Opaque identities, byte counts, and exact capture timestamps may use named
-Details. Changed or expired capture, exclusions, uncertainty, and actionable
-failure must stay visible at the affected selection or operation.
+An empty Trash MUST state that there are no Photos in Trash. Loading, failed, and empty reads MUST remain distinct; a failed read MUST offer Retry. The count and available removal Undo MUST come from the same successful read; an absent or empty operation MUST withdraw the previous Undo.
 
-An empty successful Trash shows its empty state and a close/return path rather
-than a bank of targetless disabled actions. With rows but no selection, batch
-actions may stay hidden until selection; individual Restore, selection, complete
-count, Location output, and available removal Undo remain reachable. No empty
-state may hide pending work or an unresolved prior outcome.
+Trash MUST persist across reload and restart without automatic expiration, physical emptying, or record cleanup. External deletion MUST NOT automatically put a Photo in Trash or remove its record.
 
-Location inspection, copying, printing, or saving must expose the Library Folder,
-capture qualification, and server/container namespace at the point of use under
-the listing contract below. Disclosure changes presentation only: exported
-evidence remains complete. The cleanup review must never hide its scope,
-absence evidence, refusal reasons, or irreversible record-loss consequence.
+On narrow screens, filenames, Locations, facts, and Restore MUST remain readable without horizontal scrolling. Long Locations MAY wrap. Counts, selection actions, listing output, and available Undo MUST remain reachable without scrolling through the entire list.
+
+The ordinary list MUST lead with recognizable filename, removal time, and Restore, while retaining the relative Original Location and availability. Existing thumbnails MAY support recognition; unavailable or failed delivery MUST use a truthful placeholder and MUST NOT hide the row or imply Original absence.
+
+Opaque identities, byte counts, and exact capture timestamps MAY use named Details. Opening or closing Details MUST NOT change selection.
+
+Changed or expired capture, exclusions, uncertainty, and actionable failure MUST stay visible at the affected selection or operation. The cleanup review MUST NOT hide its scope, absence evidence, refusal reasons, or irreversible record-loss consequence.
+
+An empty successful Trash MUST show its empty state and a close or return path instead of targetless disabled actions. With rows but no selection, batch actions MAY remain hidden, but individual Restore, selection, complete count, Location output, and available removal Undo MUST remain reachable.
+
+An empty state MUST NOT hide pending work or an unresolved prior outcome. An unknown outcome MUST retain its inspection path even when no Trash rows remain.
 
 ## Querying and printing Locations
 
-Web and CLI must let the caller inspect the complete Trash and obtain the Locations of an explicitly selected set or all captured Trash results. The caller must be able to print or save that listing without changing Library state. A first page or bounded subset must not be presented as the complete result.
+Web and CLI MUST support complete Trash inspection and Location output for an explicitly selected set or all captured Trash results. The caller MUST be able to print or save the listing without changing Library state. A first page or bounded subset MUST NOT be presented as complete.
 
-The listing must identify its Library and evaluated scope, capture time, total, and any continuation or bound. Each item must include Photo and Original identities, the observed removal marker, and the remembered Library-relative Original Location. Location output must identify the configured Library Folder and the server or container filesystem namespace in which it is meaningful. A remote client must not treat that Location as a client-local path; any host mapping belongs to the operator.
+The Web copy action MUST copy the explicit selection when one exists, or all captured Trash results otherwise. It MUST honor exclusions, leave the selection unchanged, and identify which scope was copied.
 
-RAW and same-basename JPEG remain separate entries. Sidecars, exports, directories, and other siblings must not join the listing merely by basename. Filenames containing spaces, quotes, Unicode, or line breaks must round-trip in structured output. Human-readable output must escape ambiguous control characters and must not masquerade as an executable deletion script.
+The listing MUST identify its Library, evaluated scope, capture time, total, and any continuation or bound. It MUST identify the capture expiry when applicable.
 
-The listing is an observation, not a file-deletion authorization or a guarantee that a Location still identifies the same content later. Before external deletion, the Photographer must check the intended physical files in the correct filesystem namespace. Slipstream must not generate or execute destructive shell commands as this capability.
+Each item MUST include:
+
+- Photo and Original identities;
+- the observed removal marker; and
+- the remembered Library-relative Original Location.
+
+Location output MUST identify the configured Library Folder and the server or container filesystem namespace in which it is meaningful.
+
+Location inspection, copying, printing, and saving MUST expose the Library Folder, capture qualification, and server or container namespace at the point of use. Disclosure changes presentation only; exported evidence MUST remain complete.
+
+A remote client MUST NOT treat that Location as a client-local path. Any host mapping belongs to the operator.
+
+RAW and same-basename JPEG MUST remain separate entries. Sidecars, exports, directories, and other siblings MUST NOT join by basename. Filenames containing spaces, quotes, Unicode, or line breaks MUST round-trip in structured output; human-readable output MUST escape ambiguous control characters and MUST NOT masquerade as an executable deletion script.
+
+The listing is an observation, not deletion authorization or a guarantee of later content identity. Before external deletion, the Photographer MUST check the intended physical files in the correct filesystem namespace. Slipstream MUST NOT generate or execute destructive shell commands as this capability.
 
 ## Selection and Restore
 
-The Photographer must be able to select individual items, select all captured Trash results across pages, exclude items, and clear the selection. The selected count describes the complete selection, not only visible rows. Later arrivals must not join a captured selection automatically. A bound must be disclosed; an oversized operation is refused rather than silently truncated. Leaving Trash clears its unsubmitted selection.
+The Photographer MUST be able to:
 
-**Restore** remains the primary recovery action. It supports single and multiple selected items through the existing removal-marker compare-and-set. It preserves Photo identity, Selection State, Rating, and membership positions in surviving Albums. It must not recreate deleted Albums or erase newer decisions.
+- select individual items;
+- select all captured Trash results across pages;
+- exclude items; and
+- clear the selection.
 
-A missing Original remains unavailable after Restore. Restoring a record does not recover file bytes. Restore reports successful, changed, unavailable, and failed items truthfully. Removal Undo applies only to retained records still owned by that removal; a cleaned-up record is no longer eligible. Historical removal outcomes must not recreate a cleaned-up record.
+The selected count MUST describe the complete selection, not only visible rows. Later arrivals MUST NOT join a captured selection automatically.
+
+A bound MUST be disclosed; an oversized operation MUST be refused rather than silently truncated. Leaving Trash MUST clear its unsubmitted selection.
+
+**Restore** MUST remain the primary recovery action and support single and multiple selected items under the [Removal and Restore contract](../removal/spec.md#restore). Removal Undo applies only to retained records still owned by that removal; cleaned-up records are ineligible.
 
 ## Trash Record Cleanup
 
-Only explicitly selected records currently in Trash are eligible. A rejected Selection State is not an additional requirement. Cleanup must not act on active unavailable Photos, a live path query, or every missing Photo in the Library.
+Only explicitly selected records currently in Trash are eligible. Rejected Selection State is not an additional requirement. Cleanup MUST NOT act on active unavailable Photos, a live path query, or every missing Photo in the Library.
 
-The cleanup review must identify the exact records, remembered Locations, current absence evidence, and affected Albums. It must explain that cleanup discards the selected Photo records, Library decisions, and Album memberships, cannot be undone by Slipstream, and does not delete any physical file. The final action says **Clean up N Photo records**. Cancel changes nothing.
+The cleanup review MUST identify the exact records, remembered Locations, current absence evidence, and affected Albums.
 
-At application, Slipstream must revalidate the Photo identity, removal marker, Original identity, and remembered Location. A restored, re-removed, relocated, or otherwise changed target is refused and requires fresh inspection. Another record occupying an old Location must never inherit permission to be cleaned up.
+It MUST explain that cleanup discards selected Photo records, Library decisions, and Album memberships. It MUST explain that cleanup cannot be undone by Slipstream and does not delete files.
 
-Slipstream must freshly inspect each admitted Location through read-only access beneath the admitted Library Folder. An outdated unavailable flag or missing thumbnail is not absence evidence. The following must refuse cleanup and retain the record:
+The final action says **Clean up N Photo records**. Cancel MUST change nothing.
 
-- a file or other entry still exists at the Location, including a replacement file;
+At application, Slipstream MUST revalidate Photo identity, removal marker, Original identity, and remembered Location. A restored, re-removed, relocated, or otherwise changed target MUST be refused and require fresh inspection. Another record occupying an old Location MUST NOT inherit cleanup permission.
+
+Slipstream MUST freshly inspect each admitted Location through read-only access beneath the admitted Library Folder. An outdated unavailable flag or missing thumbnail is not absence evidence. Cleanup MUST refuse and retain the record when:
+
+- a file or other entry still exists at the Location, including a replacement;
 - the Library Folder is unavailable, changed, or cannot be safely inspected;
 - permission denial, I/O failure, unsafe traversal, or uncertain inspection prevents establishing absence; or
-- retained workspace state, an Edit Recipe, a referenced Processing Artifact, or active or unresolved work still depends on the Photo. Such work uses the separate [Photo Workspace lifetime](../../photo-development/workspace/spec.md#lifetime-and-recovery) and explicit removal rules.
+- retained workspace state, an Edit Recipe, a referenced Processing Artifact, or active or unresolved work depends on the Photo. Such work follows [Photo Workspace lifetime](../../photo-development/workspace/spec.md#lifetime-and-recovery) and its explicit removal rules.
 
-Absence at one remembered Location does not prove that the Photographer deleted all copies, rather than moved a file, or that any storage was reclaimed. The Photographer confirms that record cleanup is intended despite that limit. Cleanup does not search backups, delete a replacement, recover a moved Original, or implicitly discard retained development work.
+Absence at one Location does not prove that the Photographer deleted all copies or reclaimed storage. The Photographer MUST confirm record cleanup despite that limit. Cleanup MUST NOT search backups, delete a replacement, recover a moved Original, or implicitly discard retained development work.
 
 ## Effects and recovery
 
-A confirmed cleanup removes the selected Photo records, their decisions and Album memberships, and Original records no longer referenced by retained Library state. It preserves remaining Album order and makes a saved position for a cleaned-up Photo unavailable. It must not delete an Original, Sidecar, workspace file, export, backup, directory, or cache file as a cleanup effect.
+Confirmed cleanup removes selected Photo records, their decisions and Album memberships, and Original records no longer referenced by retained Library state. It MUST preserve remaining Album order and make a saved position for a cleaned-up Photo unavailable. It MUST NOT delete Original, Sidecar, workspace, export, backup, directory, or cache files.
 
-Known Sidecar ownership must remain protected by the [Metadata association contract](../metadata/spec.md#sources-and-association). Cleaning up a missing RAW must not silently transfer its retained Sidecar to a same-basename JPEG.
+Known Sidecar ownership MUST remain protected by the [Metadata association contract](../metadata/spec.md#sources-and-association). Cleaning up a missing RAW MUST NOT silently transfer its retained Sidecar to a same-basename JPEG.
 
-A batch may refuse some items and clean up others. Results account for every selected identity exactly once and distinguish cleaned-up records, changed targets, present Originals, blocked dependencies, unavailable records, and inspection failures. Counts describe records, never deleted files or reclaimed bytes. Refused records remain available for inspection and Restore.
+A batch MAY refuse some items and clean up others. Results MUST account for each selected identity exactly once and distinguish:
 
-The caller must retain the cleanup attempt identity before submission. A lost response has an unknown outcome until the same attempt is inspected. Accepted outcomes survive reload and restart. Repeating a known attempt with identical intent returns its historical result without applying it again; different intent under that identity is refused. A failed or refused target needs fresh inspection and a new confirmed attempt, not an automatic widening retry.
+- cleaned-up records;
+- changed targets;
+- present Originals;
+- blocked dependencies;
+- unavailable records; and
+- inspection failures.
 
-Restore, cleanup, Library Check, Location Recovery, and development admission must not publish conflicting effects on one record. A stale review cannot clean up a restored Photo or a newer removal. After a confirmed result, Trash, Library and Album counts, open results, saved positions, and Undo availability must agree with the committed records.
+Counts MUST describe records, never deleted files or reclaimed bytes. Refused records remain available for inspection and Restore.
 
-Cleaned-up identities must not reappear through receipt replay, restart, Restore, or Location Recovery. If a physical file later appears under a cleaned-up Location, the normal Library Check and Location Recovery rules apply to other retained identities first. If no retained identity qualifies, discovery creates a new independent Photo. Neither case recovers the cleaned-up identity, decisions, or Album memberships.
+The caller MUST retain the cleanup attempt identity before submission. A lost response has an unknown outcome until the same attempt is inspected. Accepted outcomes MUST survive reload and restart; identical retries MUST return historical results without reapplying effects, while different intent under that identity MUST be refused.
+
+A failed or refused target requires fresh inspection and a new confirmed attempt, not an automatic widening retry. Restore, cleanup, Library Check, Location Recovery, and development admission MUST NOT publish conflicting effects on one record. A stale review MUST NOT clean up a restored Photo or newer removal.
+
+After confirmation, Trash, Library and Album counts, open results, saved positions, and Undo availability MUST agree with committed records. Cleaned-up identities MUST NOT reappear through receipt replay, restart, Restore, or Location Recovery.
+
+If a physical file later appears under a cleaned-up Location, normal Library Check and Location Recovery MUST apply to other retained identities first. If none qualifies, discovery creates a new independent Photo with default decisions and no old Album membership. Neither case recovers the cleaned-up identity, decisions, or Album memberships.
 
 ## Human and Agent use
 
-Web and CLI must expose the same inspection, selection, absence checks, explicit record-cleanup consent, and outcome recovery. Neither requires browser automation, database access, or a privileged filesystem-deletion helper. Exact command and transport mechanics belong to their interface contracts; the capability must not reuse an Original-deletion action with a different meaning.
-
-## Acceptance examples
-
-- Photos removed across Albums and sessions remain in Trash after restart. Listing or printing all pages changes no record or file.
-- Select more records than one visible page and exclude one. The output and cleanup name only the captured selection; later Trash arrivals do not join it.
-- The Photographer externally deletes a listed RAW. Cleanup removes its eligible records while the JPEG sibling, retained Sidecar, exports, and directories remain byte-for-byte unchanged.
-- A selected set contains an absent Original, a present Original, and an uninspectable Location. Only the absent, otherwise eligible record is cleaned up; the other records and all filesystem entries remain unchanged.
-- Restore a reviewed Photo and remove it again. The old cleanup confirmation cannot remove either the active Photo or the newer removal.
-- A file is moved or replaced after listing. Listing alone authorizes no mutation; cleanup refuses a present replacement, and absence elsewhere is not presented as proof of physical deletion.
-- A missing Original has retained editing work. Cleanup names the blocker and leaves both the Photo record and work intact until the separate explicit workspace action permits cleanup.
-- Lose the cleanup response and restart. Inspecting the original attempt recovers its committed record outcomes without a second effect.
-- A cleaned-up Location later contains a supported file with no qualifying retained recovery candidate. A Library Check discovers a new Photo with default decisions and no old Album membership. If the file instead uniquely matches another retained unavailable Original, normal Location Recovery preserves that other identity, never the cleaned-up one.
-- A thumbnail is unavailable or fails to transfer. Its Trash record remains
-  recognizable and restorable; cleanup still requires fresh absence evidence.
-- The last visible row is restored while an earlier outcome remains unknown.
-  The resulting empty list must retain that unknown outcome's inspection path.
-- A remote Photographer opens File locations from a compact row. The output
-  identifies the Library Folder, capture, and execution namespace before it can
-  be mistaken for a client-local path; closing details changes no selection.
+Web and CLI MUST expose the same inspection, selection, absence checks, explicit record-cleanup consent, and outcome recovery. Neither requires browser automation, database access, or a privileged filesystem-deletion helper. Interface contracts own command and transport mechanics; cleanup MUST NOT reuse an Original-deletion action with a different meaning.

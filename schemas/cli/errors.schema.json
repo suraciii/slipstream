@@ -1,0 +1,867 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Slipstream CLI target error detail shapes",
+  "description": "Target error detail fields, not runtime validation. Code-named definitions map to detail carriers. Workspace and darktable operation names must be actual documented command paths. Cross-field and error-selection semantics remain in the CLI reference.",
+  "$defs": {
+    "OperationDetails": {
+      "type": "object",
+      "properties": {
+        "operation": {
+          "anyOf": [
+            {
+              "enum": [
+                "auth-login",
+                "auth-status",
+                "auth-use",
+                "auth-logout",
+                "status",
+                "library-check",
+                "folders-list",
+                "albums-list",
+                "trash-list",
+                "trash-empty",
+                "trash-cleanup",
+                "trash-cleanup-operation",
+                "albums-get",
+                "photos-list",
+                "photos-get",
+                "photos-resolve",
+                "photos-preview",
+                "photos-set",
+                "albums-create",
+                "albums-rename",
+                "albums-delete",
+                "albums-add",
+                "albums-remove",
+                "albums-reorder",
+                "processing-modules",
+                "processing-artifact",
+                "processing-artifact-download",
+                "photos-processing-recipe-get",
+                "photos-processing-recipe-save",
+                "photos.processing-recipe.auto",
+                "photos-processing-recipe-rebind",
+                "photos-processing-preview",
+                "photos-processing-export",
+                "photos-processing-export-list",
+                "photos-processing-export-status",
+                "photos-processing-export-cancel",
+                "photos-processing-export-retry",
+                "photos-historical-export-download",
+                "recovery-unavailable",
+                "recovery-propose",
+                "recovery-apply"
+              ]
+            },
+            {
+              "type": "string",
+              "pattern": "^(workspace|darktable)-.+$"
+            }
+          ]
+        }
+      },
+      "required": ["operation"]
+    },
+    "InvalidInputDetails": {
+      "type": "object",
+      "properties": {
+        "argument": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": ["argument", "reason"]
+    },
+    "NotFoundDetails": {
+      "type": "object",
+      "properties": {
+        "resource": {
+          "enum": [
+            "photo",
+            "album",
+            "folder",
+            "original",
+            "workspace",
+            "workspace-artifact"
+          ]
+        },
+        "reference": {
+          "type": "string"
+        }
+      },
+      "required": ["resource", "reference"]
+    },
+    "ConflictDetails": {
+      "type": "object",
+      "properties": {
+        "resource": {
+          "enum": ["photo", "album"]
+        },
+        "reference": {
+          "type": "string"
+        },
+        "currentVersion": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": ["resource", "reference", "currentVersion"]
+    },
+    "RecipeConflictDetails": {
+      "type": "object",
+      "properties": {
+        "photoId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "currentRecipeVersion": {
+          "type": ["string", "null"]
+        }
+      },
+      "required": ["photoId", "currentRecipeVersion"]
+    },
+    "NameConflictDetails": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "albumId": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": ["name", "albumId"]
+    },
+    "LimitExceededDetails": {
+      "type": "object",
+      "properties": {
+        "limitName": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "actual": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": ["limitName", "limit", "actual"]
+    },
+    "CursorExpiredDetails": {
+      "type": "object",
+      "properties": {
+        "cursorKind": {
+          "enum": [
+            "folder",
+            "album",
+            "photo",
+            "trash",
+            "unavailable",
+            "mappings",
+            "workspace",
+            "darktable"
+          ]
+        },
+        "reason": {
+          "enum": [
+            "publication_replaced",
+            "process_restarted",
+            "idle_or_evicted"
+          ]
+        }
+      },
+      "required": ["cursorKind", "reason"],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "cursorKind": {
+                "const": "trash"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "enum": ["process_restarted", "idle_or_evicted"]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "IncompatibleServerDetails": {
+      "type": "object",
+      "properties": {
+        "requestedContractVersion": {
+          "type": "integer"
+        },
+        "supportedContractVersions": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          }
+        },
+        "reason": {
+          "type": "string"
+        },
+        "field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": ["requestedContractVersion", "supportedContractVersions"]
+    },
+    "LibraryUnavailableDetails": {
+      "type": "object",
+      "properties": {
+        "scan": {
+          "$ref": "results-query.schema.json#/$defs/ScanStatus"
+        }
+      },
+      "required": ["scan"]
+    },
+    "PreviewUnavailableDetails": {
+      "type": "object",
+      "properties": {
+        "photoId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "state": {
+          "enum": ["inspection-pending", "failed", "unavailable"]
+        }
+      },
+      "required": ["photoId", "state"]
+    },
+    "RecoveryConflictDetails": {
+      "type": "object",
+      "properties": {
+        "appliedMappings": {
+          "const": 0
+        },
+        "refusedMappings": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "rejections": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "originalId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": ["originalId", "reason"]
+          }
+        }
+      },
+      "required": ["appliedMappings", "refusedMappings", "rejections"]
+    },
+    "RecoveryScopeExceededDetails": {
+      "type": "object",
+      "properties": {
+        "evaluated": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": ["evaluated", "limit"]
+    },
+    "ServerBusyDetails": {
+      "type": "object",
+      "properties": {
+        "operation": {
+          "anyOf": [
+            {
+              "enum": [
+                "auth-login",
+                "auth-status",
+                "auth-use",
+                "auth-logout",
+                "status",
+                "library-check",
+                "folders-list",
+                "albums-list",
+                "trash-list",
+                "trash-empty",
+                "trash-cleanup",
+                "trash-cleanup-operation",
+                "albums-get",
+                "photos-list",
+                "photos-get",
+                "photos-resolve",
+                "photos-preview",
+                "photos-set",
+                "albums-create",
+                "albums-rename",
+                "albums-delete",
+                "albums-add",
+                "albums-remove",
+                "albums-reorder",
+                "processing-modules",
+                "processing-artifact",
+                "processing-artifact-download",
+                "photos-processing-recipe-get",
+                "photos-processing-recipe-save",
+                "photos.processing-recipe.auto",
+                "photos-processing-recipe-rebind",
+                "photos-processing-preview",
+                "photos-processing-export",
+                "photos-processing-export-list",
+                "photos-processing-export-status",
+                "photos-processing-export-cancel",
+                "photos-processing-export-retry",
+                "photos-historical-export-download",
+                "recovery-unavailable",
+                "recovery-propose",
+                "recovery-apply"
+              ]
+            },
+            {
+              "type": "string",
+              "pattern": "^(workspace|darktable)-.+$"
+            }
+          ]
+        },
+        "retryAfterSeconds": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": ["operation", "retryAfterSeconds"]
+    },
+    "PartialResultDetails": {
+      "type": "object",
+      "properties": {
+        "counts": {
+          "type": "object",
+          "properties": {
+            "changed": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "unchanged": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "conflict": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "missing": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": ["changed", "unchanged", "conflict", "missing"]
+        }
+      },
+      "required": ["counts"]
+    },
+    "TrashCleanupItem": {
+      "type": "object",
+      "properties": {
+        "photoId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "originalLocation": {
+          "type": "string",
+          "minLength": 1
+        },
+        "originalKind": {
+          "enum": ["raw", "jpeg"]
+        },
+        "state": {
+          "enum": [
+            "cleaned",
+            "changed",
+            "present",
+            "blocked",
+            "unavailable",
+            "inspection-failed"
+          ]
+        },
+        "message": {
+          "type": ["string", "null"]
+        },
+        "blockers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "minLength": 1
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "action": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": ["kind", "name", "action"]
+          }
+        }
+      },
+      "required": [
+        "photoId",
+        "originalLocation",
+        "originalKind",
+        "state",
+        "message",
+        "blockers"
+      ],
+      "if": {
+        "properties": {
+          "state": { "const": "blocked" }
+        }
+      },
+      "then": {
+        "properties": {
+          "blockers": { "minItems": 1 }
+        }
+      }
+    },
+    "TrashCleanupPartialDetails": {
+      "type": "object",
+      "properties": {
+        "counts": {
+          "type": "object",
+          "properties": {
+            "cleaned": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "changed": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "present": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "blocked": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "unavailable": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "inspectionFailed": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "cleaned",
+            "changed",
+            "present",
+            "blocked",
+            "unavailable",
+            "inspectionFailed"
+          ]
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TrashCleanupItem"
+          }
+        }
+      },
+      "required": ["counts", "items"]
+    },
+    "OutcomeUnknownDetails": {
+      "type": "object",
+      "properties": {
+        "operation": {
+          "anyOf": [
+            {
+              "enum": [
+                "auth-login",
+                "auth-status",
+                "auth-use",
+                "auth-logout",
+                "status",
+                "library-check",
+                "folders-list",
+                "albums-list",
+                "trash-list",
+                "trash-empty",
+                "trash-cleanup",
+                "trash-cleanup-operation",
+                "albums-get",
+                "photos-list",
+                "photos-get",
+                "photos-resolve",
+                "photos-preview",
+                "photos-set",
+                "albums-create",
+                "albums-rename",
+                "albums-delete",
+                "albums-add",
+                "albums-remove",
+                "albums-reorder",
+                "processing-modules",
+                "processing-artifact",
+                "processing-artifact-download",
+                "photos-processing-recipe-get",
+                "photos-processing-recipe-save",
+                "photos.processing-recipe.auto",
+                "photos-processing-recipe-rebind",
+                "photos-processing-preview",
+                "photos-processing-export",
+                "photos-processing-export-list",
+                "photos-processing-export-status",
+                "photos-processing-export-cancel",
+                "photos-processing-export-retry",
+                "photos-historical-export-download",
+                "recovery-unavailable",
+                "recovery-propose",
+                "recovery-apply"
+              ]
+            },
+            {
+              "type": "string",
+              "pattern": "^(workspace|darktable)-.+$"
+            }
+          ]
+        },
+        "photoIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "albumId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "albumName": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "workspaceId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "artifactId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "requestId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": ["operation", "photoIds", "albumId", "albumName"],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "operation": {
+                "enum": ["workspace-open", "workspace-remove"]
+              }
+            },
+            "required": ["operation"]
+          },
+          "then": {
+            "required": ["workspaceId", "artifactId", "requestId"]
+          }
+        }
+      ]
+    },
+    "LocalIoFailedDetails": {
+      "type": "object",
+      "properties": {
+        "operation": {
+          "enum": [
+            "read-credential",
+            "read-input",
+            "write-preview",
+            "write-output"
+          ]
+        },
+        "path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fileCommitted": {
+          "type": "boolean"
+        }
+      },
+      "required": ["operation", "path", "fileCommitted"]
+    },
+    "ArtifactChangedDetails": {
+      "type": "object",
+      "properties": {
+        "workspaceId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "artifactId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expectedRevision": {},
+        "currentRevision": {}
+      },
+      "required": [
+        "workspaceId",
+        "artifactId",
+        "expectedRevision",
+        "currentRevision"
+      ]
+    },
+    "ArtifactBlocker": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "enum": [
+            "state",
+            "job",
+            "output",
+            "dependency",
+            "active-use",
+            "unverified-use"
+          ]
+        },
+        "id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "action": {
+          "type": "string"
+        }
+      },
+      "required": ["kind", "id", "name", "action"]
+    },
+    "ArtifactReferencedDetails": {
+      "type": "object",
+      "properties": {
+        "workspaceId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "artifactId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "revision": {
+          "type": "string",
+          "minLength": 1
+        },
+        "blockers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ArtifactBlocker"
+          }
+        }
+      },
+      "required": ["workspaceId", "artifactId", "revision", "blockers"]
+    },
+    "WorkspaceBlocker": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "enum": [
+            "state",
+            "job",
+            "output",
+            "dependency",
+            "active-use",
+            "unverified-use"
+          ]
+        },
+        "id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "action": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": ["kind", "id", "name", "action"]
+    },
+    "WorkspaceReferencedDetails": {
+      "type": "object",
+      "properties": {
+        "workspaceId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "blockers": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/WorkspaceBlocker"
+          }
+        }
+      },
+      "required": ["workspaceId", "blockers"]
+    },
+    "authentication_required": {
+      "$ref": "#/$defs/OperationDetails"
+    },
+    "access_denied": {
+      "$ref": "#/$defs/OperationDetails"
+    },
+    "invalid_input": {
+      "$ref": "#/$defs/InvalidInputDetails"
+    },
+    "not_found": {
+      "$ref": "#/$defs/NotFoundDetails"
+    },
+    "conflict": {
+      "anyOf": [
+        { "$ref": "#/$defs/ConflictDetails" },
+        { "$ref": "#/$defs/RecipeConflictDetails" }
+      ]
+    },
+    "name_conflict": {
+      "$ref": "#/$defs/NameConflictDetails"
+    },
+    "limit_exceeded": {
+      "$ref": "#/$defs/LimitExceededDetails"
+    },
+    "cursor_expired": {
+      "$ref": "#/$defs/CursorExpiredDetails"
+    },
+    "incompatible_server": {
+      "$ref": "#/$defs/IncompatibleServerDetails"
+    },
+    "library_unavailable": {
+      "$ref": "#/$defs/LibraryUnavailableDetails"
+    },
+    "preview_unavailable": {
+      "$ref": "#/$defs/PreviewUnavailableDetails"
+    },
+    "recovery_conflict": {
+      "$ref": "#/$defs/RecoveryConflictDetails"
+    },
+    "recovery_scope_exceeded": {
+      "$ref": "#/$defs/RecoveryScopeExceededDetails"
+    },
+    "server_busy": {
+      "$ref": "#/$defs/ServerBusyDetails"
+    },
+    "storage_failed": {
+      "$ref": "#/$defs/OperationDetails"
+    },
+    "partial_result": {
+      "$ref": "#/$defs/PartialResultDetails"
+    },
+    "trash_cleanup_partial": {
+      "$ref": "#/$defs/TrashCleanupPartialDetails"
+    },
+    "transport_failed": {
+      "$ref": "#/$defs/OperationDetails"
+    },
+    "outcome_unknown": {
+      "$ref": "#/$defs/OutcomeUnknownDetails"
+    },
+    "local_io_failed": {
+      "$ref": "#/$defs/LocalIoFailedDetails"
+    },
+    "artifact_changed": {
+      "$ref": "#/$defs/ArtifactChangedDetails"
+    },
+    "artifact_referenced": {
+      "$ref": "#/$defs/ArtifactReferencedDetails"
+    },
+    "workspace_referenced": {
+      "$ref": "#/$defs/WorkspaceReferencedDetails"
+    }
+  }
+}

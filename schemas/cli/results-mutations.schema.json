@@ -1,0 +1,609 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Slipstream CLI target result shapes — results-mutations",
+  "description": "Target CLI output data shapes, not an assertion that current runtime carriers implement them. Definitions are selected by command. Operation and cross-field semantics remain in the CLI reference.",
+  "$defs": {
+    "PhotoDecision": {
+      "type": "object",
+      "properties": {
+        "selectionState": {
+          "enum": ["unflagged", "picked", "rejected"]
+        },
+        "rating": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5
+        },
+        "decisionVersion": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": ["selectionState", "rating", "decisionVersion"]
+    },
+    "PriorDecision": {
+      "type": "object",
+      "properties": {
+        "selectionState": {
+          "enum": ["unflagged", "picked", "rejected"]
+        },
+        "rating": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5
+        }
+      },
+      "required": ["selectionState", "rating"]
+    },
+    "PhotoDecisionResult": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "photoId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "outcome": {
+              "const": "changed"
+            },
+            "prior": {
+              "$ref": "#/$defs/PriorDecision"
+            },
+            "current": {
+              "$ref": "#/$defs/PhotoDecision"
+            }
+          },
+          "required": ["photoId", "outcome", "prior", "current"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "photoId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "outcome": {
+              "const": "unchanged"
+            },
+            "current": {
+              "$ref": "#/$defs/PhotoDecision"
+            }
+          },
+          "required": ["photoId", "outcome", "current"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "photoId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "outcome": {
+              "const": "conflict"
+            },
+            "current": {
+              "$ref": "#/$defs/PhotoDecision"
+            }
+          },
+          "required": ["photoId", "outcome", "current"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "photoId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "outcome": {
+              "const": "missing"
+            }
+          },
+          "required": ["photoId", "outcome"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "PhotoDecisionData": {
+      "type": "object",
+      "properties": {
+        "results": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PhotoDecisionResult"
+          }
+        },
+        "counts": {
+          "type": "object",
+          "properties": {
+            "changed": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "unchanged": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "conflict": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "missing": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": ["changed", "unchanged", "conflict", "missing"]
+        }
+      },
+      "required": ["results", "counts"]
+    },
+    "RemovalResult": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "photoId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "outcome": {
+              "const": "removed"
+            },
+            "removedAtMs": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": ["photoId", "outcome", "removedAtMs"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "photoId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "outcome": {
+              "enum": ["changed-elsewhere", "unavailable", "already-removed"]
+            },
+            "removedAtMs": {
+              "type": "null"
+            }
+          },
+          "required": ["photoId", "outcome", "removedAtMs"]
+        }
+      ]
+    },
+    "RemovalData": {
+      "type": "object",
+      "properties": {
+        "operationId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "counts": {
+          "type": "object",
+          "properties": {
+            "removed": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "changedElsewhere": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "missing": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "alreadyRemoved": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "removed",
+            "changedElsewhere",
+            "missing",
+            "alreadyRemoved"
+          ]
+        },
+        "results": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RemovalResult"
+          }
+        }
+      },
+      "required": ["operationId", "counts", "results"]
+    },
+    "RestoreData": {
+      "type": "object",
+      "properties": {
+        "operationId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "counts": {
+          "type": "object",
+          "properties": {
+            "restored": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "alreadyActive": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "changedElsewhere": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "missing": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "restored",
+            "alreadyActive",
+            "changedElsewhere",
+            "missing"
+          ]
+        },
+        "results": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "photoId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "outcome": {
+                "enum": [
+                  "restored",
+                  "already-active",
+                  "changed-elsewhere",
+                  "unavailable"
+                ]
+              }
+            },
+            "required": ["photoId", "outcome"]
+          }
+        }
+      },
+      "required": ["operationId", "counts", "results"]
+    },
+    "AlbumCreateData": {
+      "type": "object",
+      "properties": {
+        "album": {
+          "$ref": "results-query.schema.json#/$defs/AlbumSummary"
+        }
+      },
+      "required": ["album"]
+    },
+    "AlbumRenameData": {
+      "type": "object",
+      "properties": {
+        "album": {
+          "$ref": "results-query.schema.json#/$defs/AlbumSummary"
+        },
+        "renamed": {
+          "type": "boolean"
+        }
+      },
+      "required": ["album", "renamed"]
+    },
+    "AlbumDeleteData": {
+      "type": "object",
+      "properties": {
+        "albumId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "deleted": {
+          "const": true
+        },
+        "originalFilesChanged": {
+          "const": false
+        }
+      },
+      "required": ["albumId", "deleted", "originalFilesChanged"]
+    },
+    "AlbumAddData": {
+      "type": "object",
+      "properties": {
+        "album": {
+          "$ref": "results-query.schema.json#/$defs/AlbumSummary"
+        },
+        "addedPhotoIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "alreadyMemberPhotoIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": ["album", "addedPhotoIds", "alreadyMemberPhotoIds"]
+    },
+    "AlbumRemoveData": {
+      "type": "object",
+      "properties": {
+        "album": {
+          "$ref": "results-query.schema.json#/$defs/AlbumSummary"
+        },
+        "removedPhotoIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "alreadyAbsentPhotoIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "savedPhotoId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "album",
+        "removedPhotoIds",
+        "alreadyAbsentPhotoIds",
+        "savedPhotoId"
+      ]
+    },
+    "AlbumReorderData": {
+      "type": "object",
+      "properties": {
+        "album": {
+          "$ref": "results-query.schema.json#/$defs/AlbumSummary"
+        },
+        "orderedPhotoIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "reordered": {
+          "type": "boolean"
+        }
+      },
+      "required": ["album", "orderedPhotoIds", "reordered"]
+    },
+    "RecoveryItem": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "enum": ["unavailable", "available", "removed", "missing"]
+        },
+        "originalId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "photoId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "location": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": ["raw", "jpeg"]
+        },
+        "selectionState": {
+          "enum": ["unflagged", "picked", "rejected"]
+        },
+        "fingerprintEnrolled": {
+          "type": "boolean"
+        },
+        "albumCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "webUrl": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https?://"
+        }
+      },
+      "required": [
+        "state",
+        "originalId",
+        "photoId",
+        "location",
+        "kind",
+        "selectionState",
+        "fingerprintEnrolled",
+        "albumCount",
+        "webUrl"
+      ]
+    },
+    "RecoveryMapping": {
+      "type": "object",
+      "properties": {
+        "mappingId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "originalId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "photoId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "fromLocation": {
+          "type": "string"
+        },
+        "toLocation": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": ["raw", "jpeg"]
+        },
+        "outcome": {
+          "enum": [
+            "matched",
+            "content-mismatch",
+            "missing",
+            "kind-mismatch",
+            "unreadable",
+            "occupied",
+            "colliding"
+          ]
+        },
+        "verified": {
+          "type": "boolean"
+        },
+        "blockedReason": {
+          "anyOf": [
+            {
+              "enum": [
+                "colliding",
+                "content-mismatch",
+                "destination-in-use",
+                "destination-removed",
+                "kind-mismatch",
+                "missing",
+                "unreadable"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "retire": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "photoId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "originalId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "location": {
+                  "type": "string"
+                }
+              },
+              "required": ["photoId", "originalId", "location"]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "mappingId",
+        "originalId",
+        "photoId",
+        "fromLocation",
+        "toLocation",
+        "kind",
+        "outcome",
+        "verified",
+        "blockedReason",
+        "retire"
+      ]
+    },
+    "RecoveryListData": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RecoveryItem"
+              },
+              {
+                "$ref": "#/$defs/RecoveryMapping"
+              }
+            ]
+          }
+        },
+        "total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "nextCursor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evaluatedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "expiresAt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": ["items", "total", "nextCursor", "evaluatedAt", "expiresAt"],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "nextCursor": {
+                "type": "null"
+              }
+            },
+            "required": ["nextCursor"]
+          },
+          "then": {
+            "properties": {
+              "expiresAt": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "expiresAt": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

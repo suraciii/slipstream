@@ -1,405 +1,220 @@
 # Deployment
 
-The Library service ships as one Docker image containing the Rust server, the built Web
-application, native runtime libraries, and `curl` for the `/healthz` check.
-There is no Node, Bun, Sharp, or Node-API runtime in the image. This guide
-defines the supported Linux-local Docker deployment contract. Backup,
-acceptance, and rollback step-by-step procedures are operator material and live
-with the deployment, not in this repository.
+The supported deployment is a Linux amd64 host with the repository-owned Docker image and Compose entry point. The image contains the Rust server, built Web application, native runtime libraries, and `curl` for `/healthz`; it does not contain Node, Bun, npm, Sharp, or Node-API runtime artifacts.
+
+The image runs as UID and GID `1000:1000`. [Container Build Inputs](container-inputs.md) owns reproducible native inputs. [Support and Release](support.md) distinguishes the `0.1` artifact from target capabilities.
 
 ## Optional Standard Metadata Save
 
-The default read-only Compose Library supports Read Metadata, not Save. Save
-requires the exclusive deployment described in
-[Standard Metadata design](../photo-library/metadata/design.md#supported-deployment-shape).
-The host supervisor is a trusted root component; the Web service must receive
-only its private Unix socket and a read-only bind of the Library Folder. It
-must not receive the backing tree directly, host root privilege, the systemd
-bus, or the Docker socket. Keep the writer identity distinct from Web and
-reserve it for this instance's Samba workers and metadata helper.
+The default read-only Compose Library supports Read Metadata, not Save. Save requires the exclusive deployment in [Standard Metadata design](../photo-library/metadata/design.md#supported-deployment-shape).
 
-The repository supplies the Python standard-library
-[`supervisor.py`](../../tools/metadata/supervisor.py),
-[`provision.py`](../../tools/metadata/provision.py), and the
-[`supervisor`](../../systemd/slipstream-metadata-supervisor@.service) and
-[`Samba`](../../systemd/slipstream-metadata-smb@.service) systemd templates.
-Install on a systemd/cgroup-v2 host with Python 3, Samba (`smbd`, `testparm`,
-`smbpasswd`), util-linux (`findmnt`), and an ext2/ext3/ext4, XFS, or Btrfs
-backing filesystem. Set `fs.protected_hardlinks=1`. Samba must recognize
-`smb3 directory leases`; unknown parameters make Save unavailable rather than
-silently weakening the boundary. Do not install template overrides or replace
-the supplied `KillMode=control-group` and `ExecStopPost` recovery.
+The host supervisor is a trusted root component. The Web service MUST receive only its private Unix socket and a read-only Library Folder bind; it MUST NOT receive the backing tree directly, host root privilege, the systemd bus, or Docker socket.
 
-For an isolated disposable instance, place the built save helper at a
-root-owned executable path with root-owned, non-writable ancestors, and run:
+The writer identity MUST be distinct from Web and reserved for this instance's Samba workers and metadata helper. External applications MUST use only the isolated SMB share `library`.
 
-```sh
-sudo python3 tools/metadata/provision.py --instance metadata-qa \
-  --source /srv/disposable-photo-fixtures \
-  --helper /usr/local/libexec/slipstream-metadata-save-helper \
-  --web-user slipstream-web --listen-address 127.0.0.1 --smb-port 1445
-sudo smbpasswd -c /etc/slipstream-metadata/metadata-qa/smb.conf \
-  -a ssmeta-metadata-qa
-sudo systemctl start slipstream-metadata-smb@metadata-qa.service \
-  slipstream-metadata-supervisor@metadata-qa.service
-```
+The host MUST provide:
 
-The Web account must already exist and be non-root. Provisioning copies the
-source into a new private instance; it never changes the source or an existing
-instance and never stops the host's ordinary Samba service. It creates a
-dedicated non-login writer account, root-owned sticky/setgid `3770`
-directories, root-owned `0440` Originals, and writer-owned Sidecars. It refuses
-source symlinks in every path component before resolving them and rejects
-hardlinks and special files. The private backing parent is exactly root:writer
-`0710`, and every host-side ancestor must be traversable without extended
-attributes. Inside the tree, only Samba's own `user.DOSATTRIB` attribute is
-admitted so ordinary external attribute edits do not invalidate admission;
-any other extended attribute or ACL must be removed before Save is admitted.
-Shared installed templates and supervisor code must be identical when
-provisioning additional instances.
-The units are installed below `/usr/local/lib/systemd/system`, so a runtime
-mask can actually override them. Do not install a higher-priority instance or
-template unit under `/etc/systemd/system`.
+- systemd with cgroup v2;
+- Python 3;
+- Samba (`smbd`, `testparm`, and `smbpasswd`);
+- util-linux `findmnt`.
 
-Configure the server with `SLIPSTREAM_METADATA_SUPERVISOR` set to the socket
-`/run/slipstream-metadata/metadata-qa/supervisor.sock` and mount
-`/var/lib/slipstream-metadata/metadata-qa/library` read-only into its container.
-Make the bind as root; Web cannot traverse the private host ancestor. Preserve
-the configured numeric Web UID/GID in the container. Restrict the socket bind
-to this Web deployment. External applications use only the isolated SMB share
-`library`; for a non-disposable deployment select a private/Tailscale listen
-address and restrict its port accordingly. The supplied profile disables
-oplocks, kernel oplocks, SMB and directory leases, durable handles, and
-clustering (therefore persistent handles); status checks `testparm`'s effective
-values and rejects unrecognized configuration. Do not grant direct backing
-access to another account, reuse the writer account in another service or
-container, enable extra shares, or give Samba restart authority to Web.
+The backing filesystem MUST be ext2, ext3, ext4, XFS, or Btrfs. `fs.protected_hardlinks` MUST be `1`.
 
-The provisioned copy is the admitted Library. New Originals or directories
-created through SMB are not automatically admitted: stop this instance's SMB
-service and supervisor, then have the deployment administrator inspect and
-re-own the new Originals as root:writer `0440` and directories as root:writer
-`3770` before scanning. Sidecars remain writer-owned with no access for others.
-Reject links, nested filesystems, ACLs, and extended attributes. Status and Save
-reinspect the entire tree and refuse until these invariants hold. Originals
-remain readable but cannot be rewritten, replaced, unlinked, or hardlinked by
-the writer. Back up SQLite state and the backing tree together according to
-the ordinary deployment's backup policy.
+Samba MUST recognize `smb3 directory leases`; an unknown parameter makes Save unavailable. The supplied profile disables oplocks, kernel oplocks, SMB and directory leases, durable handles, and clustering; status checks effective `testparm` values and rejects unrecognized configuration.
+
+The supplied [supervisor](../../tools/metadata/supervisor.py), [provisioner](../../tools/metadata/provision.py), and systemd [supervisor](../../systemd/slipstream-metadata-supervisor@.service) and [Samba](../../systemd/slipstream-metadata-smb@.service) templates implement this deployment. Installed shared templates and supervisor code MUST be identical across provisioned instances.
+
+The units MUST be installed below `/usr/local/lib/systemd/system` so a runtime mask can override them. Operators MUST NOT install template overrides, higher-priority instance or template units under `/etc/systemd/system`, or replace `KillMode=control-group` and `ExecStopPost` recovery.
+
+The helper MUST be a root-owned executable with root-owned, non-writable ancestors. The Web account MUST already exist and MUST be non-root.
+
+Provisioning copies the source into a new private instance without changing the source or an existing instance. It MUST NOT stop the host's ordinary Samba service.
+
+Provisioning MUST reject symlinks in every source path component before resolution, hardlinks, and special files. It creates these private instance objects:
+
+| Object | Ownership or mode |
+| --- | --- |
+| Writer account | Dedicated, non-login |
+| Directories | Root-owned, sticky/setgid `3770` |
+| Originals | Root-owned `0440` |
+| Sidecars | Writer-owned |
+
+The private backing parent MUST be exactly root:writer `0710`. Host-side ancestors MUST be traversable without extended attributes.
+
+Inside the tree only Samba's `user.DOSATTRIB` extended attribute is admitted. Other extended attributes and ACLs MUST be removed before Save is admitted.
+
+The server receives `SLIPSTREAM_METADATA_SUPERVISOR` naming the instance socket and a root-created read-only bind of its private Library. The container MUST preserve the configured numeric Web UID/GID, and the socket bind MUST be restricted to that Web deployment.
+
+A non-disposable deployment MUST select a private or Tailscale SMB listen address and restrict its port. Operators MUST NOT grant direct backing access to another account, reuse the writer in another service or container, enable extra shares, or give Web Samba restart authority.
+
+The provisioned copy is the admitted Library. New Originals or directories created through SMB are not automatically admitted.
+
+Before scanning new files, the administrator MUST stop the instance's SMB service and supervisor, inspect the additions, and re-own Originals as root:writer `0440` and directories as root:writer `3770`. Sidecars remain writer-owned with no access for others.
+
+Links, nested filesystems, ACLs, and unadmitted extended attributes MUST be rejected. Status and Save MUST reinspect the tree and refuse until its invariants hold.
+
+The writer MUST NOT rewrite, replace, unlink, or hardlink Originals; Originals remain readable. SQLite state and the backing tree MUST be backed up together under [Backup](#backup).
 
 ### Supervisor Protocol and Recovery
 
-The root-owned immutable JSON at
-`/etc/slipstream-metadata/INSTANCE/config.json` contains exactly `backingRoot`,
-`writerUid`, `writerGid`, `webUid`, `webGid`, `serviceUnit`, `helper`, and
-`smbConfig`. Paths are absolute; the service unit is fixed to
-`slipstream-metadata-smb@INSTANCE.service`. Requests cannot select executable,
-unit, or path. Only the configured Web UID passes Unix `SO_PEERCRED` admission;
-other peers are disconnected without a response. One UTF-8 JSON object plus a
-newline is accepted per connection, at most 2 MiB including the newline; one
-JSON response plus newline is returned, at most 32 MiB. Connection input/output
-has a five-second timeout.
+The root-owned immutable `/etc/slipstream-metadata/INSTANCE/config.json` contains exactly:
 
-`{"operation":"status"}` returns `{"available":true}` or
-`{"available":false,"reason":"actionable prerequisite failure"}`. This is a
-prerequisite check, not a qualification certificate. A save request is
-`{"operation":"save","request":HELPER_REQUEST}`. The nested request is opaque
-to the supervisor; the helper owns its validation. Save returns the helper's
-single `{"ok":VALUE}` or `{"error":{"code":CODE,"message":MESSAGE,"details":VALUE}}`
-object. Supervisor-generated errors use `details:null`: malformed requests use
-`invalid_input`, failure before helper invocation uses `save_unavailable`, and
-timeout, crash, malformed/oversized helper output, or recovery failure after
-invocation uses `outcome_unknown`. A lost connection does not prove no change;
-refresh metadata evidence before another save.
+- `backingRoot`;
+- `writerUid` and `writerGid`;
+- `webUid` and `webGid`;
+- `serviceUnit`;
+- `helper`;
+- `smbConfig`.
 
-Save holds an instance-level `flock`, creates a recovery marker, runtime-masks
-the managed SMB service, verifies the mask, stops it with a bounded timeout,
-and reads its retained cgroup-v2 `cgroup.events` to prove `populated=0`. After
-rechecking identities and the tree, it launches the fixed helper as writer
-with no supplementary groups and an inherited Unix socketpair lease whose
-peer credentials identify root. The supervisor holds the peer until helper
-exit. Helper input/output is bounded and the helper has a 30-second deadline.
-The helper's entire descendant cgroup is killed and observed empty before
-unmasking and restarting SMB. Systemctl operations each have a ten-second
-deadline. A supervisor SIGKILL invokes systemd `ExecStopPost`, which proves
-helper descendants exited before releasing the mask; ordinary restarts use the
-same recovery. Before the helper starts, the supervisor writes an atomic,
-root-owned publication record in its private runtime directory. The record
-pins the lease-derived temporary name and the parent device and inode. Recovery
-may remove only that exact regular, single-link artifact after reproving the
-fence and the parent identity; it must not glob temporary-looking names. A
-missing or invalid record is retained and reported as an actionable refusal.
-The record is removed before the service is released, while an interrupted
-record is discarded only from the private runtime directory. If descendants
-cannot be stopped, recovery retains the mask and refuses, rather than
-admitting concurrent writers. The persistent runtime marker also drives
-recovery after supervisor restart.
+Paths are absolute and the service unit is `slipstream-metadata-smb@INSTANCE.service`.
 
-Before treating a deployment as writable, independently exercise real helper
-publication and refusal, concurrent SMB writes and restart attempts during the
-fence, helper timeout/crash, supervisor SIGKILL and ordinary restart, and
-automatic SMB recovery. Inspect actual cgroup emptiness, Original hashes, and
-external-tool Sidecar read-back. A reachable socket, `available:true`, or active
-units alone does not qualify the environment. Lightroom interoperability must
-not be claimed without exercising Lightroom. The default Compose deployment
-remains read-only; this profile does not silently make it writable.
+Requests MUST NOT select an executable, unit, or path. Only the configured Web UID passes Unix `SO_PEERCRED` admission; other peers are disconnected without a response.
+
+Each connection accepts one UTF-8 JSON object and newline, at most 2 MiB including the newline. It returns one JSON object and newline, at most 32 MiB; input and output have a five-second timeout.
+
+| Request | Response |
+| --- | --- |
+| `{"operation":"status"}` | `{"available":true}` or `{"available":false,"reason":"actionable prerequisite failure"}` |
+| `{"operation":"save","request":HELPER_REQUEST}` | The helper's single `{"ok":VALUE}` or `{"error":{"code":CODE,"message":MESSAGE,"details":VALUE}}` object. |
+
+Status checks prerequisites, not environment qualification. The helper owns validation of the opaque nested save request.
+
+Supervisor-generated errors use `details:null`:
+
+| Condition | Code |
+| --- | --- |
+| Malformed request | `invalid_input` |
+| Failure before helper invocation | `save_unavailable` |
+| Timeout, crash, malformed or oversized helper output, or recovery failure after invocation | `outcome_unknown` |
+
+A lost connection does not prove no change. The caller MUST refresh metadata evidence before another Save.
+
+Save MUST hold an instance-level `flock`, create a recovery marker, runtime-mask the SMB service, verify the mask, and stop the service with a bounded timeout. It MUST prove its retained cgroup-v2 `cgroup.events` reports `populated=0` before helper invocation.
+
+After rechecking identities and the tree, the supervisor MUST launch the fixed helper as writer without supplementary groups. An inherited Unix socketpair lease MUST identify root through peer credentials; the supervisor holds its peer until helper exit.
+
+Helper input and output are bounded and the helper deadline is 30 seconds. Each systemctl operation has a ten-second deadline.
+
+Before releasing the mask and restarting SMB, recovery MUST kill the helper's entire descendant cgroup and observe it empty. Supervisor SIGKILL invokes systemd `ExecStopPost`; ordinary restarts use the same recovery.
+
+Before helper start, the supervisor MUST atomically write a root-owned publication record in its private runtime directory. The record pins the lease-derived temporary name and parent device and inode.
+
+Recovery MAY remove only that exact regular single-link artifact after reproving the fence and parent identity. It MUST NOT glob temporary-looking names.
+
+A missing or invalid record MUST be retained and reported as an actionable refusal. The record is removed before service release; an interrupted record is discarded only from the private runtime directory.
+
+If descendants cannot be stopped, recovery MUST retain the mask and refuse rather than admit concurrent writers. The persistent runtime marker also drives recovery after supervisor restart.
+
+A reachable socket, `available:true`, or active units alone do not qualify the environment for writable use. Lightroom interoperability MUST NOT be claimed without exercising Lightroom.
 
 ## Optional Photo Development
 
-Photo Development is an optional capability inside the same application image.
-The image may carry the bundled engine extension: the pinned native
-darktable-mcp runtime, its native assets and module/tool metadata, the
-processing manifest, and the ICC profile. A normal start runs one application
-container. There is no host processing launcher, processing systemd unit,
-worker container, processing control socket, or processing Compose overlay to
-install or enable.
+Photo Development is optional within the same application image. The image MAY carry the native darktable-mcp runtime, native assets and module/tool metadata, processing manifest, and ICC profile.
 
-The server detects the extension at startup. It verifies the manifest identity
-and every named asset digest, including the manifest's own SHA-256 recorded in
-the bundle. A deployment without the extension, or one whose assets are
-missing or invalid, keeps every Library operation available and reports
-development unavailable. Startup configuration cannot be changed by an HTTP
-request.
+A normal start uses one application container; no host processing launcher, processing systemd unit, worker container, processing control socket, or Compose overlay is required. The server verifies bundle identity and every named asset digest, including the manifest's recorded SHA-256, at startup.
 
-The capability is controlled by one startup environment variable:
+A missing or invalid extension leaves Library operations available and reports development unavailable. HTTP requests MUST NOT change startup configuration.
 
-- `SLIPSTREAM_PHOTO_DEVELOPMENT=enabled` forces the capability on; startup
-  still requires a valid bundle and reports the bundle unavailable when the
-  assets do not verify.
-- `SLIPSTREAM_PHOTO_DEVELOPMENT=disabled` forces the capability off.
-- `SLIPSTREAM_PHOTO_DEVELOPMENT=auto`, also the default when the variable is
-  absent, enables the capability exactly when the installed bundle verifies.
+| `SLIPSTREAM_PHOTO_DEVELOPMENT` | Behavior |
+| --- | --- |
+| `enabled` | Forces the capability on, subject to valid bundle verification. |
+| `disabled` | Forces the capability off. |
+| `auto` or absent | Enables it exactly when the installed bundle verifies. |
 
-`SLIPSTREAM_PHOTO_BUNDLE_DIRECTORY` optionally selects an absolute bundle root
-for development and smoke runs, such as a locally built bundle outside an
-image. Production images carry the bundle at its fixed installed location
-(`/opt/slipstream-photo`); the variable is not a production processing
-endpoint. `SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES` keeps its existing
-meaning: the finite retained-output allowance in bytes that bounds published
-Development TIFF artifacts, so exhausting it refuses export admission with
-`resource_unavailable` instead of filling the state volume; the repository
-Compose file defaults it to 8589934592 and the environment file may override
-it. The Compose file fixes the documented shared container bounds — 8 GiB
-memory, 4 CPUs, 512 PIDs, and 4 engine OpenMP threads — and mounts no Docker
-socket.
+`SLIPSTREAM_PHOTO_BUNDLE_DIRECTORY` MAY select an absolute bundle root for development and smoke runs. Production images carry the bundle at `/opt/slipstream-photo`; the variable is not a production processing endpoint.
 
-Photo Workspace directories are durable state under the configured state
-storage, outside disposable cache and native scratch. [Backup](#backup) owns
-their consistent capture and recovery. Receipt expiry must not remove these
-files. Operators must include their disk usage in capacity checks; an exhausted
-allowance refuses new preparation or output without deleting old work.
-[Photo Workspace](../photo-development/workspace/spec.md) owns file lifetime and recovery.
+`SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES` bounds retained Development TIFF output in bytes. Exhaustion refuses export admission with `resource_unavailable` rather than filling the state volume; Compose defaults to `8589934592` and the environment file MAY override it.
 
-Workspace paths identify the actual execution namespace. Independent tools must
-run in the disclosed host/container or use authorized filesystem access with
-explicit path mapping. A remote API client cannot treat the returned server path
-as local. Optional `slipstream darktable` supervision runs the independent tool
-against that same directory; no per-edit checkout or synchronization is needed.
+The ordinary Compose container has 8 GiB memory, 4 CPUs, 512 PIDs, and 4 engine OpenMP threads. It mounts no Docker socket.
 
-The one container's finite memory and CPU allocation is shared by the Web
-service and the engine. Service-supervised development requests are serialized:
-at most one runs at a time, and a second request queues behind it. Independent
-CLI execution must obey its own disclosed resource bounds; the service queue
-does not serialize processes launched outside it. There is no per-attempt
-isolation domain; an engine failure can therefore stop the whole application,
-and the ordinary restart path recovers. This trade-off fits the personal
-single-machine deployment and is not
-a multi-user service boundary.
-[Processing Memory](../photo-development/processing/memory.md) owns the details. Legacy
-`SLIPSTREAM_PROCESSING_INSTANCE`, `SLIPSTREAM_PROCESSING_SOCKET`,
-`SLIPSTREAM_PROCESSING_POLICY_SHA256`, and `SLIPSTREAM_PROCESSING_BUNDLE_SHA256`
-declarations are rejected by the Compose entry point; the retired launcher
-endpoint they named no longer exists.
+Photo Workspace directories are durable state outside cache and native scratch. Receipt expiry MUST NOT remove them; operators MUST account for their disk usage, and allowance exhaustion refuses new preparation or output without deleting old work.
 
-### Building the engine bundle
+[Photo Workspace](../photo-development/workspace/spec.md) owns file lifetime and recovery. Independent tools MUST use the disclosed execution namespace or authorized filesystem access with explicit path mapping; a remote API client MUST NOT assume a server path is local.
 
-Build the optional engine bundle with the repository helper. It verifies a
-clean native source checkout at the exact commit, performs the engine build,
-discovers the MCP tools, modules, and schemas, and derives the bundle manifest
-and identity:
+Service-supervised development requests serialize, with at most one running and later requests queued. Independent CLI processes obey their own resource bounds and are not serialized by the service queue.
 
-```sh
-python3 tools/processing/photo/build.py \
-  --darktable-source /absolute/path/to/darktable-native \
-  --darktable-commit <40-lowercase-hex-commit> \
-  --tag slipstream:photo-local
-```
+The service and engine share finite container memory and CPU without per-attempt isolation. An engine failure can stop the application; the ordinary restart path recovers. [Processing Memory](../photo-development/processing/memory.md) owns resource details.
 
-The helper builds (or reuses) the normal application runtime and extends it
-with the pinned native engine, the discovered MCP metadata, the vendored ICC
-output profile, and the deterministic bundle manifest. Pass `--app-image` to
-extend an already-built immutable application image instead of rebuilding the
-runtime, or `--app-tag` to build it under a different local tag. It prints the
-application image ID, the extended image ID, the 64-character bundle digest,
-and the native commit as one JSON object. Use the extended image's immutable
-ID as the deployment's `SLIPSTREAM_IMAGE` with the ordinary Compose start;
-there is no processing-specific command or overlay. The
-manifest records the pinned native module map and asset digests; it names no
-worker image and no launcher configuration. The RAW reference qualification
-and the acceptance runner are documented in
-[tools/processing](../../tools/processing/README.md).
+The Compose entry point rejects legacy `SLIPSTREAM_PROCESSING_INSTANCE`, `SLIPSTREAM_PROCESSING_SOCKET`, `SLIPSTREAM_PROCESSING_POLICY_SHA256`, and `SLIPSTREAM_PROCESSING_BUNDLE_SHA256` declarations. The retired launcher endpoint no longer exists.
 
-### Verification
+`GET /api/processing/modules` reports independent module availability and refusal reasons after asset verification. Readiness does not admit every input, parameter, or resource combination, and one module's state does not establish another's.
 
-`GET /api/processing/modules` reports each Processing Module's independent
-availability and refusal reasons after its bundled assets are verified at
-startup. A disabled or missing darktable runtime does not establish
-SpektraFilm's state, and readiness does not admit every input, parameter, or
-resource combination. Discovery reports bounded module-owned schemas and
-contracts; it never promotes a qualification harness profile to product
-admission. `/healthz` remains a Library readiness check and reports no
-processing state.
+`/healthz` is Library readiness, not processing readiness. A qualification harness profile MUST NOT become product admission merely through discovery.
 
-Accept the deployment for processing only after the local smoke path exercises
-a real qualified RAW development end to end through this one-container path:
-Export before Preview, download validation, cancellation, deadline, engine
-failure, restart, scratch cleanup, and unchanged Original and external-XMP
-digests. The workflow acceptance runner and the real-camera smoke commands
-are documented in [tools/processing](../../tools/processing/README.md) and
-[CONTRIBUTING.md](../../CONTRIBUTING.md). Standalone SpektraFilm is installed and
-verified independently through the [Film extension](../../tools/processing/README.md#film-extension).
-Accept its bounded Preview and full-resolution Export separately for the tested
-bundle, parameters, input contract, geometry, and finite memory allowance; readiness
-alone does not qualify an arbitrary invocation.
+The [processing tools](../../tools/processing/README.md) own bundle-building and qualification procedures. Standalone SpektraFilm is installed and qualified independently; qualification of its Preview and Export is specific to the tested bundle, parameters, input contract, geometry, and finite memory allowance.
 
 ## Configuration
 
-Serve the Web application and API on the same HTTP or HTTPS origin. Local use
-defaults to `http://localhost:3000` and needs no certificate, domain, or reverse
-proxy. Direct HTTP on an explicitly configured network interface is also
-supported; the browser and CLI warn that network observers can read photos and
-credentials. HTTPS is recommended for public or untrusted networks. Installation
-has the secure-context requirements in [Installed Web Application](../web-application/installation/spec.md).
+The Web application and API MUST share one HTTP or HTTPS origin. Local use defaults to `http://localhost:3000` without a certificate, domain, or reverse proxy.
 
-Create an environment file outside the repository:
+Direct HTTP on an explicitly configured interface is supported; browser and CLI warn that network observers can read photos and credentials. HTTPS is RECOMMENDED for public or untrusted networks. [Installed Web Application](../web-application/installation/spec.md) owns secure-context requirements.
 
-```dotenv
-SLIPSTREAM_IMAGE=registry.example.com:5000/slipstream/release@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-SLIPSTREAM_LIBRARY_ROOT=/srv/slipstream/originals
-SLIPSTREAM_STATE_DIRECTORY=/srv/slipstream/state
-SLIPSTREAM_CACHE_DIRECTORY=/srv/slipstream/cache
-SLIPSTREAM_BIND_ADDRESS=127.0.0.1
-SLIPSTREAM_PORT=3000
-# Optional: SLIPSTREAM_PUBLIC_ORIGIN=http://photos.local:3000
-```
+`SLIPSTREAM_BIND_ADDRESS` controls host publication and defaults to loopback; setting an origin does not change it. The server listens on the container network and Docker controls host publication.
 
-`SLIPSTREAM_BIND_ADDRESS` controls the host-side published interface and defaults
-to loopback. Setting an origin never changes it. To use direct HTTP from a trusted
-network, explicitly set the bind address and an HTTP origin reachable from those
-devices. The Rust process listens on the container network; Docker controls host
-publication. An omitted origin uses `http://localhost:<published port>`.
+For direct HTTP on a trusted network, the operator MUST explicitly set the bind address and an HTTP origin reachable from those devices. The configured Web/CLI origin MUST remain reachable from the operator host.
 
-[Instance Access](../access/spec.md) defines token provisioning and access behavior.
-[Instance Access Architecture](../access/design.md) owns credential enforcement,
-canonical-origin validation, and private response caching. Provision a token before
-opening the Library. An absent token never enables anonymous access, including on
-loopback. Forwarded headers do not establish identity.
+[Instance Access](../access/spec.md) owns token provisioning and access behavior. An absent token MUST NOT enable anonymous access, including on loopback; forwarded headers do not establish identity.
 
-For an existing HTTPS deployment, set `SLIPSTREAM_PUBLIC_ORIGIN=https://photos.example.com`
-and retain the TLS proxy. Keep its backend private and disable proxy caching for
-private responses. Slipstream does not manage certificates or listen with TLS itself.
+For HTTPS, the operator MUST keep the proxy backend private and disable proxy caching for private responses. Slipstream does not manage certificates or listen with TLS itself.
 
-For upgrade, the operator must keep public ingress closed, back up application
-state, provision authentication through local administration with the server
-stopped, and verify private route rejection before opening ingress. Old publicly
-cacheable image paths and proxy caches must be retired under the access design.
-A restore requires token rotation before reopening access. A rollback to a
-binary without authentication must remain isolated from public traffic.
-Operator acceptance tooling must use the credential for private API probes;
-`/healthz` remains a minimal readiness check and is not authentication evidence.
+During an authentication upgrade, the operator MUST keep public ingress closed, back up application state, and provision authentication locally with the server stopped. Private route rejection MUST be verified before ingress opens.
+
+Old publicly cacheable image paths and proxy caches MUST be retired under [Access Design](../access/design.md). Restore requires token rotation before access reopens; rollback to a binary without authentication MUST remain isolated from public traffic.
+
+Private API probes MUST use the credential. `/healthz` remains a minimal readiness check, not authentication evidence.
 
 ## Access Administration
 
-When supplied, `SLIPSTREAM_PUBLIC_ORIGIN` must contain a canonical HTTP or HTTPS
-origin with no userinfo, query, fragment, or path other than `/`. It contains no
-secret. When omitted, it uses `http://localhost:<port>`; Compose uses the published
-host port. The environment file selects the origin. Trailing `/` is canonicalized;
-matching uses parsed scheme, host, and effective port.
+When supplied, `SLIPSTREAM_PUBLIC_ORIGIN` MUST be a canonical HTTP or HTTPS origin with no userinfo, query, fragment, or path other than `/`. It contains no secret; a trailing `/` is canonicalized and matching uses parsed scheme, host, and effective port.
 
-The supported Compose entry point adds `access-create`, `access-rotate`, and
-`access-revoke`. Each accepts the same single environment file and immutable
-image selection as existing Compose operations, runs host storage preflight,
-and starts a one-shot `slipstream-server` container with the matching subcommand.
-It must not start the ordinary HTTP service or scan the Library. These commands
-use admitted existing state or initialize only a valid new state directory.
-They must acquire the same exclusive process lock used by server startup and
-Library expansion; an active owner causes failure without touching state.
+When omitted, the origin defaults to `http://localhost:<port>` using the published host port. The environment file selects the origin.
 
-```sh
-./scripts/compose --env-file /srv/slipstream/instance.env down
-./scripts/compose --env-file /srv/slipstream/instance.env access-create
-./scripts/compose --env-file /srv/slipstream/instance.env up -d
-```
+The Compose entry point supports `access-create`, `access-rotate`, and `access-revoke` with the same single environment file, immutable image, and host storage preflight as startup. Each starts a one-shot `slipstream-server` container, not the HTTP service or a Library scan.
 
-`access-create` refuses an already configured credential. `access-rotate`
-requires existing authentication state, including explicitly revoked state;
-`access-revoke` is idempotent for a revoked credential. Rotation and revocation
-must use the same stopped-server procedure above. Keep public ingress closed
-until acceptance is complete. No command accepts a caller-supplied token.
+Administration uses admitted existing state or initializes only a valid new state directory. It MUST acquire the exclusive process lock shared with server startup and Library Expansion; an active owner fails without touching state.
 
-Creation and rotation require an interactive terminal and present the token
-once after durable commit; the wrapper must not capture or log that output.
-The one-shot container must disable Docker logging with the `none` logging
-driver and attach the private terminal directly. The wrapper must not use a
-logging or tee subprocess. They print secrets to the attached terminal, not
-container logs or stdout pipelines. If terminal delivery fails after commit, report uncertainty and
-instruct the operator to rotate; never roll back a successfully committed
-credential or disclose it on a later read. Revocation prints only confirmation.
-Underlying `slipstream-server access-create|access-rotate|access-revoke` uses
-the same existing storage environment and exit 0 for confirmed success, 1 for
-failure. No operation may modify Originals or clear Library state.
+`access-create` refuses an already configured credential. `access-rotate` requires existing authentication state, including revoked state; `access-revoke` is idempotent for a revoked credential.
 
-The configured Web/CLI origin must remain reachable from the operator host.
-[CLI Reference](../command-line/reference.md) owns credential-file selection. Retain the minimal
-unauthenticated `/healthz` probe for container readiness.
+Rotation and revocation require a stopped server. Public ingress MUST remain closed until acceptance completes; no command accepts a caller-supplied token.
+
+Creation and rotation require an interactive terminal and present the token once after durable commit. The wrapper MUST NOT capture or log it, use a logging or tee subprocess, or send it to stdout pipelines.
+
+The one-shot container MUST disable Docker logging with the `none` driver and attach the private terminal directly. If delivery fails after commit, it MUST report uncertainty and instruct rotation without rolling back or redisclosing the committed credential.
+
+Revocation prints only confirmation. The underlying `slipstream-server access-create|access-rotate|access-revoke` uses the existing storage environment and exits `0` for confirmed success or `1` for failure.
+
+Access operations MUST NOT modify Originals or clear Library state. [CLI Reference](../command-line/reference.md) owns credential-file selection.
 
 ## Storage Rules
 
-- For `up`, Library Expansion, and access administration, `SLIPSTREAM_IMAGE` must occur exactly once as
-  an unquoted, literal immutable image reference. Its repository path uses
-  lowercase components and may include a registry port. It must end in
-  `@sha256:` followed by 64 lowercase hexadecimal characters. Shell expansion,
-  Compose interpolation, and mutable tags are not supported. Supported Compose
-  operations run that digest-pinned image only; they never build an image from
-  the repository as a fallback.
-- For ordinary `up`, Library Expansion, and access administration, the Originals, state, and cache directories
-  must already exist. Each must occur exactly once as `KEY=/absolute/path` in
-  the environment file. QA runs derive these three paths from the explicit
-  QA ID instead; they reject storage declarations in the QA environment file. Its value must be an unquoted, valid UTF-8 literal. It
-  may contain ordinary internal spaces, but must not have leading or trailing
-  whitespace, tabs, carriage returns, control characters, `#`, quotes,
-  backslashes, backticks, or `$`. Shell expansion and Compose variable
-  interpolation are not supported for these three values. The same rule
-  applies after resolving a symlink or lexical alias and to returned mount
-  paths, so a safe-looking alias cannot hide an ambiguous target path or byte
-  encoding. Before parsing any line, the entry point rejects a raw NUL byte
-  anywhere in the environment file, including keys, values, or trailing
-  content.
-- The Originals directory must be readable by UID 1000. State and cache
-  directories must be writable by UID 1000.
-- Originals, state, and cache must be pairwise disjoint after symlinks,
-  lexical aliases, and the complete Linux nested-mount source coordinates
-  resolve. No pair may equal, contain, or be contained by the other.
-- Never run two Slipstream processes against one SQLite database.
+For `up`, Library Expansion, and access administration, `SLIPSTREAM_IMAGE` MUST occur exactly once as an unquoted literal immutable image reference. Its repository path uses lowercase components, MAY include a registry port, and ends in `@sha256:` followed by 64 lowercase hexadecimal characters.
 
-`GET /healthz` returns `200 {"status":"ok"}` after storage admission, Preview
-startup, and HTTP bind. `GET /api/status` separately reports Library
-publication and scan state.
+Image input MUST NOT use shell expansion, Compose interpolation, or mutable tags. Supported operations run only that image and MUST NOT build from repository sources as a fallback.
+
+For ordinary `up`, Library Expansion, and access administration, each of `SLIPSTREAM_LIBRARY_ROOT`, `SLIPSTREAM_STATE_DIRECTORY`, and `SLIPSTREAM_CACHE_DIRECTORY` MUST occur exactly once as `KEY=/absolute/path` in the environment file. Each directory MUST already exist.
+
+Each storage value MUST be an unquoted valid UTF-8 literal. Internal spaces are allowed.
+
+Storage values MUST NOT contain:
+
+- Leading or trailing whitespace.
+- Tabs, carriage returns, or control characters.
+- `#`, quotes, backslashes, backticks, or `$`.
+
+Shell expansion and Compose interpolation are not supported for storage values. The same grammar applies after resolving symlink or lexical aliases and to returned mount paths.
+
+Before parsing any line, the entry point MUST reject a raw NUL byte anywhere in the environment file. QA derives its storage paths and rejects declarations of these three keys.
+
+The Library directory MUST be readable by UID 1000; state and cache MUST be writable by UID 1000. The three roles MUST be pairwise disjoint under the [host storage preflight](storage-preflight.md).
+
+Two Slipstream processes MUST NOT use one SQLite database. `GET /healthz` returns `200 {"status":"ok"}` after storage admission, Preview startup, and HTTP bind; `GET /api/status` separately reports Library publication and scan state.
 
 ## Compose Entry Point
 
-Run supported repository Compose operations through `scripts/compose`. It
-requires one environment file and always uses this repository's `compose.yaml`;
-for a QA instance it also uses only the repository-owned `compose.qa.yaml`
-override:
+Supported repository operations MUST use `scripts/compose` with one environment file and the repository's `compose.yaml`. QA additionally uses only the repository-owned `compose.qa.yaml` override.
 
-```sh
-./scripts/compose --env-file /path/to/slipstream.env up -d
-```
-
-The entry point requires Bash, GNU `realpath`, `tr`, and `cmp`, `iconv`, and
-Linux `findmnt`. The one environment file supplies the QA image, origin, and loopback endpoint;
-the QA storage paths are derived and must not appear in it. The bounded
-operator surface supports only these command forms:
+The host requires Bash, GNU `realpath`, `tr`, and `cmp`, `iconv`, and Linux `findmnt`. The supported command forms are:
 
 ```sh
 ./scripts/compose --env-file /path/to/slipstream.env up
@@ -413,252 +228,107 @@ operator surface supports only these command forms:
 ./scripts/compose --env-file /path/to/slipstream.env --qa 0123456789ab down
 ```
 
-For `up`, Library Expansion, and access administration, it validates the required image input and
-resolves the three host storage sources and captures each endpoint's complete
-nested mount hierarchy before it invokes Compose. It passes every resolved
-source both as the container path and as the server configuration value, so
-Docker mounts the sources that the preflight checked and the server sees their
-real topology. It rejects any equal, nested, symbolic-link-alias, or Linux
-bind-mount-alias pair—including aliases exposed through a nested mount on
-another filesystem—before it invokes Compose or changes the Originals tree or
-content.
-It also rejects alternate Compose files (except its own QA override),
-additional environment files, mount, environment, or entrypoint overrides,
-and unsupported Compose commands. The
-server retains its storage admission as a second safety boundary. The entry
-point fixes the ordinary Compose project name as `slipstream`; the explicit
-[Short-Lived QA Instance](#short-lived-qa-instance) selects only its own
-bounded project name. The entry point rejects any `COMPOSE_*` or `DOCKER_*`
-declaration in the environment file.
-For the finite startup Compose configuration surface, the environment file also
-wins over ambient `SLIPSTREAM_IMAGE`, `SLIPSTREAM_BIND_ADDRESS`,
-`SLIPSTREAM_PORT`, `SLIPSTREAM_PUBLIC_ORIGIN`, and `SLIPSTREAM_DATABASE_BASENAME` values. It also clears ambient
-`SLIPSTREAM_LIBRARY_ROOT`, `SLIPSTREAM_STATE_DIRECTORY`, and
-`SLIPSTREAM_CACHE_DIRECTORY` before startup exports its checked canonical
-values. An absent `SLIPSTREAM_PUBLIC_ORIGIN` selects the localhost HTTP default;
-a malformed value must fail rather than use an ambient origin for startup. Access administration
-must likewise clear ambient origin values; its offline state operation does not
-require a public origin. These commands use the same image/storage preflight
-and precedence, with interactive and logging behavior from Access Administration.
+The entry point MUST reject:
 
-`compose.yaml` intentionally declares no Docker restart policy. Every container
-start must be initiated through `scripts/compose` so the host storage preflight
-runs first. If automatic recovery is needed in the future, it must be provided
-by a host supervisor that uses a preflight-aware start path; do not enable
-Docker autonomous restarts that can bypass this wrapper.
+- Alternate Compose files except its own QA override.
+- Additional environment files.
+- Mount, environment, or entrypoint overrides.
+- Unsupported commands.
+- Every `COMPOSE_*` and `DOCKER_*` declaration in the environment file.
 
-This contract supports only a Linux host using its local Docker Engine. Do not
-set `DOCKER_HOST` or `DOCKER_CONTEXT`; the entry point rejects them and rejects
-a Docker default context that is not a local Unix socket. Direct `docker
-compose` invocation is outside the supported deployment contract. The
-ordinary `down` form intentionally skips image and storage-source preflight, so an
-operator can stop an existing container after a source path or image input
-becomes unavailable or unsafe. While Compose parses that fixed stop operation,
-the entry point supplies fixed internal stop-only image and storage values
-instead of using the environment file values. They do not select, pull, build,
-or run an image, and they do not access storage paths. This exception applies
-only to a readable, Compose-parseable environment file; its image and storage
-values may be missing or unsafe. The operation still uses the repository
-Compose file and local Docker context.
+The ordinary project name is fixed as `slipstream`; [QA](#short-lived-qa-instance) selects its own project. Neither identity is selected by ambient Compose variables or the environment file.
 
-The operator must trust the local Docker daemon and socket, and that daemon
-must use the same host mount namespace as `scripts/compose`. The three storage
-directories and their parent paths must remain stable between the preflight and
-Docker admission. The preflight does not eliminate this time-of-check/
-time-of-use window; it rejects unsafe topology that is present when it checks.
+For startup, the environment file takes precedence over these ambient values:
+
+- `SLIPSTREAM_IMAGE`
+- `SLIPSTREAM_BIND_ADDRESS`
+- `SLIPSTREAM_PORT`
+- `SLIPSTREAM_PUBLIC_ORIGIN`
+- `SLIPSTREAM_DATABASE_BASENAME`
+
+The entry point clears ambient storage values before exporting the checked canonical sources.
+
+A missing startup origin selects the localhost HTTP default; a malformed one MUST fail rather than fall back to an ambient value. Access administration also clears ambient origin values and its offline state operation does not require a public origin.
+
+[Storage Preflight](storage-preflight.md) owns host topology proof and checked mount delivery. Every container start MUST traverse this preflight; `compose.yaml` MUST NOT declare autonomous restart.
+
+Only a local Docker Engine on Linux is supported. The entry point MUST reject `DOCKER_HOST`, `DOCKER_CONTEXT`, and a Docker default context that is not a local Unix socket; direct `docker compose` invocation is outside the supported contract.
+
+Ordinary `down` skips image and storage-source preflight. It supplies internal stop-only image and storage values that do not select, pull, build, or run an image or access storage paths.
+
+This exception requires a readable, Compose-parseable environment file, but image and storage values MAY be missing or unsafe. The fixed repository Compose file and local Docker context still apply.
 
 ## Short-Lived QA Instance
 
-A qualification instance may run beside the ordinary service on the same
-trusted local Docker Engine. Supply `--qa ID` immediately after the environment
-file argument, before the action. `ID` must be exactly 12 lowercase hexadecimal
-characters; the launcher selects only the `slipstream-qa-ID` Compose project.
-A misplaced, repeated, missing, or invalid QA ID fails before Docker and never
-falls through to an ordinary action. Omitting `--qa` retains the ordinary
-`slipstream` project. Neither identity is selected by ambient Compose variables
-or by the environment file.
+A short-lived fixture-only QA instance MAY run beside the ordinary service on the same trusted local Docker Engine. `--qa ID` MUST appear immediately after the environment file argument and before the action.
 
-```sh
-./scripts/compose --env-file /path/to/qa.env --qa 0123456789ab access-create
-./scripts/compose --env-file /path/to/qa.env --qa 0123456789ab up -d
-./scripts/compose --env-file /path/to/qa.env --qa 0123456789ab down
-```
+`ID` MUST contain exactly 12 lowercase hexadecimal characters; it selects only project `slipstream-qa-ID`. A misplaced, repeated, missing, or invalid ID MUST fail before Docker without falling through to an ordinary action.
 
-The operator creates a new `dist/qa-ID/` fixture root in the entry point's
-own checkout, with existing `originals`, `state`, and `cache` subdirectories.
-Use a fresh ID for each qualification run: reusing an ID also reuses its
-credential, scan state, and cache. For QA startup and administration, the
-launcher derives these three canonical storage paths from its own checkout
-and ID, rather than trusting paths supplied by the caller. It rejects an
-environment file declaring any of the three storage keys before Docker.
-The fixture root and its ancestors below the checkout must not be symlinks or
-bind mounts; no mount may appear inside it. The launcher verifies this before
-Docker, so a QA path cannot be an alias into production storage. The operator
-must never copy production state or Originals into a QA fixture.
+The operator MUST create `dist/qa-ID/` in the entry point's checkout with existing `originals`, `state`, and `cache` subdirectories. A fresh ID is required for each qualification run; reuse also reuses its credential, scan state, and cache.
 
-For QA `up` and `up -d`, the environment file must satisfy the ordinary
-immutable-image and optional HTTP/HTTPS-origin grammar. The launcher checks an
-explicit `SLIPSTREAM_BIND_ADDRESS=127.0.0.1` and an explicit decimal
-`SLIPSTREAM_PORT` from 1024 through 65535 before Docker. The port must differ
-from the ordinary instance's published port; Docker refuses an occupied port
-at startup. Other QA actions do not publish a port; `access-revoke` does not
-require an origin. The repository-owned `compose.qa.yaml` is the only
-additional Compose file. It adds no services, mounts, or restart policies and
-applies memory (2 GiB), CPU (2), and PID (256) limits to both `slipstream` and
-`slipstream-admin`, without changing the ordinary configuration.
+The launcher derives the three canonical paths from its checkout and ID and rejects storage declarations in the QA environment file.
 
-The supported QA actions are the same as the ordinary bounded entry point.
-QA `down` requires a valid ID, readable environment file, and the usual
-rejection of `COMPOSE_*`/`DOCKER_*` declarations. It uses the same stop-only
-sentinels and the fixed QA Compose files, without checking unavailable fixture
-paths, image, or origin. It targets only the named QA project and never removes
-host directories. Access creation and rotation retain the interactive, no-log
-token-delivery contract. Qualification may use direct loopback HTTP or a private
-HTTPS proxy with a trusted client, exercising the selected transport.
-Containers share the local Docker daemon and host capacity: this mode does not
-turn an untrusted workload into an isolated security domain.
+The fixture root and its ancestors below the checkout MUST NOT be symlinks or bind mounts. A mount MUST NOT appear inside the fixture root.
 
-## Image
+The launcher MUST verify fixture topology before Docker. The operator MUST NOT copy production state or Originals into a QA fixture.
 
-Build from a clean checkout of the exact commit:
+For QA `up` and `up -d`, the environment file MUST satisfy ordinary immutable-image and optional HTTP/HTTPS-origin grammar. It MUST explicitly set `SLIPSTREAM_BIND_ADDRESS=127.0.0.1` and a decimal `SLIPSTREAM_PORT` from 1024 through 65535.
 
-```sh
-commit=$(git rev-parse HEAD)
-docker buildx build --platform linux/amd64 --load \
-  --build-arg "SLIPSTREAM_VCS_REF=$commit" --tag slipstream:local .
-```
+The QA port MUST differ from the ordinary instance's published port; Docker refuses an occupied port at startup. Other QA actions do not publish a port; `access-revoke` does not require an origin.
 
-Record the image digest. Verify the image user is `1000:1000` and that no
-Node, Bun, npm, Sharp, or Node-API runtime artifact is present before an
-operator-controlled deployment. Operators may script these checks; any
-equivalent inspection is acceptable.
+The fixed `compose.qa.yaml` adds no services, mounts, or restart policies. It limits both `slipstream` and `slipstream-admin` to 2 GiB memory, 2 CPUs, and 256 PIDs without changing ordinary configuration.
 
-## Reproducible Inputs
+QA supports the ordinary bounded entry-point actions. QA `down` requires a valid ID, readable environment file, and rejection of `COMPOSE_*` and `DOCKER_*` declarations.
 
-Slipstream supports Linux amd64 release images. The Dockerfile fixes every
-non-scratch base image by digest. Its Ubuntu build and runtime inputs use the
-official snapshot and direct package locks in [`../docker/apt/`](../../docker/apt/).
-The RAW decoder uses the upstream LibRaw `0.22.2` archive with its SHA-256
-verified during the image build; the image's isolated library must match its
-build headers. The [container input design](container-inputs.md)
-defines ownership and update rules.
+QA `down` uses stop-only sentinels and fixed QA Compose files without checking unavailable fixture paths, image, or origin. It targets only the named QA project and never removes host directories.
 
-Use the explicit `docker buildx build --platform linux/amd64` command above
-for release qualification. Supported Compose does not build from this checkout:
-it runs only the digest-pinned image named by `SLIPSTREAM_IMAGE`, with no source
-fallback. A normal `docker compose` build is not qualification evidence.
-The GitHub Actions `ubuntu-latest` is a source and test runner. It is not a
-release-image input, and its native test dependencies do not prove the native
-packages in a release container.
-
-These checked-in inputs provide source reproducibility: rebuilding one exact
-candidate selects the same base image indexes and native package inputs. They
-do not promise a byte-identical output image. A resulting digest, timestamp,
-or other output record establishes a single build's traceability only.
-
-Change an image digest, the Ubuntu snapshot, either direct package lock, or
-the LibRaw release and its verified checksum in one reviewed dependency update.
-Do not substitute a moving tag, archive, or fallback mirror.
-
-## Qualification Evidence
-
-Release qualification is operator work. It must use the exact candidate and
-the image command above. Keep its evidence outside the repository with the
-private deployment material.
-
-Record all of the following:
-
-- exact candidate SHA and the `linux/amd64` build command;
-- OCI revision and immutable digest from the final image;
-- final native package versions from `dpkg-query` in that image;
-- the generated SBOM and the tool identity used to generate it; and
-- advisory scanner identity, advisory database timestamp, findings, and their
-  disposition.
-
-The advisory database timestamp states what data the scanner used for that one
-qualification. It does not freeze future advisory results or replace a later
-advisory review.
+QA access creation and rotation retain interactive, no-log token delivery. QA MAY use direct loopback HTTP or a private HTTPS proxy with a trusted client; shared daemon and host capacity do not isolate an untrusted workload.
 
 ## Backup
 
-Image cutover, expansion, and state recovery require one consistent recovery
-point covering the Library database, Access database, workspace identity and
-provenance records, protected input snapshots, canonical tool state, required
-resources, and kept outputs. Required resources outside the workspace must be
-included or retained immutably with verified recovery access. Retained Export
-artifacts cannot be reconstructed from SQLite; a backup excluding required
-state or bytes must not be accepted as a recovery backup.
+Image cutover, expansion, and state recovery require one consistent recovery point covering:
 
-For a file-copy backup, stop the service and establish quiescence for every
-writer of the captured directories and dependencies, including independent CLI
-processes and shared-filesystem writers. Prevent new writes until the complete
-copy finishes. Stopping Slipstream alone or observing an idle service queue is
-insufficient. If this exclusion cannot be established, refuse the backup with
-the unresolved writer or storage scope and a recovery action. Do not kill a
-render or discard saved work merely to obtain a backup.
+- Library and Access databases;
+- workspace identity and provenance records;
+- protected input snapshots and canonical tool state;
+- required resources and kept outputs.
 
-An alternative is a proven consistent filesystem snapshot covering the same
-database, file, and dependency recovery point. Separate live copies or snapshots
-of different volumes do not establish that guarantee. SQLite's backup API
-preserves each database, but cannot by itself coordinate changing tool files.
-Per-file atomic rename likewise does not make a multi-file backup consistent.
+Resources outside the workspace MUST be included or retained immutably with verified recovery access. Retained Export artifacts cannot be reconstructed from SQLite; a backup missing required state or bytes MUST NOT be accepted.
 
-Verify recovery in an isolated copy before accepting the backup. Both databases
-must open together without losing the credential. Enumerate saved edit revisions
-and check their recorded input/resource availability, retained output bytes,
-and engine identities. Where an executable saved edit exists, reopen one with
-its masks and resources and inspect a kept output without reading the live
-Library Original or substituting defaults. A dependency that was available at
-capture must remain available after restore. Pre-existing missing dependencies
-or incompatible historical state must retain their exact intent and disclosed
-limitations; preserving them does not establish executable recovery. Newly
-missing bytes, altered revisions, or silent default substitution fail recovery
-verification with the affected identities.
-Restore must never overwrite live state. The 0.1 support boundary, rollback
-criteria, and rollback-artifact retirement rules remain in
-[`0.1-support-and-release.md`](support.md).
+A file-copy backup requires the service stopped and every writer of captured directories and dependencies quiesced. This includes independent CLI processes and shared-filesystem writers; new writes MUST be prevented until the complete copy finishes.
+
+Stopping Slipstream or observing an idle service queue alone is insufficient. If exclusion cannot be established, backup MUST be refused with the unresolved writer or storage scope and a recovery action; operators MUST NOT kill a render or discard saved work merely to obtain a backup.
+
+A proven consistent filesystem snapshot covering the same recovery point is an alternative. Separate live copies or snapshots of different volumes, SQLite's backup API alone, and per-file atomic renames do not establish cross-file consistency.
+
+Before a backup is accepted, the restored service MUST start in an isolated copy with the same canonical read-only Library Folder and pass the deployment's state checks. Both databases MUST open together without losing the credential.
+
+Recovery verification MUST enumerate saved edit revisions and check their input and resource availability, retained output bytes, and engine identities. A dependency available at capture MUST remain available after restore.
+
+Where an executable saved edit exists, verification MUST reopen one with its masks and resources and inspect a kept output without reading the live Library Original or substituting defaults. Pre-existing missing dependencies or incompatible historical state MUST retain their exact intent and disclosed limitations.
+
+Preserving pre-existing limitations does not establish executable recovery. Newly missing bytes, altered revisions, or silent default substitution MUST fail recovery verification with the affected identities.
+
+Restore MUST NOT overwrite live state. [Support and Release](support.md#rollback-artifact-retention) owns rollback-artifact retirement.
+
+Restored retained uploads and downloads MUST have their saved SHA-256 and byte length verified before replacing host-local inode or time observations. Different restored bytes MUST be refused.
 
 ## Library Expansion
 
-Library Expansion replaces the current Library Folder with a canonical
-ancestor that contains the same current Folder. It does not support an
-unrelated move, multiple roots, or per-file relinking.
+[Library Identity](../photo-library/identity.md) owns the ancestor-only expansion and transaction. Expansion requires all processes using the state database stopped, existing sidecars preserved, and a verified current-schema backup.
 
-1. Stop every Slipstream process using the state database. Preserve sidecars
-   for recovery instead of deleting them.
-2. Create and record a verified backup of the current canonical schema (see Backup).
-3. Change `SLIPSTREAM_LIBRARY_ROOT` to the proposed canonical ancestor. Keep the state directory and database basename unchanged. Ensure the proposed Folder is mounted read-only at the same absolute path inside the container.
-4. Run the candidate image once without starting the service:
+The operator MUST retain the state directory and database basename and configure the proposed canonical ancestor as `SLIPSTREAM_LIBRARY_ROOT`. The proposed Folder MUST be mounted read-only at the same absolute path inside the container.
 
-   ```sh
-   ./scripts/compose --env-file /path/to/expanded-library.env \
-     run --rm --no-deps slipstream expand-library
-   ```
+The offline command rejects a running database, sidecars, unsupported schema, unrelated Folder, descriptor mismatch, invalid remembered Locations, and scan-limit failures. It commits the binding and Location changes in one admitted transaction, then completes a normal scan before reporting success.
 
-The offline command rejects a running database, sidecars, unsupported schema, an unrelated Folder, descriptor mismatch, invalid remembered Locations, and scan-limit failures. It commits the binding and Location changes in one admitted transaction, then completes a normal scan before reporting success. It never binds HTTP and uses the same storage configuration regardless of listener settings.
+The command never binds HTTP and uses the same storage configuration regardless of listener settings. A preflight or transaction failure leaves the prior Folder binding unchanged.
 
-If preflight or the transaction fails, the prior Folder binding is unchanged.
-If the post-commit scan fails, do not expose the service as ready: correct the
-failure and retry startup, or restore the verified pre-expansion backup and
-prior Folder.
+After a post-commit scan failure, the service MUST NOT be exposed as ready. Correct the failure and retry startup, or restore the verified pre-expansion backup and prior Folder.
 
-## Cutover and verification
+## Cutover and Verification
 
-1. Confirm the target image digest and the verified state backup.
-2. Start the digest-pinned image with the prepared environment:
+Image cutover requires the target image digest and verified state backup. Operator-provided acceptance MUST verify readiness, Library Overview, one bounded File Location read, one Album browse read, a state mutation and undo, and a derivative read.
 
-   ```sh
-   ./scripts/compose --env-file /path/to/slipstream.env up -d
-   ```
+Cutover acceptance MUST compare schema and database binding with the pre-cutover record and confirm Original File hashes are unchanged.
 
-3. Verify `GET /healthz`, the Library Overview, one bounded File Location
-   read, an Album browse read, one state mutation, undo, and a derivative read.
-   Compare the SQLite schema and
-   database binding with the pre-cutover record.
-4. Confirm Original File hashes are unchanged.
-
-Operators verify exact persisted state by comparing a bounded protocol
-traversal or an offline read-only state projection against the pre-cutover
-record; no HTTP route materializes the complete Library, complete Folder tree,
-complete recursive Folder membership, or complete Album membership. Acceptance
-tooling is operator-provided.
+Exact persisted state verification uses a bounded protocol traversal or offline read-only state projection against the pre-cutover record. No HTTP route materializes the complete Library, Folder tree, recursive Folder membership, or Album membership.
