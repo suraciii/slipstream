@@ -276,6 +276,12 @@
   font-size: 0.72rem;
 }
 
+.folder-loading,
+.folder-more {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .album-heading {
   justify-content: space-between;
 }

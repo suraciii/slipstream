@@ -35,6 +35,20 @@ request. Collapsed windows may remain in the bounded navigation cache;
 publication reset must discard them. Reopening retained content must not clear
 an unresolved Folder failure or replace an explicit refresh or retry.
 
+Explicit Folder count refresh MUST prevent older requests from restoring stale
+counts, including requests whose children have not appeared yet. It MUST
+preserve the latest requested page for visible Folders. A response that arrives
+after a Folder is collapsed MUST NOT reopen it.
+
+Folder Retry MUST retain keyboard focus while pending and expose progress even
+when its Folder is hidden. Successful Retry MUST move focus to an appropriate
+visible Folder control when the retry control disappears. Repeated activation
+of the same pending Retry MUST join that work.
+
+An expanded Folder MUST remain collapsible while its request is pending.
+Loading feedback MUST fit the Sources surface even for long unbroken Folder
+names, while retaining the complete accessible name.
+
 All Folder windows retained together must come from the same Published Library. Library summary counts and Albums must also be revalidated against that publication before they replace visible shared facts. If a rescan replaces the publication while an older summary or File Locations are loading, Slipstream must discard the older summary and refresh File Locations rather than append or present facts from different publications. Opening a Folder from an expired publication must refresh navigation and require the Photographer to open the current Folder projection; it must not silently reinterpret the stale Location against a different publication.
 
 The first product uses two views:

@@ -39,14 +39,28 @@ The File Location owner retains at most 32 parent windows, including the root,
 across expanded and collapsed Folders. Collapse changes disclosure without
 discarding a retained page. Reopening uses that page immediately unless the
 parent has an unresolved failure. Retention evicts an older non-root window;
-publication reset discards every window. Explicit count refresh first discards
-non-root windows outside the expanded, current-page tree, including descendants
-hidden by an ancestor or by paging. It then captures the remaining bounded set
-and admits those window requests together. Collapse cannot skip a captured
-target or reopen it when refresh settles; newer page requests still supersede
-older reads. Settlement uses the existing File Location authority, so an old
-refresh cannot modify a replacement generation. No traversal or cache cleanup
-continues after the captured requests settle.
+publication reset discards every window.
+
+Explicit count refresh MUST replace the pending request scope without changing
+publication authority or exact-range failure identities. It MUST detach earlier
+Folder continuations without waiting for their non-abortable transports.
+
+The refresh plan MUST contain only visible retained windows and already
+requested visible windows. It MUST preserve the latest requested page and
+expansion intent. Hidden windows MUST be discarded, including descendants
+hidden by an ancestor or by paging.
+
+The captured requests MUST start together before another interaction can
+change the plan. A later collapse MUST prevent a pending response from reopening
+that Folder. Newer same-parent requests MUST supersede earlier requests.
+
+An obsolete response MUST NOT change counts or replace current retry state.
+Tree traversal and cache cleanup MUST NOT continue after the captured requests
+settle.
+
+Read-state changes and waiter resolution MUST occur in one synchronous
+settlement. Summary and Recovery claims MUST match the current exact-range
+failure identities, even when refresh supersedes a completed read's presentation.
 
 The controller owns each pending expansion and its loading presentation.
 Repeated expansion joins that operation; reset and teardown invalidate its

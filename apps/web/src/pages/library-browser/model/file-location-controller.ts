@@ -32,7 +32,9 @@ export type FileLocationTreeNode = Readonly<{
 
 export type FileLocationTree = Readonly<{
   enabled: boolean;
-  failures: ReadonlyArray<Readonly<{ key: string; range: string }>>;
+  failures: ReadonlyArray<
+    Readonly<{ key: string; range: string; parent: string; loading: boolean }>
+  >;
   rootExpanded: boolean;
   rootLoading: boolean;
   rootChildren: ReadonlyArray<FileLocationTreeNode>;
@@ -87,6 +89,7 @@ export function createFileLocationController(
   let publicationPresentation: Presentation | undefined;
   const settled = new WeakMap<object, Promise<void>>();
   const expansions = new Map<string, Promise<void>>();
+  const retries = new Map<FileLocationFailure, Promise<void>>();
   let closed = false;
 
   const release = (p: Presentation): void => {
@@ -107,8 +110,42 @@ export function createFileLocationController(
     return { summary, recovery };
   };
   const settle = async (outcome: FileLocationOutcome): Promise<void> => {
-    if (closed || !deps.isAlive() || !owner.accept(outcome)) return;
-    if (outcome.kind === "detached" || outcome.kind === "bound") return;
+    if (closed || !deps.isAlive()) return;
+    // Failure identities are committed with the read result. Reconcile them
+    // even when a count refresh has since fenced that result's presentation.
+    const failures = owner.failures();
+    const current = new Set(failures);
+    const newest = failures.at(-1);
+    const newestWasPresented = newest && presentations.has(newest);
+    let changed = false;
+    for (const [failure, presentation] of presentations) {
+      if (current.has(failure)) continue;
+      release(presentation);
+      presentations.delete(failure);
+      changed = true;
+    }
+    for (const failure of failures) {
+      if (presentations.has(failure)) continue;
+      presentations.set(
+        failure,
+        claim(
+          `range:${failure.generation}:${failure.parent}:${failure.page}`,
+          failure.message,
+          true,
+        ),
+      );
+      changed = true;
+    }
+    const accepted = owner.accept(outcome);
+    if (newest && newestWasPresented && (accepted || changed)) {
+      const prior = presentations.get(newest);
+      if (prior)
+        deps.application.presentFileLocation(prior.summary, newest.message);
+    }
+    if (!accepted || outcome.kind === "detached" || outcome.kind === "bound") {
+      if (changed) deps.onChanged();
+      return;
+    }
     if (outcome.kind === "publication-conflict") {
       const reboundAuthority = await rebind();
       if (!closed && owner.isCurrent(reboundAuthority) && owner.publication)
@@ -119,37 +156,8 @@ export function createFileLocationController(
       if (!closed) deps.onChanged();
       return;
     }
-    if (outcome.kind === "failed") {
-      if (outcome.replaced) {
-        const prior = presentations.get(outcome.replaced);
-        if (prior) release(prior);
-        presentations.delete(outcome.replaced);
-      }
-      presentations.set(
-        outcome.failure,
-        claim(
-          `range:${outcome.generation}:${outcome.parent}:${outcome.page}`,
-          outcome.failure.message,
-          true,
-        ),
-      );
-      deps.onChanged();
-      return;
-    }
-    if (outcome.recovered) {
-      const prior = presentations.get(outcome.recovered);
-      if (prior) release(prior);
-      presentations.delete(outcome.recovered);
-    }
-    if (outcome.remainingNewest) {
-      const prior = presentations.get(outcome.remainingNewest);
-      if (prior)
-        deps.application.presentFileLocation(
-          prior.summary,
-          outcome.remainingNewest.message,
-        );
-    }
-    if (outcome.markTransportReachable) deps.onReachable();
+    if (outcome.kind === "loaded" && outcome.markTransportReachable)
+      deps.onReachable();
     deps.onChanged();
   };
   const handle = (outcome: FileLocationOutcome): Promise<void> => {
@@ -174,6 +182,20 @@ export function createFileLocationController(
       }
     }
   };
+  const presentRetry = async (
+    failure: FileLocationFailure,
+    pending: Promise<void>,
+  ): Promise<void> => {
+    retries.set(failure, pending);
+    try {
+      await presentExpansion(failure.parent, pending);
+    } finally {
+      if (retries.get(failure) === pending) {
+        retries.delete(failure);
+        if (!closed && deps.isAlive()) deps.onChanged();
+      }
+    }
+  };
   const load = async (
     parent: string,
     page: number,
@@ -188,6 +210,7 @@ export function createFileLocationController(
   const reset = (): FileLocationAuthority => {
     const authority = owner.reset();
     expansions.clear();
+    retries.clear();
     if (publicationPresentation) release(publicationPresentation);
     publicationPresentation = undefined;
     for (const p of presentations.values()) release(p);
@@ -214,7 +237,9 @@ export function createFileLocationController(
   const retry = async (failure: FileLocationFailure): Promise<void> => {
     if (closed || !deps.isAlive() || !owner.failures().includes(failure))
       return;
-    await presentExpansion(failure.parent, owner.retry(failure).then(handle));
+    const pending = retries.get(failure);
+    if (pending) return pending;
+    await presentRetry(failure, owner.retry(failure).then(handle));
   };
   const retryKey = async (key: string): Promise<void> => {
     const failure = owner
@@ -235,12 +260,12 @@ export function createFileLocationController(
   };
   const toggle = async (location: string, expanded: boolean): Promise<void> => {
     if (closed || !deps.isAlive()) return;
-    const pending = expansions.get(location);
-    if (pending) return pending;
     if (expanded) {
       if (owner.collapse(location)) deps.onChanged();
       return;
     }
+    const pending = expansions.get(location);
+    if (pending) return pending;
     if (owner.expandRetained(location)) {
       deps.onChanged();
       return;
@@ -286,6 +311,8 @@ export function createFileLocationController(
       failures: owner.failures().map((f) => ({
         key: `${f.generation}:${f.parent}:${f.page}`,
         range: f.range,
+        parent: f.parent,
+        loading: retries.has(f),
       })),
       rootExpanded: owner.isExpanded(""),
       rootLoading: expansions.has(""),
@@ -304,12 +331,24 @@ export function createFileLocationController(
   };
   const refreshCounts = async (): Promise<void> => {
     if (closed || !deps.isAlive()) return;
-    const windows = owner.prepareCountRefresh();
-    // Admit the bounded refresh together, before another interaction can
-    // collapse a target or replace its page. Newer page requests still win.
-    await Promise.all(
-      [...windows].map(([parent, window]) => load(parent, window.page, false)),
+    const presenting = new Set(expansions.keys());
+    const retrying = new Map(
+      [...retries.keys()].map((failure) => [failure.parent, failure]),
     );
+    const plan = owner.prepareCountRefresh();
+    expansions.clear();
+    retries.clear();
+    // Admit the captured visible windows before another interaction can
+    // change their pages or disclosure. Old transports no longer own feedback.
+    const pending = [...plan].map(([parent, request]) => {
+      const loaded = load(parent, request.page, request.expand);
+      const failure = retrying.get(parent);
+      if (failure?.page === request.page && owner.failures().includes(failure))
+        return presentRetry(failure, loaded);
+      return presenting.has(parent) ? presentExpansion(parent, loaded) : loaded;
+    });
+    deps.onChanged();
+    await Promise.all(pending);
   };
   return {
     owner,
@@ -336,6 +375,7 @@ export function createFileLocationController(
       closed = true;
       owner.dispose();
       expansions.clear();
+      retries.clear();
       for (const p of presentations.values()) release(p);
       releasePublicationNotice();
       presentations.clear();

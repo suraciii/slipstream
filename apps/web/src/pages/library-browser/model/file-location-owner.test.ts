@@ -115,6 +115,77 @@ describe("FileLocationOwner", () => {
     expect(owner.window("")).toBe(retainedRoot);
   });
 
+  test("count refresh fences a completed conflict without invalidating publication authority", async () => {
+    const owner = createFileLocationOwner((input) =>
+      Promise.resolve(
+        parentFrom(input)
+          ? new Response(null, { status: 409 })
+          : windowResponse("published-1", ""),
+      ),
+    );
+    try {
+      const root = await owner.loadWindow("", 0);
+      const conflict = await owner.loadWindow("expired", 0);
+      expect(owner.accept(conflict)).toBe(true);
+      owner.prepareCountRefresh();
+      expect(owner.accept(conflict)).toBe(false);
+      expect(owner.isCurrent(root.authority)).toBe(true);
+      expect(owner.publication).toBe("published-1");
+    } finally {
+      owner.dispose();
+    }
+  });
+
+  test("a newer same-parent request fences a completed conflict before dispatch", async () => {
+    const held = Promise.withResolvers<Response>();
+    let requests = 0;
+    const owner = createFileLocationOwner((input) => {
+      if (!parentFrom(input))
+        return Promise.resolve(windowResponse("published-1", ""));
+      requests += 1;
+      return requests === 1
+        ? Promise.resolve(new Response(null, { status: 409 }))
+        : held.promise;
+    });
+    try {
+      await owner.loadWindow("", 0);
+      const conflict = await owner.loadWindow("expired", 0);
+      expect(owner.accept(conflict)).toBe(true);
+      const replacement = owner.loadWindow("expired", 1);
+      expect(owner.accept(conflict)).toBe(false);
+      held.resolve(windowResponse("published-1", "expired"));
+      expect(owner.accept(await replacement)).toBe(true);
+      expect(owner.window("expired")?.page).toBe(1);
+    } finally {
+      held.resolve(windowResponse("published-1", "expired"));
+      owner.dispose();
+    }
+  });
+
+  test("window eviction preserves an undispatched publication conflict", async () => {
+    let expired = false;
+    const owner = createFileLocationOwner((input) => {
+      const parent = parentFrom(input);
+      return Promise.resolve(
+        parent === "old" && expired
+          ? new Response(null, { status: 409 })
+          : windowResponse("published-1", parent),
+      );
+    });
+    try {
+      await owner.loadWindow("", 0);
+      await owner.loadWindow("old", 0);
+      expired = true;
+      const conflict = await owner.loadWindow("old", 0);
+      for (let index = 0; index < 32; index += 1)
+        await owner.loadWindow(`sibling-${index}`, 0);
+      expect(owner.window("old")).toBeUndefined();
+      expect(owner.accept(conflict)).toBe(true);
+    } finally {
+      owner.dispose();
+    }
+  });
+
   test("bounds expanded direct-child windows while retaining the root", async () => {
     const owner = createFileLocationOwner((input) => {
       const parent = parentFrom(input);
@@ -253,6 +324,7 @@ describe("FileLocationOwner", () => {
 
     expect(outcome.kind).toBe("loaded");
     expect(owner.accept(outcome)).toBe(true);
+    expect(owner.isExpanded("open")).toBe(false);
   });
 
   test("detaches a mismatched bound publication and sends the exact query", async () => {
