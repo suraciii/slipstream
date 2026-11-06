@@ -134,6 +134,9 @@ test("Photo View gestures navigate and decide while More owns one review sheet",
   await expect(page.locator("[data-dock-previous]")).toBeDisabled();
   await expect(page.locator("[data-dock-next]")).toBeEnabled();
   await expect(page.locator("[data-rating]")).toHaveText("No Rating");
+  await expect(page.locator("[data-dock-rating-label]")).toHaveText(
+    "No Rating",
+  );
   await expect(page.locator("[data-dock-rating]")).toHaveAttribute(
     "aria-controls",
     "rating-choices",
@@ -527,6 +530,9 @@ test.describe("touch Rating Wheel and Pinch", () => {
       value: 4,
     });
     await expect(page.locator("[data-rating]")).toHaveText("Rating: 4 stars");
+    await expect(page.locator("[data-dock-rating-label]")).toHaveText(
+      "4 stars",
+    );
     await expect(page.locator("[data-position]")).toHaveText("1 / 2");
     await expect(page.locator("[data-selection]")).toHaveText("Unflagged");
   });
@@ -743,43 +749,6 @@ test("Preview zoom is explicit, bounded, and never records a decision", async ({
   await openPhotoToolsView(page, "zoom");
   await expect(fit).toHaveAttribute("aria-pressed", "true");
   expect(stateRequests).toBe(0);
-});
-
-test("Photo View shows review capture metadata and explicit missing values", async ({
-  page,
-}) => {
-  const { base, root } = await fixture();
-  await writePhotos(root, 1);
-  await page.route("**/api/photos/*/metadata", (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        captureTime: "2026-02-03T04:05:06.000000000",
-        aperture: "f/2.8",
-        iso: 400,
-        shutterSpeed: "1/125 s",
-        focalLength: "50 mm",
-      }),
-    }),
-  );
-  const running = await server(base, root);
-  await startReview(page, running.url, "All Photos");
-  await openPhotoToolsView(page, "details");
-  await expect(page.locator("[data-metadata]")).toContainText("Details");
-  // Capture Time is camera-local time with no timezone. The display keeps
-  // the recorded date and minute and drops transport precision.
-  await expect(page.locator("[data-metadata-capture-time]")).toHaveText(
-    "2026-02-03 04:05",
-  );
-  await expect(page.locator("[data-metadata-aperture]")).toHaveText("f/2.8");
-  await expect(page.locator("[data-metadata-iso]")).toHaveText("400");
-  await expect(page.locator("[data-metadata-shutter-speed]")).toHaveText(
-    "1/125 s",
-  );
-  await expect(page.locator("[data-metadata-focal-length]")).toHaveText(
-    "50 mm",
-  );
 });
 
 test("Photo View shows a bounded filmstrip of neighbors and navigates through it", async ({

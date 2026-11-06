@@ -122,7 +122,11 @@ Closing a chooser or result disclosure MUST NOT cancel admitted work, erase unce
 
 ## Photo View
 
-Photo View MUST contain a compact source-return and filename row, Preview, and primary action region. Position, Selection State, and Rating MUST be understandable without opening Photo tools.
+Photo View MUST contain a compact source-return and filename row, capture-facts line, Preview, and primary action region. Position, Selection State, and Rating MUST be understandable without opening Photo tools.
+
+At every supported width, the current source MUST remain visibly painted above the filename. A long source name MAY truncate, but its complete value MUST remain available to assistive technology and on pointer hover.
+
+The capture-facts line MUST present Capture Time, Aperture, Shutter Speed, ISO, and Focal Length together when available. Each missing or unreadable field MUST display an explicit `—`. Routine Original availability and Preview Source MUST NOT occupy this line; Original unavailable remains visible through the owning status and recovery path, while Preview Source and detail evidence remain disclosed through Photo tools and the Preview description.
 
 The primary region MUST present one Reject action, one Rating entry with its explicit current value including zero, one Pick action, one Undo action, and More.
 

@@ -18,6 +18,13 @@ export const PHOTO_VIEW_TEMPLATE = `
       <button type="button" class="quiet" data-retry-photo hidden>Retry</button>
     </div>
   </header>
+  <div class="photo-facts-line" data-photo-facts-line aria-label="Photo details">
+    <span data-photo-facts-capture><span class="photo-facts-label">Capture Time: </span><span data-photo-facts-value>—</span></span>
+    <span data-photo-facts-aperture><span class="photo-facts-label">Aperture: </span><span data-photo-facts-value>—</span></span>
+    <span data-photo-facts-shutter-speed><span class="photo-facts-label">Shutter Speed: </span><span data-photo-facts-value>—</span></span>
+    <span data-photo-facts-iso><span class="photo-facts-label" aria-hidden="true">ISO: </span><span data-photo-facts-value>—</span></span>
+    <span data-photo-facts-focal-length><span class="photo-facts-label">Focal Length: </span><span data-photo-facts-value>—</span></span>
+  </div>
   <section class="preview" data-preview aria-label="Photo Preview" aria-describedby="preview-detail-evidence">
     <div class="preview-ambient" data-preview-ambient aria-hidden="true" hidden></div>
     <p id="preview-detail-evidence" data-preview-description hidden></p>
@@ -30,17 +37,12 @@ export const PHOTO_VIEW_TEMPLATE = `
       <div class="rating-wheel-options" data-rating-wheel-options role="group" aria-label="Rating choices"></div>
     </div>
   </section>
-  <div class="photo-facts-line" data-photo-facts-line aria-label="Photo details">
-    <span data-photo-facts-kind>—</span>
-    <span data-photo-facts-capture>—</span>
-    <span data-photo-facts-availability>—</span>
-  </div>
   <div class="filmstrip-host" data-filmstrip-host><div class="filmstrip" data-filmstrip role="group" aria-label="Nearby Photos" hidden></div></div>
   <footer class="photo-review-controls" aria-label="Photo review">
     <div class="photo-navigation" data-photo-navigation role="group" aria-label="Photo navigation"><button type="button" class="quiet" data-dock-previous disabled>Previous</button><p class="photo-position" data-position>0 / 0</p><button type="button" class="quiet" data-dock-next disabled>Next</button></div>
     <div class="quick-action-dock" data-quick-action-dock role="group" aria-label="Photo actions">
       <button type="button" class="reject-button" data-dock-reject>Reject</button>
-      <button type="button" class="rating-dock-button" data-dock-rating disabled aria-controls="rating-choices" aria-expanded="false"><span class="rating-dock-stars" data-dock-stars aria-hidden="true">☆☆☆☆☆</span><span class="rating-dock-label">Rating</span></button>
+      <button type="button" class="rating-dock-button" data-dock-rating disabled aria-controls="rating-choices" aria-expanded="false"><span class="rating-dock-stars" data-dock-stars aria-hidden="true">☆☆☆☆☆</span><span class="rating-dock-label" data-dock-rating-label>No Rating</span></button>
       <button type="button" class="pick-button" data-dock-pick>Pick</button>
       <button type="button" class="quiet" data-dock-undo disabled>Undo</button>
       <button type="button" class="quiet" data-dock-more aria-controls="photo-tools-panel" aria-expanded="false">More</button>
