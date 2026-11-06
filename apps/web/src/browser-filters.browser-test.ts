@@ -150,11 +150,13 @@ test("a selected high-rated view keeps its exact filtered count", async ({
   await expect(page.locator("[data-grid-view-options]")).toHaveAccessibleName(
     /Picked.*Rating 4/,
   );
-  expect(
-    await page
-      .locator(".grid-header")
-      .evaluate((element) => element.getBoundingClientRect().height),
-  ).toBeLessThanOrEqual(88);
+  await expect
+    .poll(() =>
+      page
+        .locator(".grid-header")
+        .evaluate((element) => element.getBoundingClientRect().height),
+    )
+    .toBeLessThanOrEqual(88);
   await page.setViewportSize({ width: 1000, height: 700 });
 
   // Rating 0 means No Rating, so a maximum of 0 matches only the unrated Photo.

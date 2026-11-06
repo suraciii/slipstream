@@ -384,7 +384,7 @@ The strip is bounded independently of source size and follows the open source's 
 
 The strip is supporting content.
 
-On a short viewport it yields so the Preview, the decisions, and Rating keep their space, and it MUST never widen Photo View or clip a control.
+On a narrow or short viewport where the Preview floor and primary controls leave no room, it yields so the Preview, the decisions, Rating, and Undo keep their space; Nearby Photos remains available through Photo tools. It MUST never widen Photo View or clip a control.
 
 A neighbor the browser has not loaded MUST appear as an unavailable entry rather than a guessed Photo.
 

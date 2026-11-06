@@ -391,6 +391,20 @@ test("the Photo View exposes exactly one h1", async ({ page }) => {
           ).length,
       ),
     ).toBe(1);
+    // The source remains a painted identity above the filename instead of a
+    // visually hidden heading. Its full value stays available on hover.
+    const source = page.locator("[data-photo-title]");
+    const filename = page.locator("[data-photo-filename]");
+    await expect(source).toBeVisible();
+    await expect(source).toHaveAttribute("title", LONG_ALBUM_NAME);
+    const sourceBox = (await source.boundingBox())!;
+    const filenameBox = (await filename.boundingBox())!;
+    expect(sourceBox.width).toBeGreaterThan(1);
+    expect(sourceBox.height).toBeGreaterThan(1);
+    expect(sourceBox.y + sourceBox.height).toBeLessThanOrEqual(
+      filenameBox.y + 1,
+    );
+    await expect(page.locator("[data-photo-source-toggle]")).toBeHidden();
   }
   // The Photo heading retains the name of its current source.
   await expect(page.locator("[data-photo-title]")).toHaveText(LONG_ALBUM_NAME);

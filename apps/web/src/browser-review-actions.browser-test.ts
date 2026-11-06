@@ -212,6 +212,9 @@ test("unavailable Original keeps its Photo review and visible recovery action", 
   const running = await server(base, root);
   await startReview(page, running.url, "All Photos");
   await waitForLoadedReviewImage(page);
+  await expect(page.locator("[data-photo-facts-line]")).not.toContainText(
+    "Available",
+  );
   await unlink(join(root, "000.jpg"));
   expect((await post(running.url, "/api/scan", {})).status).toBe(200);
   await page.reload();

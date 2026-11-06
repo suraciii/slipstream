@@ -877,7 +877,7 @@
 /* ------------------------------------------------------------------------- */
 
 .photo-view {
-  grid-template-rows: auto minmax(480px, 1fr) auto auto auto;
+  grid-template-rows: auto auto minmax(480px, 1fr) auto auto;
   background: var(--canvas);
 }
 
@@ -1022,6 +1022,16 @@
 }
 
 /* Facts line. Primary/disclosed facts are still selected by Photo View. */
+.photo-facts-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 .photo-facts-line {
   height: 32px;
   min-height: 32px;
@@ -1033,28 +1043,20 @@
   border-bottom: 1px solid var(--border);
   background: var(--canvas);
   color: var(--muted);
-  font: 10.5px/1 var(--font-mono);
+  font: 11px/1 var(--font-mono);
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
-.photo-facts-line span {
+.photo-facts-line > span {
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.photo-facts-line span + span {
+.photo-facts-line > span + span {
   margin-left: 10px;
   padding-left: 10px;
   border-left: 1px solid var(--border);
-}
-
-.photo-facts-line [data-photo-facts-availability] {
-  margin-left: auto;
-  color: var(--picked);
-}
-
-.photo-facts-line [data-photo-facts-availability="false"] {
-  color: var(--warning);
 }
 
 /* Preview well: ambient same-Preview matte, radial scrim, sharp print. */
@@ -1166,6 +1168,12 @@
   justify-content: center;
 }
 
+@media (max-width: 760px), (max-height: 480px) {
+  .filmstrip-host {
+    display: none;
+  }
+}
+
 .filmstrip {
   min-height: 82px;
   height: 82px;
@@ -1210,8 +1218,9 @@
 /* Navigation and review dock. */
 .photo-review-controls {
   min-height: 64px;
+  height: max-content;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: min(380px, 42vw) minmax(0, 1fr);
   align-items: center;
   gap: 16px;
   padding: 3px 20px;
@@ -1245,10 +1254,13 @@
 }
 
 .quick-action-dock {
-  height: 58px;
+  width: fit-content;
+  max-width: 100%;
+  height: auto;
   min-height: 58px;
   display: grid;
-  grid-template-columns: repeat(5, minmax(64px, 1fr));
+  justify-self: end;
+  grid-template-columns: repeat(auto-fit, minmax(3.5rem, 1fr));
   gap: 2px;
   padding: 7px 0;
   background: transparent;
@@ -1257,7 +1269,7 @@
 .quick-action-dock button {
   min-width: 0;
   min-height: 44px;
-  height: 44px;
+  height: auto;
   display: inline-grid;
   place-items: center;
   padding: 0 4px;
@@ -1266,13 +1278,17 @@
   color: var(--fg-2);
   font: 0.75rem var(--font-ui);
   text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .quick-action-dock .rating-dock-button {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  justify-content: center;
+  align-content: center;
+  column-gap: 8px;
+  row-gap: 0;
 }
 
 .pick-button {
@@ -1730,29 +1746,37 @@
   }
 
   .photo-identity {
-    grid-template-rows: auto;
+    grid-template-rows: auto auto;
+    row-gap: 1px;
   }
 
-  /* The narrow header carries the filename and state on one line. The source
-     title remains the single Photo View h1 for assistive technology. */
+  /* The source stays visible above the filename. The h1 remains the single
+     Photo View heading, and a long source truncates here rather than
+     widening the screen. */
   .photo-header h1 {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    margin: -1px;
+    position: static;
+    grid-row: 1;
+    width: auto;
+    height: auto;
+    margin: 0;
     overflow: hidden;
-    clip-path: inset(50%);
+    color: var(--fg-3);
+    font: 500 11px/1.2 var(--font-ui);
+    letter-spacing: 0;
+    text-overflow: ellipsis;
     white-space: nowrap;
+    clip-path: none;
   }
 
   .photo-filename {
-    grid-row: 1;
+    grid-row: 2;
     font-size: 0.78125rem;
     line-height: 1.2;
   }
 
   .photo-identity-facts {
-    grid-row: 1;
+    grid-row: 1 / -1;
+    align-self: center;
   }
 
   .rating-dock-button {
@@ -1786,11 +1810,31 @@
     font-size: 0.75rem;
   }
 
+  .photo-header-actions [data-photo-source-toggle] {
+    display: none;
+  }
+
   .photo-facts-line {
-    height: 26px;
-    min-height: 26px;
-    padding: 0 16px;
-    font-size: 10.5px;
+    height: auto;
+    min-height: 32px;
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    align-content: center;
+    gap: 1px 8px;
+    padding: 3px 16px;
+    font-size: 11px;
+    line-height: 1.15;
+    white-space: nowrap;
+  }
+
+  .photo-facts-line > span + span {
+    margin-left: 0;
+    padding-left: 0;
+    border-left: 0;
+  }
+
+  .photo-facts-line > [data-photo-facts-capture] {
+    grid-column: 1 / -1;
   }
 
   .cell-footer {
@@ -1835,17 +1879,17 @@
 
   .quick-action-dock {
     width: 100%;
-    height: 58px;
+    height: auto;
     min-height: 58px;
     padding: 7px 12px max(7px, env(safe-area-inset-bottom));
     border-top: 1px solid var(--border);
     background: var(--surface);
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(3.5rem, 1fr));
   }
 
   .quick-action-dock button {
     min-height: 44px;
-    height: 44px;
+    height: auto;
     font-size: 0.75rem;
   }
 
@@ -1887,7 +1931,7 @@
 
 @media (min-width: 390px) and (max-width: 760px) and (min-height: 481px) {
   .photo-view {
-    grid-template-rows: auto minmax(650px, 1fr) auto auto auto;
+    grid-template-rows: auto auto minmax(650px, 1fr) auto auto;
   }
 
   /* Keep the view natively scrollable below the dock. A touch that starts
@@ -1907,17 +1951,29 @@
 
 @media (min-width: 761px) and (min-height: 481px) {
   .photo-view {
-    grid-template-rows: auto minmax(480px, 1fr) auto auto auto;
+    grid-template-rows: auto auto minmax(480px, 1fr) auto auto;
   }
 }
 
 @media (max-height: 480px) {
   .photo-view {
-    grid-template-rows: auto minmax(15rem, 1fr) auto;
+    grid-template-rows: auto auto minmax(15rem, 1fr) auto;
   }
 
   .photo-facts-line {
-    display: none;
+    display: flex;
+    height: 26px;
+    min-height: 26px;
+    gap: 0;
+    padding: 0 10px;
+    font-size: 10.5px;
+    white-space: nowrap;
+  }
+
+  .photo-facts-line > span + span {
+    margin-left: 8px;
+    padding-left: 8px;
+    border-left: 1px solid var(--border);
   }
 
   .photo-header {
@@ -1946,7 +2002,7 @@
     grid-column: 2;
     grid-row: 1;
     width: 100%;
-    height: 44px;
+    height: auto;
     min-height: 44px;
     padding: 0;
     border-top: 0;
@@ -1954,8 +2010,15 @@
   }
 
   .quick-action-dock button {
-    height: 44px;
+    height: auto;
     min-height: 44px;
+  }
+
+  .quick-action-dock .rating-dock-button {
+    display: grid;
+    grid-template-rows: auto auto;
+    gap: 0;
+    place-items: center;
   }
 
   .photo-review-controls .status {

@@ -108,14 +108,25 @@ export function createPhotoViewPresenter({
   const selectionChip = required<HTMLElement>(root, "[data-selection-chip]");
   const stage = required<HTMLElement>(root, "[data-stage]");
   const ambient = required<HTMLElement>(root, "[data-preview-ambient]");
-  const factsKind = required<HTMLElement>(root, "[data-photo-facts-kind]");
   const factsCapture = required<HTMLElement>(
     root,
-    "[data-photo-facts-capture]",
+    "[data-photo-facts-capture] [data-photo-facts-value]",
   );
-  const factsAvailability = required<HTMLElement>(
+  const factsAperture = required<HTMLElement>(
     root,
-    "[data-photo-facts-availability]",
+    "[data-photo-facts-aperture] [data-photo-facts-value]",
+  );
+  const factsShutterSpeed = required<HTMLElement>(
+    root,
+    "[data-photo-facts-shutter-speed] [data-photo-facts-value]",
+  );
+  const factsIso = required<HTMLElement>(
+    root,
+    "[data-photo-facts-iso] [data-photo-facts-value]",
+  );
+  const factsFocalLength = required<HTMLElement>(
+    root,
+    "[data-photo-facts-focal-length] [data-photo-facts-value]",
   );
   const status = required<HTMLElement>(root, "[data-status]");
   const previewSource = required<HTMLElement>(root, "[data-source]");
@@ -169,9 +180,14 @@ export function createPhotoViewPresenter({
         : formatCaptureTime(model.captureTime);
     factsCapture.textContent = captureTime.textContent;
     aperture.textContent = model.aperture ?? "—";
+    factsAperture.textContent = aperture.textContent;
     iso.textContent = model.iso === undefined ? "—" : String(model.iso);
+    factsIso.textContent =
+      model.iso === undefined ? "—" : `ISO ${String(model.iso)}`;
     shutterSpeed.textContent = model.shutterSpeed ?? "—";
+    factsShutterSpeed.textContent = shutterSpeed.textContent;
     focalLength.textContent = model.focalLength ?? "—";
+    factsFocalLength.textContent = focalLength.textContent;
   };
   const presentReviewImage = (
     url: string,
@@ -259,9 +275,6 @@ export function createPhotoViewPresenter({
   ) => {
     source = nextSource;
     limited = isLimited;
-    if (nextSource)
-      factsKind.textContent =
-        nextSource === "raw-embedded-jpeg" ? "RAW" : "JPEG";
     renderPreviewEvidence();
   };
   const renderStatus = (text: string): void => {
@@ -285,31 +298,17 @@ export function createPhotoViewPresenter({
     ambient.hidden = true;
     ambient.style.removeProperty("background-image");
   };
-  const kindLabel = (model: PhotoShellViewModel): string => {
-    if (model.previewSource === "raw-embedded-jpeg") return "RAW";
-    if (model.previewSource === "jpeg-original") return "JPEG";
-    const extension = model.originalFilename?.split(".").at(-1)?.toLowerCase();
-    if (!extension) return "—";
-    return extension === "jpg" || extension === "jpeg" ? "JPEG" : "RAW";
-  };
   const renderPhotoShell = (model: PhotoShellViewModel) => {
     if (!alive) return undefined;
     resetGestures();
     canReviewRecovery = Boolean(model.photoId && model.available === false);
     title.textContent = model.sourceName;
+    title.title = model.sourceName;
     currentPhotoId = model.photoId;
     photoSurface = {};
     renderPhotoFacts(model);
     renderPhotoMetadata();
     setPreviewFacts(model.previewSource, Boolean(model.limitedDetail));
-    factsKind.textContent = kindLabel(model);
-    factsAvailability.textContent =
-      model.photoId === undefined
-        ? "—"
-        : model.available === false
-          ? "Unavailable"
-          : "Available";
-    factsAvailability.dataset.available = String(model.available !== false);
     setPhotoStatus(
       model.photoId && model.available === false
         ? "Current Photo: Original File is unavailable. Decisions remain available."
@@ -365,7 +364,9 @@ export function createPhotoViewPresenter({
     },
     setPreviewFacts,
     setSourceTitle(name) {
-      if (alive) title.textContent = name;
+      if (!alive) return;
+      title.textContent = name;
+      title.title = name;
     },
     clearPreview() {
       if (!alive) return;
