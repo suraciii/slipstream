@@ -211,8 +211,13 @@ test("only a long source name truncates and stays available to assistive technol
   await expect(page.locator("[data-source-toggle]")).toHaveAccessibleName(
     `Sources — ${LONG_ALBUM_NAME} Ready · 2 Photos`,
   );
-  await name.hover();
-  await expect(name).toHaveAttribute("title", LONG_ALBUM_NAME);
+  // The narrow disclosure covers the row, so pointer hover lands on it and
+  // exposes the complete name there.
+  await page.locator("[data-source-toggle]").hover();
+  await expect(page.locator("[data-source-toggle]")).toHaveAttribute(
+    "title",
+    LONG_ALBUM_NAME,
+  );
 
   await page.setViewportSize({ width: 760, height: 844 });
   // At a wide header the same name fits, so nothing truncates.
@@ -272,11 +277,35 @@ test("the result count shares the source disclosure without truncating", async (
     ).toBe(false);
     expect(
       await count.evaluate(
-        (element) => element.closest("[data-source-toggle]") !== null,
+        (element) => element.closest(".grid-source") !== null,
       ),
-      `the count leaves the disclosure at ${width}px`,
+      `the count leaves the source identity at ${width}px`,
     ).toBe(true);
   }
+});
+
+test("a wide Grid presents the source title as a heading, not a disclosure", async ({
+  page,
+}) => {
+  const { running } = await gridFixture(LONG_ALBUM_NAME);
+  await openAlbumGrid(page, running.url, LONG_ALBUM_NAME);
+
+  await page.setViewportSize({ width: 1440, height: 900 });
+  // Sources are already persistent beside the Grid, so the header carries no
+  // second, ineffectual disclosure and no extra keyboard stop.
+  await expect(page.locator("[data-source-toggle]")).toBeHidden();
+  await expect(page.getByRole("button", { name: /^Sources —/ })).toHaveCount(0);
+  // The title itself remains a navigable heading outside any button.
+  const heading = page.getByRole("heading", { level: 1 });
+  await expect(heading).toBeVisible();
+  await expect(heading).toHaveText(LONG_ALBUM_NAME);
+  expect(
+    await page
+      .locator("[data-grid-title]")
+      .evaluate((element) => element.closest("button") === null),
+  ).toBe(true);
+  await heading.hover();
+  await expect(heading).toHaveAttribute("title", LONG_ALBUM_NAME);
 });
 
 test("the Sources separator exposes the width value and its bounds", async ({

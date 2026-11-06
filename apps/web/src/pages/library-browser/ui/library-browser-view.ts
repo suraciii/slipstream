@@ -493,12 +493,12 @@ export function createLibraryBrowserView(
     "[data-grid-select-mode]",
   );
   const gridTools = required<HTMLElement>(root, "[data-grid-tools]");
-  /// Presents the current source in both views. The disclosure's accessible
-  /// name is built from the heading it contains plus the status slot beside
-  /// it, so a screen reader names both the source and the current result
+  /// Presents the current source in both views. The narrow disclosure's
+  /// accessible name is built from the heading beside it plus the status
+  /// slot, so a screen reader names both the source and the current result
   /// count from one control while the visible label truncates.
   const presentSourceTitle = (name: string) => {
-    gridTitle.title = gridTitle.textContent = name;
+    gridTitle.title = sourceToggle.title = gridTitle.textContent = name;
     photoPresenter.setSourceTitle(name);
   };
   const gridSelection = required<HTMLElement>(root, "[data-grid-selection]");
