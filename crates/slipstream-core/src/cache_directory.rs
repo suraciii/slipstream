@@ -15,7 +15,7 @@ use super::{
 };
 use crate::{
     OriginalRecord, PhotoRecord, PreviewSource,
-    derivative::{Derivative, DerivativeError, DerivativeProfile},
+    derivative::{Derivative, DerivativeError},
     source_revision,
 };
 use image::{ImageDecoder, codecs::jpeg::JpegDecoder};
@@ -131,9 +131,9 @@ impl CacheDirectory {
         Ok(Some(cached_from_manifest(self, &manifest, facts, false)))
     }
 
-    /// Returns the current manifest key after bounded metadata checks. This is
-    /// only for Browse Window URL hydration; Preview requests and derivative
-    /// delivery perform complete JPEG validation before serving bytes.
+    /// Returns the current manifest key after bounded metadata checks for Browse
+    /// Window URL hydration and conditional derivative requests. Delivery of
+    /// derivative bytes validates the complete JPEG before serving them.
     pub fn lookup_current_key(
         &self,
         photo: &PhotoRecord,
@@ -217,6 +217,9 @@ impl CacheDirectory {
     /// Callers provide only the validated hexadecimal identity; cache path
     /// construction and no-follow file admission remain inside the cache
     /// boundary. This keeps filesystem paths out of the HTTP and Preview APIs.
+    /// The caller admits the current derivative through `lookup_current`, which
+    /// validates the complete bytes. This read repeats only bounded structural
+    /// checks because the file is immutable and atomically published.
     pub fn read_derivative(
         &self,
         key: &str,
@@ -245,9 +248,7 @@ impl CacheDirectory {
         let Some(facts) = jpeg_facts(&bytes) else {
             return Err(CacheError::InvalidCachedDerivative);
         };
-        if facts.width.max(facts.height) > target.long_edge()
-            || validate_jpeg_bytes(&bytes, facts, false).is_none()
-        {
+        if facts.width.max(facts.height) > target.long_edge() {
             return Err(CacheError::InvalidCachedDerivative);
         }
         Ok(bytes)
@@ -325,6 +326,8 @@ pub(super) fn inspect_cached(
     Some(facts)
 }
 
+/// Validates generated JPEG decodability and its embedded profile once before
+/// publication.
 pub(super) fn validate_processed(
     processed: &Derivative,
     target: DerivativeTarget,
@@ -342,9 +345,8 @@ pub(super) fn validate_processed(
     if facts.width != processed.width || facts.height != processed.height {
         return Err(DerivativeError::Internal);
     }
-    if processed.profile == DerivativeProfile::PreservedIcc && !contains_icc(&processed.jpeg) {
-        return Err(DerivativeError::Internal);
-    }
+    validate_cached_jpeg(&processed.jpeg, facts, processed.profile.into())
+        .ok_or(DerivativeError::Malformed)?;
     Ok(())
 }
 
@@ -442,10 +444,6 @@ fn validate_jpeg_bytes(bytes: &[u8], facts: ManifestFacts, require_icc: bool) ->
     Some(())
 }
 
-fn contains_icc(bytes: &[u8]) -> bool {
-    bytes.windows(12).any(|window| window == b"ICC_PROFILE\0")
-}
-
 pub(super) fn cached_from_manifest(
     cache: &CacheDirectory,
     manifest: &Manifest,
@@ -525,4 +523,50 @@ pub(super) const fn no_follow_flag() -> i32 {
 #[cfg(not(unix))]
 pub(super) const fn no_follow_flag() -> i32 {
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::{ExtendedColorType, codecs::jpeg::JpegEncoder};
+
+    fn jpeg(width: u32, height: u32) -> Vec<u8> {
+        let pixels = vec![127_u8; width as usize * height as usize * 3];
+        let mut bytes = Vec::new();
+        JpegEncoder::new_with_quality(&mut bytes, 85)
+            .encode(&pixels, width, height, ExtendedColorType::Rgb8)
+            .unwrap();
+        bytes
+    }
+
+    #[test]
+    fn processed_jpeg_validation_rejects_marker_complete_corruption() {
+        let mut processed = Derivative {
+            width: 40,
+            height: 20,
+            profile: crate::DerivativeProfile::Srgb,
+            jpeg: jpeg(40, 20),
+        };
+        assert_eq!(
+            validate_processed(&processed, DerivativeTarget::Thumbnail512),
+            Ok(())
+        );
+
+        let mut corrupt = vec![0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08];
+        corrupt.extend_from_slice(&20_u16.to_be_bytes());
+        corrupt.extend_from_slice(&40_u16.to_be_bytes());
+        corrupt.extend_from_slice(&[0; 11]);
+        corrupt.extend_from_slice(&[0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00]);
+        corrupt.extend_from_slice(&[0xff, 0xd9]);
+        let facts = jpeg_facts(&corrupt).unwrap();
+        assert_eq!(
+            (facts.width, facts.height),
+            (processed.width, processed.height)
+        );
+        processed.jpeg = corrupt;
+        assert_eq!(
+            validate_processed(&processed, DerivativeTarget::Thumbnail512),
+            Err(DerivativeError::Malformed)
+        );
+    }
 }

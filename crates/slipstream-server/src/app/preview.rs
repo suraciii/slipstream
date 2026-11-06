@@ -130,6 +130,21 @@ impl Application {
         Some(PreviewFacts::from_records(photo.clone(), originals))
     }
 
+    /// Returns the current derivative key after metadata-only currentness checks.
+    /// This never reads or decodes derivative bytes.
+    pub(crate) async fn current_derivative_key(
+        &self,
+        photo_id: &str,
+        target: DerivativeTarget,
+    ) -> Option<String> {
+        let facts = self.published_preview_facts(photo_id)?;
+        self.preview
+            .lookup_current_key(&facts, target)
+            .await
+            .ok()
+            .flatten()
+    }
+
     pub async fn preview(&self, photo_id: &str) -> Result<PreviewResponse, ServerError> {
         self.preview_with_priority(photo_id, slipstream_core::DerivativePriority::Current)
             .await

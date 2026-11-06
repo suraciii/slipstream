@@ -1,206 +1,20 @@
 import { describe, expect, test } from "bun:test";
-import type { PhotoSummary } from "../api/contracts.js";
+import {
+  batchPhotos,
+  bind,
+  deferred,
+  fact,
+  FakeSource,
+  mutationBody,
+  reviewImage,
+  sourceAuthority,
+} from "./photo-owner-fixtures.js";
 import {
   createPhotoOwner,
   type PhotoFetch,
-  type PhotoSourcePort,
+  type PhotoOwnerEvent,
   type ReviewImageTransferPort,
 } from "./photo-owner.js";
-import type {
-  PhotoWindowAuthority,
-  SourceAuthority,
-} from "./source-grid-owner.js";
-
-type Deferred<T> = Readonly<{
-  promise: Promise<T>;
-  resolve(value: T): void;
-  reject(reason?: unknown): void;
-}>;
-
-const deferred = <T>(): Deferred<T> => {
-  let resolve!: (value: T) => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((accept, decline) => {
-    resolve = accept;
-    reject = decline;
-  });
-  return { promise, resolve, reject };
-};
-
-const fact = (id: string): PhotoSummary => ({
-  id,
-  available: true,
-  original: { kind: "jpeg", available: true },
-  selectionState: "unflagged",
-  rating: 0,
-  hasSavedEdits: false,
-  preview: { state: "inspection-pending" },
-});
-
-const reviewImage = () => {
-  let onLoad: (() => void) | undefined;
-  let onError: (() => void) | undefined;
-  let imageSource = "";
-  let clearedSources = 0;
-  const image: ReviewImageTransferPort = {
-    connected: true,
-    get source() {
-      return imageSource;
-    },
-    setHandlers(nextLoad, nextError) {
-      onLoad = nextLoad;
-      onError = nextError;
-    },
-    clearHandlers() {
-      onLoad = undefined;
-      onError = undefined;
-    },
-    setSource(next) {
-      imageSource = next;
-    },
-    clearSource() {
-      clearedSources += 1;
-      imageSource = "";
-    },
-  };
-  return {
-    image,
-    load: () => onLoad?.(),
-    get source() {
-      return imageSource;
-    },
-    get clearedSources() {
-      return clearedSources;
-    },
-    get hasHandlers() {
-      return onLoad !== undefined || onError !== undefined;
-    },
-  };
-};
-
-const sourceAuthority = () => Object.freeze({}) as SourceAuthority;
-
-class FakeSource implements PhotoSourcePort {
-  authority = sourceAuthority();
-  facts = new Map<number, PhotoSummary>();
-  decisions = new Map<
-    string,
-    Readonly<{ field: "selectionState" | "rating"; value: unknown }>
-  >();
-  moved: number[] = [];
-  trimmed: number[] = [];
-  windows: PhotoWindowAuthority[] = [];
-
-  isSourceCurrent(authority: SourceAuthority): boolean {
-    return authority === this.authority;
-  }
-  renewPhotoWindow(
-    authority: SourceAuthority,
-  ): PhotoWindowAuthority | undefined {
-    if (!this.isSourceCurrent(authority)) return undefined;
-    const value = Object.freeze({}) as PhotoWindowAuthority;
-    this.windows.push(value);
-    return value;
-  }
-  photoAt(authority: SourceAuthority, index: number): PhotoSummary | undefined {
-    return this.isSourceCurrent(authority) ? this.facts.get(index) : undefined;
-  }
-  findPhotoIndex(photoId: string): number | undefined {
-    for (const [index, photo] of this.facts)
-      if (photo.id === photoId) return index;
-    return undefined;
-  }
-  movePosition(authority: SourceAuthority, index: number): boolean {
-    if (!this.isSourceCurrent(authority)) return false;
-    this.moved.push(index);
-    return true;
-  }
-  patchPreview(
-    authority: SourceAuthority,
-    index: number,
-    photoId: string,
-    preview: PhotoSummary["preview"],
-  ): boolean {
-    return this.patch(authority, index, photoId, { preview });
-  }
-  patchSelection(
-    authority: SourceAuthority,
-    index: number,
-    photoId: string,
-    selectionState: PhotoSummary["selectionState"],
-  ): boolean {
-    return this.patch(authority, index, photoId, { selectionState });
-  }
-  patchRating(
-    authority: SourceAuthority,
-    index: number,
-    photoId: string,
-    rating: number,
-  ): boolean {
-    return this.patch(authority, index, photoId, { rating });
-  }
-  applyBatchSelection(
-    authority: SourceAuthority,
-    photoId: string,
-    _priorValue: PhotoSummary["selectionState"],
-    selectionState: PhotoSummary["selectionState"],
-  ): boolean {
-    const index = this.findPhotoIndex(photoId);
-    if (index === undefined) return this.isSourceCurrent(authority);
-    return this.patch(authority, index, photoId, { selectionState });
-  }
-  noteCommittedDecision(
-    authority: SourceAuthority,
-    photoId: string,
-    field: "selectionState" | "rating",
-    value: PhotoSummary["selectionState"] | number,
-  ): void {
-    if (!this.isSourceCurrent(authority)) return;
-    this.decisions.set(photoId, { field, value });
-  }
-  trimFacts(authority: SourceAuthority, anchor: number): void {
-    if (this.isSourceCurrent(authority)) this.trimmed.push(anchor);
-  }
-  patch(
-    authority: SourceAuthority,
-    index: number,
-    photoId: string,
-    value: Partial<PhotoSummary>,
-  ): boolean {
-    const current = this.photoAt(authority, index);
-    if (!current || current.id !== photoId) return false;
-    this.facts.set(index, Object.freeze({ ...current, ...value }));
-    return true;
-  }
-}
-
-const batchPhotos = (source: FakeSource, ids: ReadonlyArray<string>) =>
-  ids.map((photoId) => ({
-    photoId,
-    expectedCurrent:
-      [...source.facts.values()].find((photo) => photo.id === photoId)
-        ?.selectionState ?? "unflagged",
-  }));
-
-const bind = (source: FakeSource, fetcher: PhotoFetch) => {
-  const owner = createPhotoOwner(fetcher, source);
-  owner.bindSource({
-    sourceAuthority: source.authority,
-    total: source.facts.size,
-    index: 0,
-    albumId: "album-1",
-  });
-  const opened = owner.beginOpen(0);
-  if (!opened) throw new Error("expected Photo open");
-  owner.commitOpen(opened);
-  return { owner, opened };
-};
-
-const mutationBody = (undo: unknown): Response =>
-  new Response(JSON.stringify({ undo }), {
-    status: 200,
-    headers: { "Content-Type": "application/json" },
-  });
 
 describe("PhotoOwner", () => {
   test("owns current and adjacent Preview priority and suppresses stale completion", async () => {
@@ -242,10 +56,103 @@ describe("PhotoOwner", () => {
     owner.dispose();
   });
 
+  test("uses complete ready Preview summary without fetching, unless refreshed", async () => {
+    const source = new FakeSource();
+    source.facts.set(0, {
+      ...fact("photo-0"),
+      preview: {
+        state: "ready",
+        source: "jpeg-original",
+        width: 1200,
+        height: 800,
+        limitedDetail: false,
+        url: "/summary.jpg",
+      },
+    });
+    const requests: string[] = [];
+    const { owner, opened } = bind(source, (path) => {
+      requests.push(path);
+      return Promise.resolve(
+        Response.json({ state: "ready", url: "/new.jpg" }),
+      );
+    });
+
+    const outcome = await owner.loadCurrentPreview(opened.authority);
+    expect(outcome.kind).toBe("ready");
+    if (outcome.kind === "ready")
+      expect(outcome.preview).toEqual({
+        state: "ready",
+        source: "jpeg-original",
+        stale: false,
+        width: 1200,
+        height: 800,
+        limitedDetail: false,
+        url: "/summary.jpg",
+      });
+    expect(requests).toEqual([]);
+
+    const refreshed = await owner.loadCurrentPreview(opened.authority, true);
+    expect(refreshed.kind).toBe("ready");
+    expect(requests).toEqual(["/api/photos/photo-0/preview"]);
+    expect(source.facts.get(0)?.preview.url).toBe("/new.jpg");
+    owner.dispose();
+  });
+
+  test("fetches and patches an incomplete ready Preview summary", async () => {
+    const source = new FakeSource();
+    source.facts.set(0, {
+      ...fact("photo-0"),
+      preview: { state: "ready", source: "jpeg-original", url: "/old.jpg" },
+    });
+    const requests: string[] = [];
+    const { owner, opened } = bind(source, (path) => {
+      requests.push(path);
+      return Promise.resolve(
+        Response.json({
+          state: "ready",
+          source: "jpeg-original",
+          width: 1200,
+          height: 800,
+          url: "/review.jpg",
+        }),
+      );
+    });
+
+    const outcome = await owner.loadCurrentPreview(opened.authority);
+    expect(outcome.kind).toBe("ready");
+    expect(requests).toEqual(["/api/photos/photo-0/preview"]);
+    expect(source.facts.get(0)?.preview).toEqual({
+      state: "ready",
+      source: "jpeg-original",
+      width: 1200,
+      height: 800,
+      url: "/review.jpg",
+    });
+    owner.dispose();
+  });
+
+  test("does not prefetch an adjacent Preview with a URL", async () => {
+    const source = new FakeSource();
+    source.facts.set(0, fact("photo-0"));
+    source.facts.set(1, {
+      ...fact("photo-1"),
+      preview: { state: "ready", url: "/adjacent.jpg" },
+    });
+    const requests: string[] = [];
+    const { owner, opened } = bind(source, (path) => {
+      requests.push(path);
+      return Promise.resolve(new Response(null, { status: 202 }));
+    });
+
+    await owner.prefetchAdjacent(opened.authority, 1);
+    expect(requests).toEqual([]);
+    owner.dispose();
+  });
+
   test("patches ready Preview facts and owns the browser image lease", async () => {
     const source = new FakeSource();
     source.facts.set(0, fact("photo-0"));
-    const events: string[] = [];
+    const events: PhotoOwnerEvent[] = [];
     const owner = createPhotoOwner(
       () =>
         Promise.resolve(
@@ -256,7 +163,7 @@ describe("PhotoOwner", () => {
           }),
         ),
       source,
-      { emit: (event) => events.push(event.kind) },
+      { emit: (event) => events.push(event) },
     );
     owner.bindSource({ sourceAuthority: source.authority, total: 1, index: 0 });
     const opened = owner.beginOpen(0)!;
@@ -290,15 +197,32 @@ describe("PhotoOwner", () => {
         imageSource = "";
       },
     };
+    const surface = {};
+    const photoSurface = {};
     expect(
-      owner.attachReviewImage(opened.authority, image, "/review.jpg", {}),
+      owner.attachReviewImage(
+        opened.authority,
+        image,
+        "/review.jpg",
+        surface,
+        photoSurface,
+      ),
     ).toBe(true);
     expect(onLoad).toBeDefined();
     onError?.();
-    expect(events).toEqual(["review-image-failed"]);
+    expect(events).toEqual([
+      {
+        kind: "review-image-failed",
+        authority: opened.authority,
+        photoId: "photo-0",
+        url: "/review.jpg",
+        surface,
+        photoSurface,
+      },
+    ]);
     expect(removed).toBe(1);
     expect(
-      owner.attachReviewImage(opened.authority, image, "/review.jpg", {}),
+      owner.attachReviewImage(opened.authority, image, "/review.jpg", {}, {}),
     ).toBe(true);
     onLoad?.();
     expect(imageSource).toBe("/review.jpg");
@@ -548,6 +472,7 @@ describe("PhotoOwner", () => {
         currentImage.image,
         "/review-a.jpg",
         {},
+        {},
       ),
     ).toBe(true);
     currentImage.load();
@@ -581,6 +506,7 @@ describe("PhotoOwner", () => {
         currentImage.image,
         "/review-a.jpg",
         {},
+        {},
       ),
     ).toBe(true);
     expect(currentImage.source).toBe("/review-a.jpg");
@@ -610,6 +536,7 @@ describe("PhotoOwner", () => {
         initial.authority,
         currentImage.image,
         "/review-a.jpg",
+        {},
         {},
       ),
     ).toBe(true);

@@ -261,11 +261,11 @@ A current server-cache hit reads completed derivative bytes without reopening or
 
 Currentness is evaluated against the Published Library's selected source facts: candidate, Original Location, size, and modification time. Rescan is the invalidation boundary for those facts.
 
-Preview requests MUST validate both the manifest and complete derivative bytes against that published bundle before returning a current result.
+Preview requests MUST validate both the manifest and complete derivative bytes against that published bundle before returning a current result. A successful delivery validates the derivative's complete bytes once: a cache hit validates while resolving the current Preview, and a freshly generated derivative is validated before publication. Reading already-admitted bytes repeats only bounded structural checks.
 
 Browse Window URL hydration MAY use only bounded manifest, key, source-fact, and file-metadata checks. The subsequent Preview or derivative request remains the correctness-critical byte-validation boundary.
 
-A derivative response uses ordinary HTTP cache validation tied to the cache identity, including an immutable identity-bearing URL and `ETag`.
+A derivative response uses ordinary HTTP cache validation tied to the cache identity, including an immutable identity-bearing URL and `ETag`. A conditional derivative request whose validator matches the metadata-current cache identity MAY return `304 Not Modified` without reading derivative bytes. A later unconditional request remains the byte-validation boundary.
 
 Successful private derivative responses use `Cache-Control: private, max-age=3600, must-revalidate` and `Vary: Cookie, Authorization`; errors remain non-cacheable. Reconnect and reload MAY reuse browser-cached data when the identity remains current.
 
