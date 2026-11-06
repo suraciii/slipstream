@@ -187,3 +187,61 @@ test("short landscape keeps capture facts and the complete Rating value", async 
     ).toBe(true);
   }
 });
+
+test("enlarged text keeps complete capture facts and review actions reachable", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 2);
+  await page.route("**/api/photos/*/metadata", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        captureTime: "2026-02-03T04:05:06.000000000",
+        aperture: "f/2.8",
+        iso: 400,
+        shutterSpeed: "1/125 s",
+        focalLength: "50 mm",
+      }),
+    }),
+  );
+  const running = await server(base, root);
+  await startReview(page, running.url, "All Photos");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.addStyleTag({ content: "html { font-size: 200% !important; }" });
+  await waitForLoadedReviewImage(page);
+
+  const label = page.locator("[data-dock-rating-label]");
+  await expect(label).toHaveText("No Rating");
+  const bounds = await page.evaluate(() => {
+    const button = document.querySelector<HTMLElement>("[data-dock-rating]")!;
+    const value = document.querySelector<HTMLElement>(
+      "[data-dock-rating-label]",
+    )!;
+    const b = button.getBoundingClientRect();
+    const v = value.getBoundingClientRect();
+    return {
+      overflow: document.documentElement.scrollWidth - innerWidth,
+      inside:
+        v.left >= b.left &&
+        v.right <= b.right &&
+        v.top >= b.top &&
+        v.bottom <= b.bottom,
+    };
+  });
+  expect(bounds.overflow).toBeLessThanOrEqual(0);
+  expect(bounds.inside).toBe(true);
+
+  await page
+    .locator("[data-quick-action-dock]")
+    .evaluate((element) => element.scrollIntoView({ block: "end" }));
+  for (const action of [
+    "[data-dock-reject]",
+    "[data-dock-rating]",
+    "[data-dock-pick]",
+    "[data-dock-undo]",
+    "[data-dock-more]",
+  ])
+    await expect(page.locator(action)).toBeInViewport({ ratio: 1 });
+});

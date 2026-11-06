@@ -22,7 +22,7 @@ export const PHOTO_VIEW_TEMPLATE = `
     <span data-photo-facts-capture><span class="photo-facts-label">Capture Time: </span><span data-photo-facts-value>—</span></span>
     <span data-photo-facts-aperture><span class="photo-facts-label">Aperture: </span><span data-photo-facts-value>—</span></span>
     <span data-photo-facts-shutter-speed><span class="photo-facts-label">Shutter Speed: </span><span data-photo-facts-value>—</span></span>
-    <span data-photo-facts-iso><span class="photo-facts-label" aria-hidden="true">ISO: </span><span data-photo-facts-value>—</span></span>
+    <span data-photo-facts-iso><span class="photo-facts-label">ISO: </span><span data-photo-facts-value>—</span></span>
     <span data-photo-facts-focal-length><span class="photo-facts-label">Focal Length: </span><span data-photo-facts-value>—</span></span>
   </div>
   <section class="preview" data-preview aria-label="Photo Preview" aria-describedby="preview-detail-evidence">

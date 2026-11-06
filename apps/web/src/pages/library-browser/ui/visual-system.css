@@ -1218,6 +1218,7 @@
 /* Navigation and review dock. */
 .photo-review-controls {
   min-height: 64px;
+  height: max-content;
   display: grid;
   grid-template-columns: min(380px, 42vw) minmax(0, 1fr);
   align-items: center;
@@ -1255,11 +1256,11 @@
 .quick-action-dock {
   width: fit-content;
   max-width: 100%;
-  height: 58px;
+  height: auto;
   min-height: 58px;
   display: grid;
   justify-self: end;
-  grid-template-columns: repeat(5, minmax(64px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(3.5rem, 1fr));
   gap: 2px;
   padding: 7px 0;
   background: transparent;
@@ -1268,7 +1269,7 @@
 .quick-action-dock button {
   min-width: 0;
   min-height: 44px;
-  height: 44px;
+  height: auto;
   display: inline-grid;
   place-items: center;
   padding: 0 4px;
@@ -1277,7 +1278,7 @@
   color: var(--fg-2);
   font: 0.75rem var(--font-ui);
   text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .quick-action-dock .rating-dock-button {
@@ -1878,17 +1879,17 @@
 
   .quick-action-dock {
     width: 100%;
-    height: 58px;
+    height: auto;
     min-height: 58px;
     padding: 7px 12px max(7px, env(safe-area-inset-bottom));
     border-top: 1px solid var(--border);
     background: var(--surface);
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(3.5rem, 1fr));
   }
 
   .quick-action-dock button {
     min-height: 44px;
-    height: 44px;
+    height: auto;
     font-size: 0.75rem;
   }
 
@@ -2001,7 +2002,7 @@
     grid-column: 2;
     grid-row: 1;
     width: 100%;
-    height: 44px;
+    height: auto;
     min-height: 44px;
     padding: 0;
     border-top: 0;
@@ -2009,7 +2010,7 @@
   }
 
   .quick-action-dock button {
-    height: 44px;
+    height: auto;
     min-height: 44px;
   }
 
