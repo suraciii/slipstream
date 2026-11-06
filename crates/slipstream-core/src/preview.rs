@@ -490,7 +490,7 @@ impl PreviewService {
         Ok(result)
     }
 
-    /// Returns a bounded metadata-only cache key for Browse Window hydration.
+    /// Returns a bounded metadata-only cache key for Browse hydration or conditional delivery.
     pub async fn lookup_current_key(
         &self,
         facts: &PreviewFacts,

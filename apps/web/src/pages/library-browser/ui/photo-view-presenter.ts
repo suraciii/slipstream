@@ -43,6 +43,7 @@ export type ReviewImagePresentation = Readonly<{
   target: ReviewImageTarget;
   resolvedUrl: string;
   surface: object;
+  photoSurface: object;
 }>;
 
 /** Photo operations exposed by the composed Library Browser view. */
@@ -50,6 +51,7 @@ export interface PhotoViewPresentation {
   readonly photoStatusSurface: object;
   readonly photoStatusEmpty: boolean;
   isPhotoStatusSurfaceCurrent(this: void, surface: object): boolean;
+  isReviewImageSurfaceCurrent(this: void, surface: object): boolean;
   setPhotoStatus(this: void, text: string): void;
   renderPhotoFacts(this: void, model: PhotoFactsViewModel): void;
   renderPhotoMetadata(this: void, model?: PhotoMetadataViewModel): void;
@@ -178,6 +180,7 @@ export function createPhotoViewPresenter({
   ): ReviewImagePresentation | undefined => {
     if (!alive) return undefined;
     const surface = photoStatusSurface;
+    const imageSurface = photoSurface;
     const resolvedUrl = new URL(url, window.location.href).href;
     // The matte copies a Preview that actually exists. Show it with the sharp
     // image, so a failed request never leaves an ambient image behind.
@@ -225,6 +228,7 @@ export function createPhotoViewPresenter({
       target,
       resolvedUrl,
       surface,
+      photoSurface: imageSurface,
     };
   };
   const renderPreviewEvidence = () => {
@@ -306,6 +310,11 @@ export function createPhotoViewPresenter({
           ? "Unavailable"
           : "Available";
     factsAvailability.dataset.available = String(model.available !== false);
+    setPhotoStatus(
+      model.photoId && model.available === false
+        ? "Current Photo: Original File is unavailable. Decisions remain available."
+        : "",
+    );
     let image: ReviewImagePresentation | undefined;
     if (model.previewUrl)
       image = presentReviewImage(model.previewUrl, model.index, model.total);
@@ -322,11 +331,6 @@ export function createPhotoViewPresenter({
       );
       zoom.resetForImage();
     }
-    setPhotoStatus(
-      model.photoId && model.available === false
-        ? "Current Photo: Original File is unavailable. Decisions remain available."
-        : "",
-    );
     return image;
   };
 
@@ -348,6 +352,7 @@ export function createPhotoViewPresenter({
     },
     isPhotoStatusSurfaceCurrent: (surface) =>
       alive && surface === photoStatusSurface,
+    isReviewImageSurfaceCurrent: (surface) => alive && surface === photoSurface,
     setPhotoStatus,
     renderPhotoFacts,
     renderPhotoMetadata,

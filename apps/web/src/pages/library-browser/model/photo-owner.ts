@@ -1,6 +1,5 @@
 import type {
   PhotoSummary,
-  PreviewResponse,
   SelectionState,
   UndoDescription,
 } from "../api/contracts.js";
@@ -17,10 +16,22 @@ import type {
   SourceAuthority,
 } from "./source-grid-owner.js";
 
-export type { PhotoFetch } from "../api/photo.js";
+import {
+  completeReadyPreview,
+  detachedPreview,
+  type PhotoAuthority,
+  type PhotoOperation,
+  type PhotoOwnerEvent,
+  type PhotoPreviewOutcome,
+} from "./photo-preview-outcome.js";
 
-declare const photoAuthorityBrand: unique symbol;
-export type PhotoAuthority = Readonly<{ [photoAuthorityBrand]: true }>;
+export type { PhotoFetch } from "../api/photo.js";
+export type {
+  PhotoAuthority,
+  PhotoOwnerEvent,
+  PhotoOperation,
+  PhotoPreviewOutcome,
+} from "./photo-preview-outcome.js";
 
 declare const undoOperationBrand: unique symbol;
 type UndoOperation = Readonly<{ [undoOperationBrand]: true }>;
@@ -90,13 +101,6 @@ export interface PhotoSourcePort {
   trimFacts(sourceAuthority: SourceAuthority, anchor: number): void;
 }
 
-export type PhotoOwnerEvent = Readonly<{
-  kind: "review-image-failed";
-  authority: PhotoAuthority;
-  photoId: string;
-  surface: object;
-}>;
-
 export type PhotoSourceBinding = Readonly<{
   sourceAuthority: SourceAuthority;
   total: number;
@@ -104,33 +108,6 @@ export type PhotoSourceBinding = Readonly<{
   albumId?: string;
   preferredPhotoId?: string;
 }>;
-
-export type PhotoOperation = Readonly<{
-  authority: PhotoAuthority;
-  sourceAuthority: SourceAuthority;
-  windowAuthority: PhotoWindowAuthority;
-  index: number;
-  photoId?: string;
-}>;
-
-export type PhotoPreviewOutcome =
-  | (PhotoOperation &
-      Readonly<{
-        kind: "ready";
-        preview: PreviewResponse & { state: "ready"; url: string };
-      }>)
-  | (PhotoOperation &
-      Readonly<{
-        kind: "not-ready";
-        preview: PreviewResponse & { state: "unavailable" | "failed" };
-      }>)
-  | (PhotoOperation &
-      Readonly<{
-        kind: "failed";
-        failure: "answered" | "malformed" | "transport";
-        status?: number;
-      }>)
-  | (PhotoOperation & Readonly<{ kind: "detached" }>);
 
 export type PhotoMutationOutcome = PhotoOperation &
   Readonly<{ field: PhotoField; advance: boolean }> &
@@ -245,13 +222,17 @@ export interface PhotoOwner {
   commitOpen(open: PhotoOperation): PhotoSummary | undefined;
   cancelOpen(authority: PhotoAuthority): void;
   leave(): PhotoAuthority;
-  loadCurrentPreview(authority: PhotoAuthority): Promise<PhotoPreviewOutcome>;
+  loadCurrentPreview(
+    authority: PhotoAuthority,
+    refresh?: boolean,
+  ): Promise<PhotoPreviewOutcome>;
   prefetchAdjacent(authority: PhotoAuthority, index: number): Promise<void>;
   attachReviewImage(
     authority: PhotoAuthority,
     image: ReviewImageTransferPort,
     resolvedUrl: string,
     surface: object,
+    photoSurface: object,
   ): boolean;
   mutate(
     field: PhotoField,
@@ -321,9 +302,6 @@ type ReviewImageLease = Readonly<{
   image: ReviewImageTransferPort;
   resolvedUrl: string;
 }>;
-
-const detachedPreview = (operation: PhotoOperation): PhotoPreviewOutcome =>
-  Object.freeze({ ...operation, kind: "detached" });
 
 export function createPhotoOwner(
   fetcher: PhotoFetch,
@@ -757,7 +735,7 @@ export function createPhotoOwner(
       else latestAuthority = makeAuthority();
       return latestAuthority;
     },
-    loadCurrentPreview: async (authority) => {
+    loadCurrentPreview: async (authority, refresh = false) => {
       const record = lifetime;
       const initial = currentOperation();
       if (!record || !initial || record.authority !== authority)
@@ -774,6 +752,17 @@ export function createPhotoOwner(
       const photo = source.photoAt(record.sourceAuthority, initial.index);
       if (!photo) return detachedPreview(initial);
       const owned = Object.freeze({ ...initial, photoId: photo.id });
+      const summaryPreview = refresh ? undefined : completeReadyPreview(photo);
+      if (summaryPreview)
+        return Object.freeze({
+          ...owned,
+          kind: "ready",
+          preview: Object.freeze({
+            state: "ready" as const,
+            stale: false,
+            ...summaryPreview,
+          }),
+        });
       const task = record.tasks.beginLatest(`preview:current:${photo.id}`, {
         abortTransport: true,
       });
@@ -862,6 +851,7 @@ export function createPhotoOwner(
         return;
       const photo = source.photoAt(record.sourceAuthority, index);
       if (!photo?.available) return;
+      if (photo.preview.url) return;
       const task = record.tasks.beginLatest(`preview:adjacent:${photo.id}`, {
         abortTransport: true,
       });
@@ -873,7 +863,13 @@ export function createPhotoOwner(
         task.finish();
       }
     },
-    attachReviewImage: (authority, image, resolvedUrl, surface) => {
+    attachReviewImage: (
+      authority,
+      image,
+      resolvedUrl,
+      surface,
+      photoSurface,
+    ) => {
       const record = lifetime;
       const photo = owner.current;
       if (!record || record.authority !== authority || !photo) return false;
@@ -906,7 +902,9 @@ export function createPhotoOwner(
                 kind: "review-image-failed",
                 authority,
                 photoId,
+                url: resolvedUrl,
                 surface,
+                photoSurface,
               }),
             );
           image.clearSource();

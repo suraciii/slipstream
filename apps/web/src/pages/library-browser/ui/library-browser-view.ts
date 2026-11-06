@@ -47,11 +47,7 @@ import * as photoGestureModule from "./photo-gestures.js";
 import { createPhotoEditorSurfaceController } from "./photo-editor-surface.js";
 import {
   createPhotoViewPresenter,
-  type PhotoFactsViewModel,
-  type PhotoMetadataViewModel,
-  type PhotoShellViewModel,
-  type ReviewImagePresentation,
-  type ViewPreviewSource,
+  type PhotoViewPresentation,
 } from "./photo-view-presenter.js";
 import { createSourceSurfaceController } from "./source-surface.js";
 import { createGridPresenter } from "./grid-presenter.js";
@@ -143,11 +139,9 @@ type ControlsViewModel = Readonly<{
 
 // BatchAlbumsViewModel is owned by the grid multi-selection model contract.
 
-export interface LibraryBrowserView extends RecoveryReviewView {
-  readonly photoStatusSurface: object;
-  readonly photoStatusEmpty: boolean;
-  isPhotoStatusSurfaceCurrent(surface: object): boolean;
-  setPhotoStatus(text: string): void;
+export interface LibraryBrowserView
+  extends RecoveryReviewView,
+    PhotoViewPresentation {
   presentSummary(
     text: string,
     action?: Readonly<{
@@ -240,27 +234,10 @@ export interface LibraryBrowserView extends RecoveryReviewView {
   /// strip rebuilds only the entries whose facts or delivery state changed,
   /// so navigating keeps every other entry's thumbnail in place.
   renderFilmstrip(model: FilmstripViewModel): void;
-  renderPhotoFacts(model: PhotoFactsViewModel): void;
-  renderPhotoMetadata(model?: PhotoMetadataViewModel): void;
-  renderPhotoShell(
-    model: PhotoShellViewModel,
-  ): ReviewImagePresentation | undefined;
   editorVisible(): boolean;
   renderEditor(model: EditorViewModel): void;
   presentEditorPreview(url: string): void;
   clearEditorPreview(): void;
-  presentReviewImage(
-    url: string,
-    index: number,
-    total: number,
-  ): ReviewImagePresentation | undefined;
-  /// True while the presented camera Preview is the given URL.
-  reviewImageMatches(url: string): boolean;
-  showPreviewUnavailable(text: string): void;
-  setPreviewFacts(
-    source: ViewPreviewSource | undefined,
-    limited: boolean,
-  ): void;
   setAlbumFormMessage(formId: string, message: string, unknown?: boolean): void;
   setAlbumFormPending(formId: string, pending: boolean, name?: string): void;
   dismissAlbumForm(
@@ -1208,6 +1185,7 @@ export function createLibraryBrowserView(
       return photoPresenter.photoStatusEmpty;
     },
     isPhotoStatusSurfaceCurrent: photoPresenter.isPhotoStatusSurfaceCurrent,
+    isReviewImageSurfaceCurrent: photoPresenter.isReviewImageSurfaceCurrent,
     setPhotoStatus: photoPresenter.setPhotoStatus,
     presentSummary(text, action, libraryCheckState) {
       if (!alive) return;
