@@ -533,6 +533,8 @@ A target MAY become the ordinary Photo destination once those facts are ready; P
 
 If the Snapshot expires before the target is admitted, the operation returns the distinct expired outcome and the browser keeps the Grid for the existing refresh or retry path.
 
+The Grid's Browse action MAY present that refresh path directly, but it MUST NOT turn the expired attempt into a draw from the replacement.
+
 It MUST NOT silently draw from a replacement Snapshot.
 
 The source/Grid owner owns the Snapshot and bounded target read.
