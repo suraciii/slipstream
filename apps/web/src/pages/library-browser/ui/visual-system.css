@@ -314,34 +314,57 @@
   }
 }
 
-.source-toggle {
+/* The source identity is a heading and its count. On a narrow Grid the
+   transparent disclosure covers that row, so the heading stays a real heading
+   while the row still opens Sources. A wide Grid already shows the persistent
+   Sources navigation, so the disclosure is absent rather than a second,
+   ineffectual control beside it. */
+.grid-source {
+  position: relative;
   flex: 1 1 auto;
   min-width: 0;
   min-height: 44px;
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 14px;
+  text-align: left;
+}
+
+.grid-source-details {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+}
+
+.source-toggle {
+  position: absolute;
+  inset: 0;
+  display: none;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
   padding: 0;
   border: 0;
   border-radius: 6px;
   background: transparent;
-  text-align: left;
+  color: inherit;
+  cursor: pointer;
 }
 
 .source-toggle:hover:not(:disabled) {
   background: transparent;
 }
 
-.source-toggle-indicator {
-  display: none;
+.source-toggle:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
 }
 
-.source-toggle-name {
-  flex: 1 1 auto;
-  min-width: 0;
-  display: flex;
-  align-items: baseline;
-  gap: 14px;
+.source-toggle-indicator {
+  display: none;
 }
 
 .grid-heading {
@@ -1530,18 +1553,21 @@
     min-height: 88px;
   }
 
-  .grid-header .source-toggle {
+  .grid-header .grid-source {
     grid-column: 1;
     grid-row: 1;
     min-width: 0;
     min-height: 44px;
     align-self: center;
     gap: 0;
-    padding: 0;
     overflow: hidden;
   }
 
-  .source-toggle-name {
+  .grid-header .source-toggle {
+    display: block;
+  }
+
+  .grid-source-details {
     min-width: 0;
     gap: 8px;
     overflow: hidden;

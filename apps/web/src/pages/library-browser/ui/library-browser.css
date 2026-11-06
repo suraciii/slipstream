@@ -436,14 +436,6 @@
   text-align: left;
 }
 
-.source-toggle-name {
-  min-width: 0;
-  flex: 1 1 auto;
-  display: flex;
-  align-items: baseline;
-  gap: 0.45rem;
-}
-
 .grid-heading {
   flex: 0 1 auto;
   min-width: 0;

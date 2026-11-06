@@ -110,7 +110,7 @@ test("narrow Grid discloses Sources as one named modal surface and restores focu
   await expect(sources).toBeVisible();
   await expect(sources).toHaveAttribute("aria-expanded", "false");
   await expect(
-    page.locator("[data-source-toggle] .source-toggle-indicator"),
+    page.locator(".grid-source .source-toggle-indicator"),
   ).toBeVisible();
   // The disclosure names Sources, the current source and its status.
   await expect(sources).toHaveAccessibleName(

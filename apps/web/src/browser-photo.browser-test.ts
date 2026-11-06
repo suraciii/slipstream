@@ -887,6 +887,29 @@ test("390 by 844 keeps every primary control above the safe viewport beside a 65
   await closePhotoTools(page);
 });
 
+test("375 by 667 keeps every primary control inside the review viewport beside a 480px Preview", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 2);
+  const running = await server(base, root);
+  await startReview(page, running.url, "All Photos");
+  await page.setViewportSize({ width: 375, height: 667 });
+  await waitForLoadedReviewImage(page);
+  await expect(page.locator("[data-position]")).toHaveText("1 / 2");
+
+  // The named portrait review point fits the 480px Preview floor without
+  // pushing the context row, navigation, or dock below the safe viewport.
+  const preview = (await page.locator("[data-preview]").boundingBox())!;
+  expect(preview.height).toBeGreaterThanOrEqual(480);
+  await expectControlsAboveSafeViewport(page, 667);
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
+});
+
 test("844 by 390 leaves no text range collision in the review strip", async ({
   page,
 }) => {
