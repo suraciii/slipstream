@@ -251,11 +251,12 @@ async fn preview_derivative_protocol_revalidates_source_and_reports_stale_truth(
         &router,
         authenticated_request()
             .uri(format!("https://camera.local{url}"))
-            .header(header::IF_NONE_MATCH, etag)
+            .header(header::IF_NONE_MATCH, etag.as_str())
             .body(Body::empty())
             .unwrap(),
     )
     .await;
+    assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
     assert_eq!(
         not_modified.headers()[header::CACHE_CONTROL],
         "private, max-age=3600, must-revalidate"
@@ -271,6 +272,21 @@ async fn preview_derivative_protocol_revalidates_source_and_reports_stale_truth(
             .len(),
         0
     );
+
+    // A conditional Web GET checks metadata without decoding or repairing bytes.
+    let corrupt = marker_complete_corrupt_jpeg(90, 45);
+    fs::write(&cache_path, &corrupt).unwrap();
+    let not_modified = send(
+        &router,
+        authenticated_request()
+            .uri(format!("https://camera.local{url}"))
+            .header(header::IF_NONE_MATCH, etag.as_str())
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
+    assert_eq!(fs::read(&cache_path).unwrap(), corrupt);
 
     std::thread::sleep(std::time::Duration::from_millis(10));
     jpeg_fixture(&original, 120, 60, [32, 192, 64]);
@@ -309,6 +325,19 @@ async fn preview_derivative_protocol_revalidates_source_and_reports_stale_truth(
             &router,
             authenticated_request()
                 .uri(format!("https://camera.local{url}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        send(
+            &router,
+            authenticated_request()
+                .uri(format!("https://camera.local{url}"))
+                .header(header::IF_NONE_MATCH, etag.as_str())
                 .body(Body::empty())
                 .unwrap(),
         )

@@ -20,6 +20,8 @@ use crate::{
         photo_web_path,
     },
 };
+const DERIVATIVE_CACHE_CONTROL: &str = "private, max-age=3600, must-revalidate";
+const DERIVATIVE_VARY: &str = "Cookie, Authorization";
 pub(crate) async fn get_thumbnail(
     State(state): State<HttpState>,
     axum::extract::Path(id): axum::extract::Path<String>,
@@ -283,6 +285,21 @@ pub(crate) async fn get_derivative(
             return *response;
         }
     }
+    let entity_tag = format!("\"{}\"", key);
+    let not_modified = request
+        .headers()
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        == Some(entity_tag.as_str());
+    if !cli_request && request.method() == ::http::Method::GET && not_modified {
+        let current = state
+            .application
+            .current_derivative_key(&photo_id, target)
+            .await;
+        if current.as_deref() == Some(key) {
+            return derivative_not_modified(&entity_tag, &[]);
+        }
+    }
     let delivery = if cli_request {
         state
             .application
@@ -297,24 +314,8 @@ pub(crate) async fn get_derivative(
         Err(error) => return ApiError::from(error).into_response(),
     };
     let repeated = cli_preview_headers(&delivery);
-    let entity_tag = format!("\"{}\"", delivery.cache_key);
-    let cache_control = "private, max-age=3600, must-revalidate";
-    let vary = "Cookie, Authorization";
-    if request
-        .headers()
-        .get(header::IF_NONE_MATCH)
-        .and_then(|value| value.to_str().ok())
-        == Some(entity_tag.as_str())
-    {
-        let mut response = Response::builder()
-            .status(StatusCode::NOT_MODIFIED)
-            .header(header::CACHE_CONTROL, cache_control)
-            .header(header::VARY, vary)
-            .header(header::ETAG, entity_tag);
-        for (name, value) in &repeated {
-            response = response.header(*name, value.clone());
-        }
-        return response.body(Body::empty()).expect("valid response");
+    if not_modified {
+        return derivative_not_modified(&entity_tag, &repeated);
     }
     let length = delivery.bytes.len().to_string();
     let body = if request.method() == ::http::Method::HEAD {
@@ -326,14 +327,29 @@ pub(crate) async fn get_derivative(
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "image/jpeg")
         .header(header::CONTENT_LENGTH, length)
-        .header(header::CACHE_CONTROL, cache_control)
-        .header(header::VARY, vary)
+        .header(header::CACHE_CONTROL, DERIVATIVE_CACHE_CONTROL)
+        .header(header::VARY, DERIVATIVE_VARY)
         .header(header::ETAG, entity_tag)
         .header("x-content-type-options", "nosniff");
     for (name, value) in &repeated {
         response = response.header(*name, value.clone());
     }
     response.body(body).expect("valid derivative response")
+}
+
+fn derivative_not_modified(
+    entity_tag: &str,
+    repeated: &[(&'static str, String)],
+) -> Response<Body> {
+    let mut response = Response::builder()
+        .status(StatusCode::NOT_MODIFIED)
+        .header(header::CACHE_CONTROL, DERIVATIVE_CACHE_CONTROL)
+        .header(header::VARY, DERIVATIVE_VARY)
+        .header(header::ETAG, entity_tag);
+    for (name, value) in repeated {
+        response = response.header(*name, value.clone());
+    }
+    response.body(Body::empty()).expect("valid response")
 }
 
 /// The repeated typed facts one CLI derivative download must match against the

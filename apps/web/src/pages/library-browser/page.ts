@@ -45,7 +45,15 @@ import {
   restorationOutcomeMessage,
 } from "./model/removal-review-controller.js";
 import { createAlbumMutationController } from "./model/album-mutation-controller.js";
-import { createPhotoOwner, type PhotoAuthority } from "./model/photo-owner.js";
+import {
+  createPhotoOwner,
+  type PhotoAuthority,
+  type PhotoOwnerEvent,
+} from "./model/photo-owner.js";
+import {
+  createPhotoPreviewFlow,
+  createPreviewFailureRefresh,
+} from "./model/photo-preview-flow.js";
 import { createSavedPositionOwner } from "./model/saved-position-owner.js";
 import {
   createNavigationOwner,
@@ -140,6 +148,10 @@ function mountPrivateLibraryBrowser(
   const metadataPanel = createMetadataPanel(metadataHost, fetcher, (message) =>
     view.setPhotoStatus(message),
   );
+  let refreshFailedPreview: (event: PhotoOwnerEvent) => void = () => {};
+  const previewFailureRefresh = createPreviewFailureRefresh((event) =>
+    refreshFailedPreview(event),
+  );
   const photoOwner = createPhotoOwner(
     fetcher,
     {
@@ -176,9 +188,15 @@ function mountPrivateLibraryBrowser(
       emit: (event) => {
         if (
           !photoOwner.isCurrent(event.authority) ||
-          !view.isPhotoStatusSurfaceCurrent(event.surface)
+          !view.isReviewImageSurfaceCurrent(event.photoSurface)
         )
           return;
+        if (
+          event.kind === "review-image-failed" &&
+          previewFailureRefresh.claim(event)
+        )
+          return;
+        if (!view.isPhotoStatusSurfaceCurrent(event.surface)) return;
         view.setPhotoStatus(
           "Preview could not be loaded. You can continue browsing.",
         );
@@ -524,7 +542,8 @@ function mountPrivateLibraryBrowser(
     recordPhotoAddress: (photoId, address) =>
       recordPhotoAddress(photoId, address),
     renderPhotoShell: (authority) => renderPhotoShell(authority),
-    showPreview: (authority, transition) => showPreview(authority, transition),
+    showPreview: (authority, transition) =>
+      previewFlow.showPreview(authority, transition),
     persistPosition: (authority) => persistPosition(authority),
     syncConnection: () => syncConnection(),
     updateControls: () => updateControls(),
@@ -1247,16 +1266,16 @@ function mountPrivateLibraryBrowser(
       if (resumePhoto && photoOwner.isCurrent(photoAuthority)) {
         view.enterPhoto();
         renderPhotoShell(photoAuthority);
-        void showPreview(photoAuthority, photoTransition).then(
-          async (refreshed) => {
+        void previewFlow
+          .showPreview(photoAuthority, photoTransition)
+          .then(async (refreshed) => {
             if (!refreshed || !photoOwner.isCurrent(photoAuthority)) return;
             const persisted = await persistPosition(photoAuthority);
             if (persisted && photoOwner.isCurrent(photoAuthority)) {
               recoveryGate.succeedTransition(photoTransition);
               setConnected(true);
             }
-          },
-        );
+          });
       }
       return { kind: "established", authority };
     } catch {
@@ -1314,6 +1333,7 @@ function mountPrivateLibraryBrowser(
       image.target,
       image.resolvedUrl,
       image.surface,
+      image.photoSurface,
     );
   };
 
@@ -1396,74 +1416,35 @@ function mountPrivateLibraryBrowser(
         image.target,
         image.resolvedUrl,
         image.surface,
+        image.photoSurface,
       );
     renderFilmstrip();
     updateControls();
     return Boolean(image);
   };
 
-  const showPreview = async (
-    authority: PhotoAuthority,
-    transition?: RecoveryTransition,
-  ): Promise<boolean> => {
-    const capturedStatus = view.photoStatusSurface;
-    const outcome = await photoOwner.loadCurrentPreview(authority);
-    if (outcome.kind === "detached") return false;
-    if (outcome.kind === "failed") {
-      if (view.isPhotoStatusSurfaceCurrent(capturedStatus))
-        view.setPhotoStatus("Connection lost. Retry to refresh this Photo.");
-      failPhotoRecovery(authority, "preview", transition);
-      return false;
-    }
-    if (!photoOwner.isCurrent(authority)) return false;
-    if (currentPhoto()) editor.referenceChanged(currentPhoto()!.id);
-    if (outcome.kind === "not-ready") {
-      if (view.isPhotoStatusSurfaceCurrent(capturedStatus))
-        view.setPhotoStatus(outcome.preview.message ?? "Preview unavailable");
-      view.showPreviewUnavailable("Preview unavailable");
-      return true;
-    }
-    const result = outcome.preview;
-    if (!view.reviewImageMatches(result.url))
-      renderReviewImage(result.url, authority);
-    view.setPreviewFacts(result.source, Boolean(result.limitedDetail));
-    if (view.isPhotoStatusSurfaceCurrent(capturedStatus))
-      view.setPhotoStatus(
-        result.stale ? (result.message ?? "Showing a stale Preview.") : "",
-      );
-    updateControls();
-    void prefetchAdjacent(photoOwner.currentIndex - 1, authority);
-    void prefetchAdjacent(photoOwner.currentIndex + 1, authority);
-    return true;
-  };
-  const prefetchAdjacent = async (index: number, authority: PhotoAuthority) => {
-    if (!photoOwner.isCurrent(authority)) return;
-    if (index < 0 || index >= sourceGrid.total) return;
-    let photo = sourceGrid.photoAt(index);
-    if (!photo) {
-      const windowAuthority = photoOwner.windowAuthority;
-      if (!windowAuthority) return;
-      await loadWindow(
+  const previewFlow = createPhotoPreviewFlow({
+    view,
+    photoOwner,
+    sourceGrid,
+    currentPhotoId: () => currentPhoto()?.id,
+    editorReferenceChanged: (photoId) => editor.referenceChanged(photoId),
+    failPhotoRecovery,
+    renderReviewImage,
+    updateControls,
+    loadPhotoWindow: (index, windowAuthority, authority) =>
+      loadWindow(
         index,
-        {
-          kind: "photo",
-          authority: windowAuthority,
-        },
+        { kind: "photo", authority: windowAuthority },
         true,
         "low",
         undefined,
         authority,
-      );
-      if (!photoOwner.isCurrent(authority)) return;
-      // A window an awaited caller loaded settles through that caller, so the
-      // strip asks for its own render here instead of waiting for a
-      // window-settled notification awaited windows never raise: the neighbor
-      // it just loaded stops being a placeholder now.
-      renderFilmstrip();
-      photo = sourceGrid.photoAt(index);
-    }
-    if (!photo || !photo.available) return;
-    await photoOwner.prefetchAdjacent(authority, index);
+      ),
+    renderFilmstrip,
+  });
+  refreshFailedPreview = (event) => {
+    void previewFlow.showPreview(event.authority, undefined, true);
   };
   /// Releases Photo View's ownership of the current Photo and re-keys the
   /// recovery gate exactly as returning to the Grid does, so a pending
@@ -1761,7 +1742,10 @@ function mountPrivateLibraryBrowser(
     // its parent Grid relationship.
     if (outcome.photoId) recordPhotoAddress(outcome.photoId, "replace");
     updateControls();
-    const refreshed = await showPreview(outcome.authority, photoTransition);
+    const refreshed = await previewFlow.showPreview(
+      outcome.authority,
+      photoTransition,
+    );
     if (
       !refreshed ||
       !photoOwner.isCurrent(outcome.authority) ||
@@ -1901,7 +1885,11 @@ function mountPrivateLibraryBrowser(
           !photoOwner.retryPhotoIsCurrent(retry)
         )
           return;
-        const refreshed = await showPreview(retry.authority, photoTransition);
+        const refreshed = await previewFlow.showPreview(
+          retry.authority,
+          photoTransition,
+          true,
+        );
         if (refreshed && view.photoStatusEmpty)
           retryStatusSurface = view.photoStatusSurface;
         const persisted = refreshed && (await persistPosition(retry.authority));
