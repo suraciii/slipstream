@@ -83,6 +83,7 @@ import {
   type LibraryBrowserView,
 } from "./ui/library-browser-view.js";
 import { formatPhotoCount } from "./ui/photo-count.js";
+import { randomPhotoView } from "./ui/view-options.js";
 import { mountLibraryBrowserAccess } from "./ui/library-browser-access.js";
 import { createPageEditorController } from "./ui/editor-controller-composition.js";
 import type { BrowserFetch } from "./api/browser-fetch.js";
@@ -625,18 +626,13 @@ function mountPrivateLibraryBrowser(
       backEnabled: !interactionBusy,
       refreshEnabled: !interactionBusy,
       recoveryEnabled,
-      random: {
-        visible: view.gridVisible(),
-        enabled:
-          view.gridVisible() &&
-          sourceGrid.isReady(sourceGrid.authority) &&
-          sourceGrid.total > 0 &&
-          !interactionBusy &&
-          !photoOwner.opening,
+      random: randomPhotoView({
+        gridVisible: view.gridVisible(),
+        source: sourceGrid,
         pending: gridPhotoNavigation?.pending ?? false,
-        sourceName: sourceGrid.name,
-        filter: sourceGrid.selection,
-      },
+        interactionBusy,
+        photoOpening: photoOwner.opening,
+      }),
       removalEnabled:
         connected &&
         !interactionBusy &&
@@ -1964,7 +1960,11 @@ function mountPrivateLibraryBrowser(
         );
         return;
       case "random-photo":
-        gridPhotoNavigation?.openRandomPhoto();
+        // The action presents Refresh Current Source while the Snapshot is
+        // expired, because it cannot admit the draw. Refresh keeps the same
+        // source and filter without silently selecting from its replacement.
+        if (sourceGrid.retryRequired) void refreshSource();
+        else gridPhotoNavigation?.openRandomPhoto();
         return;
       case "source-open": {
         // Choosing a source creates one Grid destination with that source's

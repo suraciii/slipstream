@@ -10,6 +10,7 @@ import type {
 } from "./library-browser-view.js";
 import type { ViewFilterConditions } from "./library-browser-view-contract.js";
 import { sameConditions } from "../model/browser-navigation.js";
+import type { SourceGridOwner } from "../model/source-grid-owner.js";
 import {
   createViewOptionsFilters,
   type ViewOptionsFilterElements,
@@ -81,9 +82,40 @@ export type RandomPhotoViewModel = Readonly<{
   visible: boolean;
   enabled: boolean;
   pending: boolean;
+  /// The current Snapshot no longer exists. The one browse action becomes the
+  /// explicit recovery action the Grid status names, so the Photographer does
+  /// not have to leave the Grid for View options to refresh the source.
+  refreshRequired: boolean;
   sourceName: string;
   filter: ViewSelectionFilter;
 }>;
+
+/// Presents the one Browse action from the current source. The action owns its
+/// own admission; the source owns readiness and the expired-Snapshot recovery.
+export function randomPhotoView(args: {
+  readonly gridVisible: boolean;
+  readonly source: Pick<
+    SourceGridOwner,
+    "authority" | "isReady" | "total" | "name" | "selection" | "retryRequired"
+  >;
+  readonly pending: boolean;
+  readonly interactionBusy: boolean;
+  readonly photoOpening: boolean;
+}): RandomPhotoViewModel {
+  return {
+    visible: args.gridVisible,
+    enabled:
+      args.gridVisible &&
+      args.source.isReady(args.source.authority) &&
+      args.source.total > 0 &&
+      !args.interactionBusy &&
+      !args.photoOpening,
+    pending: args.pending,
+    refreshRequired: args.source.retryRequired,
+    sourceName: args.source.name,
+    filter: args.source.selection,
+  };
+}
 
 export interface ViewOptions {
   open(): void;
@@ -434,8 +466,20 @@ export function createViewOptions({
       randomPhoto.disabled = !model.enabled;
       randomPhoto.textContent = model.pending
         ? "Opening random Photo…"
-        : "Open a random Photo";
+        : model.refreshRequired
+          ? "Refresh Current Source"
+          : "Open a random Photo";
       randomPhoto.setAttribute("aria-busy", String(model.pending));
+      if (model.refreshRequired) {
+        // The expired Snapshot cannot admit the draw, so the action becomes
+        // the refresh path the status names instead of offering a read that
+        // must fail again.
+        randomPhoto.setAttribute(
+          "aria-label",
+          "Refresh Current Source to continue",
+        );
+        return;
+      }
       const filterLabel = FILTER_OPTIONS.find(
         (option) => option.value === model.filter,
       )?.label;

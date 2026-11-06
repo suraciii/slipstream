@@ -373,7 +373,7 @@ for (const status of [503, 0] as const) {
   });
 }
 
-test("an expired Snapshot keeps the Grid and names Refresh Current Source", async ({
+test("an expired Snapshot keeps the Grid and becomes the named Refresh action", async ({
   page,
 }) => {
   const { base, root } = await fixture();
@@ -390,8 +390,8 @@ test("an expired Snapshot keeps the Grid and names Refresh Current Source", asyn
   const { requests } = answerFirstBrowseRead(page, 404);
   await randomAction(page).click();
   // The Snapshot is not silently replaced: the Grid keeps its authority, no
-  // Photo entry is written, and the status names the recovery path the source
-  // already offers.
+  // Photo entry is written, and the one browse action becomes the refresh the
+  // status names instead of offering a read that must fail again.
   await expect(page.locator("[data-review]")).toBeHidden();
   await expect(page.locator("[data-grid-status]")).toHaveText(
     "Library order expired. Refresh Current Source to continue.",
@@ -399,13 +399,24 @@ test("an expired Snapshot keeps the Grid and names Refresh Current Source", asyn
   expect(page.url()).toBe(running.url + "/");
   expect(requests).toEqual(["60"]);
 
-  await openViewOptions(page);
-  await expect(page.locator("[data-refresh]")).toBeVisible();
-  await page.locator("[data-refresh]").click();
+  const browseAction = page.locator("[data-random-photo]");
+  await expect(browseAction).toBeVisible();
+  await expect(browseAction).toHaveText("Refresh Current Source");
+  await expect(browseAction).toHaveAccessibleName(
+    "Refresh Current Source to continue",
+  );
+  // The recovery label stays within the wide header's one-row budget.
+  expect(
+    await page
+      .locator(".grid-header")
+      .evaluate((element) => element.getBoundingClientRect().height),
+  ).toBeLessThanOrEqual(88);
+  await browseAction.click();
   await expect(page.locator("[data-grid-status]")).toHaveText(
     "Ready · 120 Photos",
   );
-  await expect(randomAction(page)).toBeEnabled();
+  await expect(browseAction).toHaveText("Open a random Photo");
+  await expect(browseAction).toBeEnabled();
 });
 
 test("the action admits one attempt and presents its pending state", async ({
