@@ -19,6 +19,7 @@ mod mutation;
 mod owner;
 mod owner_export;
 mod owner_recovery;
+mod photo_decision_write;
 mod processing_export;
 mod queries;
 mod removal;
@@ -53,7 +54,8 @@ pub use metadata::{
     ActiveAssociation, MetadataContext, MetadataRecord, MetadataStoreError, ObservedSidecar,
     ObservedSidecarState, RetainedOrphan,
 };
-pub use owner::{MutationError, Persistence, PersistenceError, PhotoDecisionWriteError};
+pub use owner::{MutationError, Persistence, PersistenceError};
+pub use photo_decision_write::PhotoDecisionWriteError;
 pub use scan::ScanApplication;
 pub use scan_recovery::{
     DiscoveredFingerprint, FingerprintCounts, FingerprintTarget, ScanRecoveryPlan,

@@ -3,9 +3,9 @@
 
 use super::codecs::{parse_selection_state, selection_state_value};
 use super::mutation::{mutation_error_from_sqlite, mutation_transaction};
-use super::owner::{
-    MutationError, MutationVersions, PhotoDecisionWriteError,
-    photo_decision_write_error_from_mutation,
+use super::owner::{MutationError, MutationVersions};
+use super::photo_decision_write::{
+    PhotoDecisionWriteError, photo_decision_write_error_from_mutation,
 };
 use super::{DatabaseName, StateDirectory};
 use crate::{
@@ -319,7 +319,7 @@ pub(super) fn mutate_photo_decision_checked(
 #[cfg(test)]
 mod tests {
     use crate::persistence::admission::StateDirectory;
-    use crate::persistence::owner::validate_photo_state_batch_mutation;
+    use crate::persistence::photo_decision_write::validate_photo_state_batch_mutation;
     use crate::persistence::test_support::*;
     use crate::persistence::{MutationError, Persistence, PhotoDecisionWriteError};
     use crate::{

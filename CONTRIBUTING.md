@@ -237,6 +237,16 @@ Run the focused Export persistence checks with:
 cargo test --locked -p slipstream-core --lib persistence::export -- --test-threads=1
 ```
 
+Photo decision admission keeps its write error surface and request
+normalization in `crates/slipstream-core/src/persistence/photo_decision_write.rs`.
+The persistence owner and the decision SQL module share that contract instead
+of duplicating validation. Run the focused checks with:
+
+```sh
+cargo test --locked -p slipstream-core --lib persistence::decisions -- --test-threads=1
+cargo test --locked -p slipstream-core --lib persistence::owner -- --test-threads=1
+```
+
 `test:cli` runs the focused command parser, output, and real CLI-to-service tests. It covers `status`, Library checks, Folder, Album, and Photo commands, including Preview downloads, without running the complete repository gate.
 
 `test:cli-package` verifies the source-bound Linux amd64 candidate archive, its checksum and fixed metadata, and no-replace behavior using synthetic inputs. It runs in `just ci-fast` and `just ci-full`. To build an actual candidate from a clean committed tree, run `python3 scripts/package-cli.py`; see [CLI Candidate Installation](docs/cli-install.md). Packaging does not publish a tag or upload a release.
