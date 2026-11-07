@@ -3,7 +3,7 @@ import { createNavigationSession } from "./navigation-session.js";
 import {
   allPhotosDestination,
   type NavigationDestination,
-} from "./browser-navigation.js";
+} from "./navigation-address.js";
 
 const album: NavigationDestination = {
   source: "album",

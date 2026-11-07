@@ -9,10 +9,8 @@ import {
   type RestorationSource,
   type SnapshotFacts,
 } from "./destination-policy.js";
-import type {
-  NavigationDestination,
-  NavigationGridRestoration,
-} from "./browser-navigation.js";
+import type { NavigationDestination } from "./navigation-address.js";
+import type { NavigationGridRestoration } from "./browser-navigation.js";
 import type { FileLocationWindow } from "./file-location-owner.js";
 import type {
   SourceAuthority,

@@ -64,10 +64,8 @@ import { createAlbumForm } from "./album-form.js";
 import { createSourceListPresenter } from "./source-list-presenter.js";
 import { createGridBatchPresenter } from "./grid-batch-presenter.js";
 import { resolveKeyIntent } from "./keyboard-policy.js";
-import {
-  addressFor,
-  type NavigationGridRestoration,
-} from "../model/browser-navigation.js";
+import { addressFor } from "../model/navigation-address.js";
+import type { NavigationGridRestoration } from "../model/browser-navigation.js";
 import { APP_SHELL_TEMPLATE } from "./library-browser-template.js";
 import type { EditorViewModel } from "../model/editor-controller-contract.js";
 import type { EmptySourcePresentation } from "../model/empty-source-message.js";

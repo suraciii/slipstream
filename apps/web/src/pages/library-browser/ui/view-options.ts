@@ -9,7 +9,7 @@ import type {
   ViewSourceOrder,
 } from "./library-browser-view.js";
 import type { ViewFilterConditions } from "./library-browser-view-contract.js";
-import { sameConditions } from "../model/browser-navigation.js";
+import { sameConditions } from "../model/navigation-address.js";
 import {
   createViewOptionsFilters,
   type ViewOptionsFilterElements,
