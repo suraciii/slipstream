@@ -11,6 +11,7 @@ mod development_proxy;
 mod edit_recipe;
 mod expansion;
 mod export;
+mod export_codec;
 mod metadata;
 mod metadata_store;
 mod migrations;
