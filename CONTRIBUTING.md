@@ -199,6 +199,16 @@ Capture checks with:
 cargo test --locked -p slipstream-core capture -- --test-threads=1
 ```
 
+Embedded metadata extraction keeps descriptor ownership, container walking,
+field state, and the public metadata model in
+`crates/slipstream-core/src/metadata/embedded.rs`. Its private
+`embedded_codec.rs` decodes bounded TIFF/EXIF and IPTC IIM payloads. Run the
+focused extraction checks with:
+
+```sh
+cargo test --locked -p slipstream-core metadata::embedded -- --test-threads=1
+```
+
 `test:cli` runs the focused command parser, output, and real CLI-to-service tests. It covers `status`, Library checks, Folder, Album, and Photo commands, including Preview downloads, without running the complete repository gate.
 
 `test:cli-package` verifies the source-bound Linux amd64 candidate archive, its checksum and fixed metadata, and no-replace behavior using synthetic inputs. It runs in `just ci-fast` and `just ci-full`. To build an actual candidate from a clean committed tree, run `python3 scripts/package-cli.py`; see [CLI Candidate Installation](docs/cli-install.md). Packaging does not publish a tag or upload a release.
