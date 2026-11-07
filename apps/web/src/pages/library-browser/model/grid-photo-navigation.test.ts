@@ -4,7 +4,7 @@ import {
   createGridPhotoNavigation,
   type GridPhotoNavigation,
 } from "./grid-photo-navigation.js";
-import type { NavigationDestination } from "./browser-navigation.js";
+import type { NavigationDestination } from "./navigation-address.js";
 import type { PhotoAuthority, PhotoOperation } from "./photo-owner.js";
 import type { SourceAuthority } from "./source-grid-owner.js";
 import type { PhotoSummary } from "../api/contracts.js";

@@ -1,8 +1,10 @@
 import {
   allPhotosDestination,
   type NavigationDestination,
-  type NavigationGridRestoration,
-  type NavigationStartup,
+} from "./navigation-address.js";
+import type {
+  NavigationGridRestoration,
+  NavigationStartup,
 } from "./browser-navigation.js";
 
 export type DestinationEstablishment = Readonly<{
