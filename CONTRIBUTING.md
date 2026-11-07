@@ -209,6 +209,15 @@ focused extraction checks with:
 cargo test --locked -p slipstream-core metadata::embedded -- --test-threads=1
 ```
 
+XMP parsing keeps the field model, checked patches, and public document API in
+`crates/slipstream-core/src/metadata/xmp.rs`. Its private `xmp_document.rs`
+decodes the lossless XML tree, and `xmp_language.rs` canonicalizes bounded
+BCP 47 language tags. Run the focused XMP checks with:
+
+```sh
+cargo test --locked -p slipstream-core metadata::xmp -- --test-threads=1
+```
+
 Preview request admission, waiting, and shutdown stay in
 `crates/slipstream-core/src/preview.rs`. Its private `preview_job.rs` executes
 one queued job from published facts to result. Run the focused Preview checks
