@@ -15,6 +15,14 @@ export function paragraph(text: string): HTMLParagraphElement {
   return value;
 }
 
+export function displayScalar(value: unknown, fallback = ""): string {
+  return typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "boolean"
+    ? String(value)
+    : fallback;
+}
+
 /// Keep the ready announcement in the accessible status while showing only the
 /// result count in the compact Grid header.
 export function presentGridStatus(element: HTMLElement, text: string): void {
