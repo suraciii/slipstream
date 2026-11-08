@@ -1,11 +1,9 @@
 //! Transactional, record-only Trash cleanup and immutable attempt receipts.
 
 use super::codecs::parse_kind;
-use super::mutation::{
-    mutation_error_from_persistence, mutation_error_from_sqlite, mutation_transaction,
-};
-use super::owner::{MutationError, MutationVersions};
-use super::{DatabaseName, StateDirectory};
+use super::mutation::{mutation_error_from_persistence, mutation_error_from_sqlite};
+use super::owner::MutationError;
+use super::write_session::WriteSession;
 use crate::{
     OriginalKind, RelativeOriginalPath, TrashAbsence, TrashCleanupBlocker, TrashCleanupCounts,
     TrashCleanupItemResult, TrashCleanupItemState, TrashCleanupResult, TrashCleanupTarget,
@@ -642,12 +640,9 @@ pub(super) fn preview_trash_cleanup(
 }
 
 pub(super) fn cleanup_trash(
-    state: &StateDirectory,
-    db: &DatabaseName,
-    connection: &mut Connection,
+    session: &mut WriteSession<'_>,
     operation_id: String,
     targets: Vec<TrashCleanupTarget>,
-    versions: &mut MutationVersions,
 ) -> Result<TrashCleanupResult, MutationError> {
     if operation_id.is_empty() || targets.is_empty() || targets.len() > crate::TRASH_CLEANUP_MAX {
         return Err(MutationError::Invalid);
@@ -663,7 +658,7 @@ pub(super) fn cleanup_trash(
     }
     let mut affected_albums = BTreeSet::new();
     let mut affected_photos = BTreeSet::new();
-    let result = mutation_transaction(state, db, connection, |transaction| {
+    session.mutation(|transaction, versions| {
         if let Some(result) = trash_cleanup_replay(transaction, &operation_id, &targets)? {
             return Ok(result);
         }
@@ -710,13 +705,13 @@ pub(super) fn cleanup_trash(
             &value,
             mutation_error_from_sqlite,
         )?;
-        result_from_receipt(&operation_id, receipt)
-    })?;
-    for id in &affected_photos {
-        versions.advance_photo(id)?;
-    }
-    for id in &affected_albums {
-        versions.advance_album(id)?;
-    }
-    Ok(result)
+        let result = result_from_receipt(&operation_id, receipt)?;
+        for id in &affected_photos {
+            versions.advance_photo(id)?;
+        }
+        for id in &affected_albums {
+            versions.advance_album(id)?;
+        }
+        Ok(result)
+    })
 }

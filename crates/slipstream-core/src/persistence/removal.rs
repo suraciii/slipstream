@@ -2,10 +2,11 @@
 //! Every write runs on the serialized owner connection.
 
 use super::codecs::{parse_selection_state, selection_state_value};
-use super::mutation::{mutation_error_from_sqlite, mutation_transaction};
-use super::owner::{MutationError, MutationVersions, unix_millis};
+use super::identity::unix_millis;
+use super::mutation::mutation_error_from_sqlite;
+use super::owner::MutationError;
 use super::trash_cleanup::{PERMANENT_DELETION_DELETED_PREFIX, photo_is_permanently_deleted};
-use super::{DatabaseName, StateDirectory};
+use super::write_session::WriteSession;
 use crate::{
     ExplicitPhotoRemovalMutation, ExplicitPhotoRestoreCounts, ExplicitPhotoRestoreMutation,
     ExplicitPhotoRestoreResult, PhotoOperationRemainder, PhotoRemovalCounts, PhotoRemovalMarker,
@@ -307,16 +308,13 @@ fn removal_intent_matches(
 /// One confirmed removal. Every requested Photo is resolved inside one
 /// transaction and reports exactly one outcome.
 pub(super) fn remove_photos(
-    state: &StateDirectory,
-    database_name: &DatabaseName,
-    connection: &mut Connection,
-    versions: &MutationVersions,
+    session: &mut WriteSession<'_>,
     request: PhotoRemovalRequest,
 ) -> Result<PhotoRemovalResult, MutationError> {
     let operation_id = request.operation_id().to_owned();
     let photo_ids = request.photo_ids();
     let intent = removal_intent(&request);
-    mutation_transaction(state, database_name, connection, |transaction| {
+    session.mutation(|transaction, versions| {
         if let Some(receipt) = read_photo_removal_receipt(transaction, &operation_id)? {
             if receipt.photo_ids != photo_ids
                 || !removal_intent_matches(&request, receipt.intent.as_ref())
@@ -407,7 +405,7 @@ pub(super) fn remove_photos(
                     .and_then(|targets| targets.get(photo_id.as_str()))
                 {
                     if target.expected_removed_at_ms.is_some()
-                        || target.expected_decision_version != versions.photo(photo_id)
+                        || target.expected_decision_version != versions.photo_token(photo_id)
                         || target.expected_selection_state
                             != parse_selection_state(selection_state)
                                 .map_err(|_| MutationError::Persistence)?
@@ -456,6 +454,13 @@ pub(super) fn remove_photos(
             missing: result.missing.len(),
             already_removed: result.already_removed.len(),
         };
+        if result
+            .newly_removed
+            .iter()
+            .any(|photo_id| !versions.can_advance_photo(photo_id))
+        {
+            return Err(MutationError::Persistence);
+        }
         write_photo_removal_receipt(
             transaction,
             &operation_id,
@@ -466,6 +471,9 @@ pub(super) fn remove_photos(
                 intent: Some(intent),
             },
         )?;
+        for photo_id in &result.newly_removed {
+            versions.advance_photo(photo_id)?;
+        }
         Ok(result)
     })
 }
@@ -539,9 +547,7 @@ pub(super) fn photo_restore_result_from_receipt(
 }
 
 pub(super) fn restore_photos_explicit(
-    state: &StateDirectory,
-    database_name: &DatabaseName,
-    connection: &mut Connection,
+    session: &mut WriteSession<'_>,
     request: PhotoRestoreRequest,
 ) -> Result<ExplicitPhotoRestoreResult, MutationError> {
     let (operation_id, selection, explicit) = match request {
@@ -561,7 +567,7 @@ pub(super) fn restore_photos_explicit(
             (operation_id, Some(intent), None)
         }
     };
-    mutation_transaction(state, database_name, connection, |transaction| {
+    session.mutation(|transaction, versions| {
         if let Some(receipt) = read_photo_restore_operation(transaction, &operation_id)? {
             let matches = match &explicit {
                 Some(photos) => {
@@ -702,6 +708,13 @@ pub(super) fn restore_photos_explicit(
             changed_elsewhere: result.changed_elsewhere.len(),
             missing: result.missing.len(),
         };
+        if result
+            .restored
+            .iter()
+            .any(|photo_id| !versions.can_advance_photo(photo_id))
+        {
+            return Err(MutationError::Persistence);
+        }
         write_photo_restore_receipt(
             transaction,
             &operation_id,
@@ -712,6 +725,9 @@ pub(super) fn restore_photos_explicit(
                 selection,
             },
         )?;
+        for photo_id in &result.restored {
+            versions.advance_photo(photo_id)?;
+        }
         Ok(result)
     })
 }
@@ -721,12 +737,10 @@ pub(super) fn restore_photos_explicit(
 /// Photo is compared and set inside one transaction, so a removal that changed
 /// after the caller read it is reported instead of overwritten.
 pub(super) fn restore_photos(
-    state: &StateDirectory,
-    database_name: &DatabaseName,
-    connection: &mut Connection,
+    session: &mut WriteSession<'_>,
     restoration: PhotoRestoration,
 ) -> Result<PhotoRestorationResult, MutationError> {
-    mutation_transaction(state, database_name, connection, |transaction| {
+    session.mutation(|transaction, versions| {
         let mut result = PhotoRestorationResult {
             restored: Vec::new(),
             counts: PhotoRestorationCounts::default(),
@@ -835,6 +849,16 @@ pub(super) fn restore_photos(
             changed_elsewhere: result.changed_elsewhere.len(),
             missing: result.missing.len(),
         };
+        if result
+            .restored
+            .iter()
+            .any(|photo_id| !versions.can_advance_photo(photo_id))
+        {
+            return Err(MutationError::Persistence);
+        }
+        for photo_id in &result.restored {
+            versions.advance_photo(photo_id)?;
+        }
         result.operations = operation_remainders(transaction, &touched)?;
         Ok(result)
     })

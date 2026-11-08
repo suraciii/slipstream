@@ -2,12 +2,12 @@
 //! with batch classification, version advancement, and undo.
 
 use super::codecs::{parse_selection_state, selection_state_value};
-use super::mutation::{mutation_error_from_sqlite, mutation_transaction};
-use super::owner::{
-    MutationError, MutationVersions, PhotoDecisionWriteError,
-    photo_decision_write_error_from_mutation,
+use super::mutation::mutation_error_from_sqlite;
+use super::owner::MutationError;
+use super::photo_decision_write::{
+    PhotoDecisionWriteError, photo_decision_write_error_from_mutation,
 };
-use super::{DatabaseName, StateDirectory};
+use super::write_session::{MutationVersions, WriteSession};
 use crate::{
     CheckedPhotoDecisionCounts, CheckedPhotoDecisionItemResult, CheckedPhotoDecisionMutation,
     CheckedPhotoDecisionOutcome, CheckedPhotoDecisionResult, PhotoDecisionFacts,
@@ -15,7 +15,7 @@ use crate::{
     PhotoStateBatchMissing, PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateField,
     PhotoStateMutation, PhotoStateMutationResult, PhotoStateUndo, PhotoStateValue,
 };
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{OptionalExtension, Transaction, params};
 
 pub(super) fn state_value(
     selection: &str,
@@ -65,12 +65,11 @@ fn set_photo_state(
 }
 
 pub(super) fn mutate_photo_state(
-    state: &StateDirectory,
-    database_name: &DatabaseName,
-    connection: &mut Connection,
+    session: &mut WriteSession<'_>,
     mutation: PhotoStateMutation,
 ) -> Result<PhotoStateMutationResult, MutationError> {
-    mutation_transaction(state, database_name, connection, |transaction| {
+    session.require_photo_capacity(&mutation.photo_id)?;
+    session.mutation(|transaction, versions| {
         let (selection, rating): (String, i64) = transaction
             .query_row(
                 "SELECT selection_state,rating FROM photos WHERE id=?",
@@ -108,7 +107,7 @@ pub(super) fn mutate_photo_state(
                 )
                 .map_err(mutation_error_from_sqlite)?;
         }
-        Ok(PhotoStateMutationResult {
+        let result = PhotoStateMutationResult {
             photo_id: mutation.photo_id.clone(),
             undo: PhotoStateUndo {
                 photo_id: mutation.photo_id,
@@ -116,7 +115,9 @@ pub(super) fn mutate_photo_state(
                 prior_value: prior,
                 expected_current: mutation.value,
             },
-        })
+        };
+        versions.advance_photo_if_changed(&result.photo_id, prior != mutation.value)?;
+        Ok(result)
     })
 }
 
@@ -124,12 +125,13 @@ pub(super) fn mutate_photo_state(
 /// inside one transaction and reports exactly one outcome, so matching Photos
 /// can be confirmed even when another requested Photo is missing or changed.
 pub(super) fn mutate_photo_state_batch(
-    state: &StateDirectory,
-    database_name: &DatabaseName,
-    connection: &mut Connection,
+    session: &mut WriteSession<'_>,
     mutation: PhotoStateBatchMutation,
 ) -> Result<PhotoStateBatchResult, MutationError> {
-    mutation_transaction(state, database_name, connection, |transaction| {
+    for photo in &mutation.photos {
+        session.require_photo_capacity(&photo.photo_id)?;
+    }
+    session.mutation(|transaction, versions| {
         let mut applied = Vec::with_capacity(mutation.photos.len());
         let mut changed_elsewhere = Vec::new();
         let mut missing = Vec::new();
@@ -166,6 +168,7 @@ pub(super) fn mutate_photo_state_batch(
                 photo_id: item.photo_id.clone(),
                 prior_value,
             });
+            versions.advance_photo_if_changed(&item.photo_id, prior_value != mutation.value)?;
         }
         Ok(PhotoStateBatchResult {
             applied,
@@ -194,10 +197,7 @@ fn photo_decision_snapshot(
 /// failure rolls back all of them and preserves versions, and conflicts or
 /// missing records are per-item domain results in request order.
 pub(super) fn mutate_photo_decision_checked(
-    state: &StateDirectory,
-    database_name: &DatabaseName,
-    connection: &mut Connection,
-    versions: &mut MutationVersions,
+    session: &mut WriteSession<'_>,
     mutation: CheckedPhotoDecisionMutation,
 ) -> Result<CheckedPhotoDecisionResult, PhotoDecisionWriteError> {
     enum Classification {
@@ -212,7 +212,8 @@ pub(super) fn mutate_photo_decision_checked(
     };
     let mut classified = Vec::with_capacity(mutation.photos.len());
     for item in &mutation.photos {
-        let facts = connection
+        let facts = session
+            .connection()
             .query_row(
                 "SELECT selection_state,rating FROM photos WHERE id=?",
                 [&item.photo_id],
@@ -237,7 +238,7 @@ pub(super) fn mutate_photo_decision_checked(
         let classification = match facts {
             None => Classification::Missing,
             Some(facts) => {
-                let current = photo_decision_snapshot(versions, facts, &item.photo_id);
+                let current = photo_decision_snapshot(session.versions(), facts, &item.photo_id);
                 if current.decision_version != item.expected_version {
                     Classification::Conflict { current }
                 } else if current_value(facts) == mutation.value {
@@ -257,24 +258,19 @@ pub(super) fn mutate_photo_decision_checked(
     // Counter saturation fails closed before any write rather than wrapping.
     if effective
         .iter()
-        .any(|photo_id| !versions.can_advance_photo(photo_id))
+        .any(|photo_id| !session.can_advance_photo(photo_id))
     {
         return Err(PhotoDecisionWriteError::Persistence);
     }
-    mutation_transaction(state, database_name, connection, |transaction| {
-        for photo_id in &effective {
-            set_photo_state(transaction, mutation.value, photo_id)?;
-        }
-        Ok(())
-    })
-    .map_err(photo_decision_write_error_from_mutation)?;
-    // Counters become visible only after the committed transaction; a
-    // rollback above leaves every prior version unchanged.
-    for photo_id in &effective {
-        versions
-            .advance_photo(photo_id)
-            .map_err(photo_decision_write_error_from_mutation)?;
-    }
+    session
+        .mutation(|transaction, versions| {
+            for photo_id in &effective {
+                set_photo_state(transaction, mutation.value, photo_id)?;
+                versions.advance_photo(photo_id)?;
+            }
+            Ok(())
+        })
+        .map_err(photo_decision_write_error_from_mutation)?;
     let mut counts = CheckedPhotoDecisionCounts::default();
     let mut results = Vec::with_capacity(classified.len());
     for (photo_id, classification) in classified {
@@ -307,7 +303,7 @@ pub(super) fn mutate_photo_decision_checked(
                 };
                 CheckedPhotoDecisionOutcome::Changed {
                     prior,
-                    current: photo_decision_snapshot(versions, after, &photo_id),
+                    current: photo_decision_snapshot(session.versions(), after, &photo_id),
                 }
             }
         };
@@ -319,7 +315,7 @@ pub(super) fn mutate_photo_decision_checked(
 #[cfg(test)]
 mod tests {
     use crate::persistence::admission::StateDirectory;
-    use crate::persistence::owner::validate_photo_state_batch_mutation;
+    use crate::persistence::photo_decision_write::validate_photo_state_batch_mutation;
     use crate::persistence::test_support::*;
     use crate::persistence::{MutationError, Persistence, PhotoDecisionWriteError};
     use crate::{

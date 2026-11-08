@@ -9,9 +9,11 @@ mod composable_recipe;
 mod decisions;
 mod development_proxy;
 mod edit_recipe;
+mod errors;
 mod expansion;
 mod export;
 mod export_codec;
+mod identity;
 mod metadata;
 mod metadata_store;
 mod migrations;
@@ -19,6 +21,7 @@ mod mutation;
 mod owner;
 mod owner_export;
 mod owner_recovery;
+mod photo_decision_write;
 mod processing_export;
 mod queries;
 mod removal;
@@ -30,6 +33,7 @@ mod schema;
 mod test_support;
 mod trash;
 mod trash_cleanup;
+mod write_session;
 mod xmp;
 
 pub use crate::domain::{
@@ -53,7 +57,8 @@ pub use metadata::{
     ActiveAssociation, MetadataContext, MetadataRecord, MetadataStoreError, ObservedSidecar,
     ObservedSidecarState, RetainedOrphan,
 };
-pub use owner::{MutationError, Persistence, PersistenceError, PhotoDecisionWriteError};
+pub use owner::{MutationError, Persistence, PersistenceError};
+pub use photo_decision_write::PhotoDecisionWriteError;
 pub use scan::ScanApplication;
 pub use scan_recovery::{
     DiscoveredFingerprint, FingerprintCounts, FingerprintTarget, ScanRecoveryPlan,

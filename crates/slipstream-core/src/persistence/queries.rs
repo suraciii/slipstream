@@ -5,7 +5,8 @@ use super::codecs::{
     parse_camera_identity, parse_capture_fact, parse_dimension, parse_kind, parse_preview_state,
     parse_selection_state,
 };
-use super::owner::{MutationVersions, PersistenceError};
+use super::owner::PersistenceError;
+use super::write_session::MutationVersions;
 use crate::{
     PhotoQuery, PhotoQueryCandidate, PhotoQueryError, PhotoQueryOrder, PhotoQueryProjection,
     PhotoQuerySource, PhotoRead, PreviewState, SelectionState,

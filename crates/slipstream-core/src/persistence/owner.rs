@@ -2,31 +2,34 @@ use super::album_write::{
     AlbumWriteError, album_write_error_from_persistence, normalize_album_membership_mutation,
     normalize_album_mutation, normalize_album_name, normalize_checked_album_mutation,
 };
+use super::photo_decision_write::{
+    PhotoDecisionWriteError, normalize_checked_photo_decision_mutation,
+    photo_decision_write_error_from_persistence, validate_photo_state_batch_mutation,
+    validate_photo_state_mutation,
+};
 use super::scan::ScanApplication;
 use super::scan_recovery::ScanRecoveryPlan;
 use super::{
-    DatabaseName, StateDirectory, StateError, StateFileIdentity, admission::StateDatabaseLock,
-    album_queries, albums, decisions, development_proxy, edit_recipe, metadata, migrations,
-    mutation, owner_export, owner_recovery, queries, removal, scan, trash_cleanup, xmp,
+    DatabaseName, StateDirectory, StateFileIdentity, admission::StateDatabaseLock, album_queries,
+    albums, decisions, development_proxy, edit_recipe, metadata, migrations, mutation,
+    owner_export, owner_recovery, queries, removal, scan, trash_cleanup, xmp,
 };
 use crate::{
     AlbumBrowseTarget, AlbumCreationResult, AlbumMembershipMutation, AlbumMembershipResult,
     AlbumMutation, AlbumMutationResult, AlbumQueryFilter, AlbumRecord, AlbumSummary,
     CheckedAlbumMutation, CheckedAlbumMutationResult, CheckedPhotoDecisionMutation,
     CheckedPhotoDecisionResult, DiscoveredOriginal, EditRecipeRead, ExplicitPhotoRestoreResult,
-    LibraryRoot, MAXIMUM_PHOTO_RATING, OriginalScanError, PhotoAlbumMembership,
-    PhotoOperationRemainder, PhotoQuery, PhotoQueryError, PhotoQueryProjection, PhotoRead,
-    PhotoRemovalResult, PhotoRestoration, PhotoRestorationResult, PhotoStateBatchMutation,
-    PhotoStateBatchResult, PhotoStateField, PhotoStateMutation, PhotoStateMutationResult,
-    PhotoStateValue, PreviewSeed, PreviewSeedResult, RecoveryRecord, RemovedPhotoRecord,
+    LibraryRoot, OriginalScanError, PhotoAlbumMembership, PhotoOperationRemainder, PhotoQuery,
+    PhotoQueryError, PhotoQueryProjection, PhotoRead, PhotoRemovalResult, PhotoRestoration,
+    PhotoRestorationResult, PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateMutation,
+    PhotoStateMutationResult, PreviewSeed, PreviewSeedResult, RecoveryRecord, RemovedPhotoRecord,
     ScanSnapshot, SelectionState, TrashAbsence, TrashCleanupPreview, TrashCleanupResult,
     TrashCleanupTarget, TrashInspectionRecord, TrashSelection, WhiteBalanceIntent, XmpExportRecord,
 };
 
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior, params};
 use std::{
-    collections::{HashMap, HashSet},
-    fmt,
+    collections::HashSet,
     num::NonZeroUsize,
     sync::{
         Arc,
@@ -45,258 +48,9 @@ mod tests;
 #[cfg(test)]
 const DEFAULT_QUEUE_CAPACITY: usize = 64;
 
-pub(super) struct MutationVersions {
-    pub(super) epoch: String,
-    pub(super) photo: HashMap<String, u64>,
-    pub(super) album: HashMap<String, u64>,
-}
-
-impl MutationVersions {
-    pub(super) fn new() -> Result<Self, PersistenceError> {
-        Ok(Self {
-            epoch: random_uuid_v4()?,
-            photo: HashMap::new(),
-            album: HashMap::new(),
-        })
-    }
-
-    pub(super) fn photo(&self, id: &str) -> String {
-        self.token("photo", id, *self.photo.get(id).unwrap_or(&0))
-    }
-
-    pub(super) fn album(&self, id: &str) -> String {
-        self.token("album", id, *self.album.get(id).unwrap_or(&0))
-    }
-
-    pub(super) fn can_advance_photo(&self, id: &str) -> bool {
-        self.photo.get(id).copied().unwrap_or(0) < u64::MAX
-    }
-
-    pub(super) fn can_advance_album(&self, id: &str) -> bool {
-        self.album.get(id).copied().unwrap_or(0) < u64::MAX
-    }
-
-    pub(super) fn advance_photo(&mut self, id: &str) -> Result<(), MutationError> {
-        advance_counter(&mut self.photo, id)
-    }
-
-    pub(super) fn advance_album(&mut self, id: &str) -> Result<(), MutationError> {
-        advance_counter(&mut self.album, id)
-    }
-
-    pub(super) fn token(&self, kind: &str, id: &str, counter: u64) -> String {
-        format!("{}:{kind}:{id}:{counter}", self.epoch)
-    }
-}
-
-fn advance_counter(counters: &mut HashMap<String, u64>, id: &str) -> Result<(), MutationError> {
-    let counter = counters.entry(id.to_owned()).or_default();
-    *counter = counter.checked_add(1).ok_or(MutationError::Persistence)?;
-    Ok(())
-}
-
-#[derive(Clone, Debug)]
-pub enum PersistenceError {
-    Saturated,
-    Closed,
-    State(StateError),
-    RecoveryRequired,
-    UnsupportedSchema,
-    NewerSchema,
-    RootMismatch,
-    InvalidLegacyData,
-    InvalidExpansion,
-    InvalidRecovery,
-    InvalidRecoveryMapping {
-        original_id: String,
-        reason: &'static str,
-    },
-    IdCollision,
-    Storage,
-    OwnerStopped,
-}
-
-impl fmt::Display for PersistenceError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Saturated => "SQLite persistence queue is saturated",
-            Self::Closed => "SQLite persistence is closed",
-            Self::State(error) => return error.fmt(formatter),
-            Self::RecoveryRequired => "SQLite state requires operator recovery",
-            Self::UnsupportedSchema => "SQLite schema is unsupported",
-            Self::NewerSchema => "SQLite schema version is newer than this Slipstream build",
-            Self::RootMismatch => "SQLite database belongs to a different Photo Library root",
-            Self::InvalidLegacyData => "SQLite legacy data cannot be migrated safely",
-            Self::InvalidExpansion => "Photo Library expansion could not be proven safely",
-            Self::InvalidRecovery => "Original File recovery could not be proven safely",
-            Self::InvalidRecoveryMapping { .. } => {
-                "Original File recovery could not be proven safely"
-            }
-            Self::IdCollision => "SQLite identity allocation collided with existing state",
-            Self::Storage => "SQLite persistence failed",
-            Self::OwnerStopped => "SQLite persistence owner stopped unexpectedly",
-        })
-    }
-}
-
-impl std::error::Error for PersistenceError {}
-
-impl From<StateError> for PersistenceError {
-    fn from(value: StateError) -> Self {
-        match value {
-            StateError::SidecarPresent => Self::RecoveryRequired,
-            other => Self::State(other),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum MutationError {
-    /// The request itself is malformed: an empty, over-limit, or duplicate
-    /// address set. It is refused before any state is read or written.
-    Invalid,
-    NotFound,
-    Conflict,
-    Persistence,
-    Saturated,
-    Closed,
-}
-
-impl fmt::Display for MutationError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Invalid => "Mutation request is not valid",
-            Self::NotFound => "Mutation target not found",
-            Self::Conflict => "Mutation conflicts with current state",
-            Self::Persistence => "Mutation could not be persisted",
-            Self::Saturated => "SQLite persistence queue is saturated",
-            Self::Closed => "SQLite persistence is closed",
-        })
-    }
-}
-
-impl std::error::Error for MutationError {}
-
-/// Detailed refusal or storage outcome for checked Photo decision batches.
-/// Conflicting and missing Photos are per-item domain results, so only
-/// request validation and storage failures appear here.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum PhotoDecisionWriteError {
-    Invalid,
-    LimitExceeded { limit: usize, actual: usize },
-    Persistence,
-    Saturated,
-    Closed,
-}
-
-impl fmt::Display for PhotoDecisionWriteError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Invalid => formatter.write_str("Photo decision write request is not valid"),
-            Self::LimitExceeded { .. } => {
-                formatter.write_str("Photo decision write exceeds its limit")
-            }
-            Self::Persistence => formatter.write_str("Photo decision write could not be persisted"),
-            Self::Saturated => formatter.write_str("SQLite persistence queue is saturated"),
-            Self::Closed => formatter.write_str("SQLite persistence is closed"),
-        }
-    }
-}
-
-impl std::error::Error for PhotoDecisionWriteError {}
-
-fn photo_decision_write_error_from_persistence(error: PersistenceError) -> PhotoDecisionWriteError {
-    match error {
-        PersistenceError::Saturated => PhotoDecisionWriteError::Saturated,
-        PersistenceError::Closed => PhotoDecisionWriteError::Closed,
-        _ => PhotoDecisionWriteError::Persistence,
-    }
-}
-
-pub(super) fn photo_decision_write_error_from_mutation(
-    error: MutationError,
-) -> PhotoDecisionWriteError {
-    match error {
-        MutationError::Saturated => PhotoDecisionWriteError::Saturated,
-        MutationError::Closed => PhotoDecisionWriteError::Closed,
-        _ => PhotoDecisionWriteError::Persistence,
-    }
-}
-
-fn normalize_checked_photo_decision_mutation(
-    mutation: CheckedPhotoDecisionMutation,
-) -> Result<CheckedPhotoDecisionMutation, PhotoDecisionWriteError> {
-    if std::mem::discriminant(&mutation.value)
-        != match mutation.field {
-            PhotoStateField::SelectionState => {
-                std::mem::discriminant(&PhotoStateValue::Selection(SelectionState::Unflagged))
-            }
-            PhotoStateField::Rating => std::mem::discriminant(&PhotoStateValue::Rating(0)),
-        }
-        || matches!(mutation.value, PhotoStateValue::Rating(value) if value > MAXIMUM_PHOTO_RATING)
-    {
-        return Err(PhotoDecisionWriteError::Invalid);
-    }
-
-    if mutation.photos.len() > crate::PHOTO_STATE_BATCH_MAX {
-        return Err(PhotoDecisionWriteError::LimitExceeded {
-            limit: crate::PHOTO_STATE_BATCH_MAX,
-            actual: mutation.photos.len(),
-        });
-    }
-    if mutation.photos.is_empty()
-        || mutation
-            .photos
-            .iter()
-            .any(|photo| photo.photo_id.trim().is_empty() || photo.expected_version.is_empty())
-        || mutation
-            .photos
-            .iter()
-            .map(|photo| &photo.photo_id)
-            .collect::<std::collections::BTreeSet<_>>()
-            .len()
-            != mutation.photos.len()
-    {
-        return Err(PhotoDecisionWriteError::Invalid);
-    }
-    Ok(mutation)
-}
-
-fn validate_photo_state_mutation(mutation: &PhotoStateMutation) -> Result<(), MutationError> {
-    if mutation.expected_current.is_some_and(|expected| {
-        std::mem::discriminant(&expected) != std::mem::discriminant(&mutation.value)
-    }) {
-        return Err(MutationError::Conflict);
-    }
-    match (mutation.field, mutation.value) {
-        (PhotoStateField::SelectionState, PhotoStateValue::Selection(_))
-        | (PhotoStateField::Rating, PhotoStateValue::Rating(_)) => Ok(()),
-        _ => Err(MutationError::Conflict),
-    }
-}
-
-pub(super) fn validate_photo_state_batch_mutation(
-    mutation: &PhotoStateBatchMutation,
-) -> Result<(), MutationError> {
-    if mutation.value == SelectionState::Unflagged
-        || mutation.photos.is_empty()
-        || mutation.photos.len() > crate::PHOTO_STATE_BATCH_MAX
-        || mutation
-            .photos
-            .iter()
-            .map(|photo| &photo.photo_id)
-            .collect::<std::collections::BTreeSet<_>>()
-            .len()
-            != mutation.photos.len()
-        || mutation
-            .photos
-            .iter()
-            .any(|photo| photo.photo_id.is_empty())
-    {
-        return Err(MutationError::Invalid);
-    }
-    Ok(())
-}
+pub use super::errors::{MutationError, PersistenceError};
+use super::identity::random_uuid_v4;
+use super::write_session::{MutationVersions, WriteSession};
 
 pub(super) type Reply<T> = oneshot::Sender<Result<T, PersistenceError>>;
 type EditRecipeSurfaceReceiver =
@@ -318,7 +72,7 @@ type RemovedPhotoPage = (
 pub(super) type RemovedPhotoPageResult = Result<RemovedPhotoPage, PersistenceError>;
 type RemovedPhotoPageReceiver = oneshot::Receiver<RemovedPhotoPageResult>;
 
-type MetadataWork = Box<dyn FnOnce(&Connection) + Send>;
+type MetadataWork = Box<dyn FnOnce(&StateDirectory, &DatabaseName, &Connection) + Send>;
 
 /// One review-identity read keeps its requested order, so every id gets a
 /// slot and `None` means the record no longer exists.
@@ -477,6 +231,12 @@ pub(super) enum Command {
     #[cfg(test)]
     Configuration(Reply<(String, u8)>),
     #[cfg(test)]
+    SetPhotoVersion {
+        photo_id: String,
+        counter: u64,
+        reply: Reply<()>,
+    },
+    #[cfg(test)]
     Block {
         entered: oneshot::Sender<()>,
         release: std::sync::mpsc::Receiver<()>,
@@ -501,11 +261,14 @@ impl Persistence {
         metadata::MetadataStoreError,
     > {
         let (send, receive) = oneshot::channel();
-        self.submit(Command::Metadata(Box::new(move |connection| {
-            let result = metadata::metadata_context(connection, &photo_id)
-                .and_then(|context| work(&context));
-            let _ = send.send(result);
-        })))
+        self.submit(Command::Metadata(Box::new(
+            move |state, database_name, connection| {
+                let result =
+                    metadata::metadata_context(state, database_name, connection, &photo_id)
+                        .and_then(|context| work(&context));
+                let _ = send.send(result);
+            },
+        )))
         .map_err(|_| metadata::MetadataStoreError::Storage)?;
         Ok(receive)
     }
@@ -1123,7 +886,7 @@ fn owner_main(
     for command in receiver {
         sequence += 1;
         match command {
-            Command::Metadata(work) => work(&connection),
+            Command::Metadata(work) => work(&state, &database_name, &connection),
             Command::Probe(reply) => {
                 let _ = reply.send(Ok(sequence));
             }
@@ -1273,23 +1036,9 @@ fn owner_main(
                 let _ = reply.send(album_queries::album_browse_target(&connection, &album_id));
             }
             Command::MutateAlbum(mutation, reply) => {
-                let plan = albums::album_version_plan(&connection, &mutation);
-                let result = match plan {
-                    Ok(plan) if !plan.advance || versions.can_advance_album(&plan.album_id) => {
-                        let result =
-                            albums::mutate_album(&state, &database_name, &mut connection, mutation);
-                        if result.is_ok() {
-                            if plan.deleted {
-                                versions.album.remove(&plan.album_id);
-                            } else if plan.advance {
-                                let _ = versions.advance_album(&plan.album_id);
-                            }
-                        }
-                        result
-                    }
-                    Ok(_) => Err(MutationError::Persistence),
-                    Err(error) => Err(error),
-                };
+                let mut session =
+                    WriteSession::new(&state, &database_name, &mut connection, &mut versions);
+                let result = albums::mutate_album(&mut session, mutation);
                 let _ = reply.send(result);
             }
             Command::MutateAlbumMembership(mutation, reply) => {
@@ -1298,106 +1047,48 @@ fn owner_main(
                     | AlbumMembershipMutation::RemoveAdded { album_id, .. } => album_id,
                 };
                 let result = if versions.can_advance_album(album_id) {
-                    albums::mutate_album_membership(
-                        &state,
-                        &database_name,
-                        &mut connection,
-                        mutation,
-                    )
+                    let mut session =
+                        WriteSession::new(&state, &database_name, &mut connection, &mut versions);
+                    albums::mutate_album_membership(&mut session, mutation)
                 } else {
                     Err(MutationError::Persistence)
                 };
-                if let Ok(result) = &result
-                    && (!result.added_photo_ids.is_empty() || !result.removed_photo_ids.is_empty())
-                {
-                    let _ = versions.advance_album(&result.album_id);
-                }
                 let _ = reply.send(result);
             }
             Command::CreateAlbum(name, reply) => {
-                let result = albums::create_album_checked(
-                    &state,
-                    &database_name,
-                    &mut connection,
-                    &versions,
-                    name,
-                );
+                let mut session =
+                    WriteSession::new(&state, &database_name, &mut connection, &mut versions);
+                let result = albums::create_album_checked(&mut session, name);
                 let _ = reply.send(result);
             }
             Command::MutateAlbumChecked(mutation, reply) => {
-                let result = albums::mutate_album_checked(
-                    &state,
-                    &database_name,
-                    &mut connection,
-                    &mut versions,
-                    mutation,
-                );
+                let mut session =
+                    WriteSession::new(&state, &database_name, &mut connection, &mut versions);
+                let result = albums::mutate_album_checked(&mut session, mutation);
                 let _ = reply.send(result);
             }
             Command::MutatePhotoDecisionChecked(mutation, reply) => {
-                let result = decisions::mutate_photo_decision_checked(
-                    &state,
-                    &database_name,
-                    &mut connection,
-                    &mut versions,
-                    mutation,
-                );
+                let mut session =
+                    WriteSession::new(&state, &database_name, &mut connection, &mut versions);
+                let result = decisions::mutate_photo_decision_checked(&mut session, mutation);
                 let _ = reply.send(result);
             }
             Command::MutatePhotoState(mutation, reply) => {
-                let photo_id = mutation.photo_id.clone();
-                let value = mutation.value;
-                let result = if versions.can_advance_photo(&photo_id) {
-                    decisions::mutate_photo_state(&state, &database_name, &mut connection, mutation)
-                } else {
-                    Err(MutationError::Persistence)
-                };
-                if result
-                    .as_ref()
-                    .is_ok_and(|result| result.undo.prior_value != value)
-                {
-                    let _ = versions.advance_photo(&photo_id);
-                }
+                let mut session =
+                    WriteSession::new(&state, &database_name, &mut connection, &mut versions);
+                let result = decisions::mutate_photo_state(&mut session, mutation);
                 let _ = reply.send(result);
             }
             Command::MutatePhotoStateBatch(mutation, reply) => {
-                let value = mutation.value;
-                let can_advance = mutation
-                    .photos
-                    .iter()
-                    .all(|photo| versions.can_advance_photo(&photo.photo_id));
-                let result = if can_advance {
-                    decisions::mutate_photo_state_batch(
-                        &state,
-                        &database_name,
-                        &mut connection,
-                        mutation,
-                    )
-                } else {
-                    Err(MutationError::Persistence)
-                };
-                if let Ok(result) = &result {
-                    for applied in &result.applied {
-                        if applied.prior_value != value {
-                            let _ = versions.advance_photo(&applied.photo_id);
-                        }
-                    }
-                }
+                let mut session =
+                    WriteSession::new(&state, &database_name, &mut connection, &mut versions);
+                let result = decisions::mutate_photo_state_batch(&mut session, mutation);
                 let _ = reply.send(result);
             }
             Command::RemovePhotos(request, reply) => {
-                let result = removal::remove_photos(
-                    &state,
-                    &database_name,
-                    &mut connection,
-                    &versions,
-                    request,
-                );
-                if let Ok(result) = &result {
-                    for photo_id in &result.newly_removed {
-                        let _ = versions.advance_photo(photo_id);
-                    }
-                }
+                let mut session =
+                    WriteSession::new(&state, &database_name, &mut connection, &mut versions);
+                let result = removal::remove_photos(&mut session, request);
                 let _ = reply.send(result);
             }
             Command::ReadPhotoRemovalOperation {
@@ -1415,17 +1106,9 @@ fn owner_main(
                 let _ = reply.send(result);
             }
             Command::RestorePhotosExplicit(mutation, reply) => {
-                let result = removal::restore_photos_explicit(
-                    &state,
-                    &database_name,
-                    &mut connection,
-                    mutation,
-                );
-                if let Ok(result) = &result {
-                    for photo_id in &result.restored {
-                        let _ = versions.advance_photo(photo_id);
-                    }
-                }
+                let mut session =
+                    WriteSession::new(&state, &database_name, &mut connection, &mut versions);
+                let result = removal::restore_photos_explicit(&mut session, mutation);
                 let _ = reply.send(result);
             }
             Command::ReadPhotoRestoreOperation {
@@ -1443,13 +1126,9 @@ fn owner_main(
                 let _ = reply.send(result);
             }
             Command::RestorePhotos(restoration, reply) => {
-                let result =
-                    removal::restore_photos(&state, &database_name, &mut connection, restoration);
-                if let Ok(result) = &result {
-                    for photo_id in &result.restored {
-                        let _ = versions.advance_photo(photo_id);
-                    }
-                }
+                let mut session =
+                    WriteSession::new(&state, &database_name, &mut connection, &mut versions);
+                let result = removal::restore_photos(&mut session, restoration);
                 let _ = reply.send(result);
             }
             Command::RemovedPhotos {
@@ -1475,14 +1154,13 @@ fn owner_main(
                         Err(error) => Err(error),
                         Ok(None) => {
                             inspect_trash_targets(&root, &connection, &mut targets);
-                            trash_cleanup::cleanup_trash(
+                            let mut session = WriteSession::new(
                                 &state,
                                 &database_name,
                                 &mut connection,
-                                operation_id,
-                                targets,
                                 &mut versions,
-                            )
+                            );
+                            trash_cleanup::cleanup_trash(&mut session, operation_id, targets)
                         }
                     };
                 let _ = reply.send(result);
@@ -1529,6 +1207,15 @@ fn owner_main(
                     Ok((journal, foreign_keys))
                 })();
                 let _ = reply.send(result);
+            }
+            #[cfg(test)]
+            Command::SetPhotoVersion {
+                photo_id,
+                counter,
+                reply,
+            } => {
+                versions.photo.insert(photo_id, counter);
+                let _ = reply.send(Ok(()));
             }
             #[cfg(test)]
             Command::Block {
@@ -1617,49 +1304,6 @@ pub(super) fn parse_white_balance_intent(
     }
 }
 
-pub(crate) fn random_uuid_v4() -> Result<String, PersistenceError> {
-    let mut bytes = [0_u8; 16];
-    let mut offset = 0;
-    while offset < bytes.len() {
-        // SAFETY: the buffer is valid writable storage and the length is exact.
-        let result = unsafe {
-            libc::getrandom(bytes[offset..].as_mut_ptr().cast(), bytes.len() - offset, 0)
-        };
-        if result < 0 {
-            let error = std::io::Error::last_os_error();
-            if error.raw_os_error() == Some(libc::EINTR) {
-                continue;
-            }
-            return Err(PersistenceError::Storage);
-        }
-        if result == 0 {
-            return Err(PersistenceError::Storage);
-        }
-        offset += usize::try_from(result).map_err(|_| PersistenceError::Storage)?;
-    }
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    Ok(format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0],
-        bytes[1],
-        bytes[2],
-        bytes[3],
-        bytes[4],
-        bytes[5],
-        bytes[6],
-        bytes[7],
-        bytes[8],
-        bytes[9],
-        bytes[10],
-        bytes[11],
-        bytes[12],
-        bytes[13],
-        bytes[14],
-        bytes[15]
-    ))
-}
-
 pub(super) fn allocate_library_id(
     transaction: &Transaction<'_>,
     reserved: &mut HashSet<String>,
@@ -1686,18 +1330,6 @@ pub(super) fn reserve_library_id(
     }
     reserved.insert(id.clone());
     Ok(id)
-}
-
-pub(super) fn uuid_v4() -> Result<String, MutationError> {
-    random_uuid_v4().map_err(|_| MutationError::Persistence)
-}
-
-pub(super) fn unix_millis() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
-        .unwrap_or(0)
 }
 
 /// The Original identities whose Photo was confirmed permanently deleted. A
