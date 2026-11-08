@@ -9,9 +9,11 @@ mod composable_recipe;
 mod decisions;
 mod development_proxy;
 mod edit_recipe;
+mod errors;
 mod expansion;
 mod export;
 mod export_codec;
+mod identity;
 mod metadata;
 mod metadata_store;
 mod migrations;
@@ -31,6 +33,7 @@ mod schema;
 mod test_support;
 mod trash;
 mod trash_cleanup;
+mod write_session;
 mod xmp;
 
 pub use crate::domain::{

@@ -2,11 +2,12 @@
 //! bounded Album query projection live in `album_queries`. The write error
 //! surface and mutation normalization live in `album_write`.
 
-use super::admission::{DatabaseName, StateDirectory};
 use super::album_queries::read_album;
 use super::album_write::AlbumWriteError;
-use super::mutation::{mutation_error_from_sqlite, mutation_transaction};
-use super::owner::{MutationError, MutationVersions, PersistenceError, unix_millis, uuid_v4};
+use super::identity::{unix_millis, uuid_v4};
+use super::mutation::mutation_error_from_sqlite;
+use super::owner::{MutationError, PersistenceError};
+use super::write_session::WriteSession;
 use crate::{
     ALBUM_MEMBERSHIP_BATCH_MAX, AlbumCreationResult, AlbumMembershipMutation,
     AlbumMembershipResult, AlbumMutation, AlbumMutationResult, AlbumSummary, CheckedAlbumMutation,
@@ -168,25 +169,17 @@ fn require_checked_photos(
 }
 
 pub(super) fn create_album_checked(
-    state: &StateDirectory,
-    database_name: &DatabaseName,
-    connection: &mut Connection,
-    versions: &MutationVersions,
+    session: &mut WriteSession<'_>,
     name: String,
 ) -> Result<AlbumCreationResult, AlbumWriteError> {
-    if let Some(album_id) = conflicting_album_id(connection, &name, None)? {
+    if let Some(album_id) = conflicting_album_id(session.connection(), &name, None)? {
         return Err(AlbumWriteError::NameConflict { name, album_id });
     }
-    let result = mutate_album(
-        state,
-        database_name,
-        connection,
-        AlbumMutation::Create { name: name.clone() },
-    )
-    .map_err(album_write_error_from_mutation)?;
+    let result = mutate_album(session, AlbumMutation::Create { name: name.clone() })
+        .map_err(album_write_error_from_mutation)?;
     Ok(AlbumCreationResult {
         album: AlbumSummary {
-            album_version: versions.album(&result.album_id),
+            album_version: session.album_token(&result.album_id),
             id: result.album_id,
             name,
             photo_count: 0,
@@ -196,10 +189,7 @@ pub(super) fn create_album_checked(
 }
 
 pub(super) fn mutate_album_checked(
-    state: &StateDirectory,
-    database_name: &DatabaseName,
-    connection: &mut Connection,
-    versions: &mut MutationVersions,
+    session: &mut WriteSession<'_>,
     mutation: CheckedAlbumMutation,
 ) -> Result<CheckedAlbumMutationResult, AlbumWriteError> {
     let identity = match &mutation {
@@ -229,8 +219,8 @@ pub(super) fn mutate_album_checked(
         } => (album_id.clone(), expected_version.clone()),
     };
     let (album_id, expected_version) = (&identity.0, &identity.1);
-    let Some(mut summary) =
-        read_album(connection, versions, album_id).map_err(|_| AlbumWriteError::Persistence)?
+    let Some(mut summary) = read_album(session.connection(), session.versions(), album_id)
+        .map_err(|_| AlbumWriteError::Persistence)?
     else {
         return Err(AlbumWriteError::AlbumNotFound {
             album_id: album_id.clone(),
@@ -244,7 +234,7 @@ pub(super) fn mutate_album_checked(
             current_version: summary.album_version,
         });
     }
-    let current = album_version_state(connection, album_id)
+    let current = album_version_state(session.connection(), album_id)
         .map_err(|_| AlbumWriteError::Persistence)?
         .ok_or_else(|| AlbumWriteError::AlbumNotFound {
             album_id: album_id.clone(),
@@ -252,55 +242,57 @@ pub(super) fn mutate_album_checked(
 
     match mutation {
         CheckedAlbumMutation::Rename { name, .. } => {
-            if let Some(conflicting_id) = conflicting_album_id(connection, &name, Some(album_id))? {
+            if let Some(conflicting_id) =
+                conflicting_album_id(session.connection(), &name, Some(album_id))?
+            {
                 return Err(AlbumWriteError::NameConflict {
                     name,
                     album_id: conflicting_id,
                 });
             }
             let renamed = current.name != name;
-            if renamed && !versions.can_advance_album(album_id) {
+            if renamed && !session.can_advance_album(album_id) {
                 return Err(AlbumWriteError::Persistence);
             }
-            mutate_album(
-                state,
-                database_name,
-                connection,
+            apply_album_mutation(
+                session,
                 AlbumMutation::Rename {
                     album_id: album_id.clone(),
                     name: name.clone(),
                 },
+                AlbumVersionPlan {
+                    album_id: album_id.clone(),
+                    advance: renamed,
+                    deleted: false,
+                },
             )
             .map_err(album_write_error_from_mutation)?;
-            if renamed {
-                versions
-                    .advance_album(album_id)
-                    .map_err(album_write_error_from_mutation)?;
-            }
             summary.name = name;
-            summary.album_version = versions.album(album_id);
+            summary.album_version = session.album_token(album_id);
             Ok(CheckedAlbumMutationResult::Renamed {
                 album: summary,
                 renamed,
             })
         }
         CheckedAlbumMutation::Delete { .. } => {
-            mutate_album(
-                state,
-                database_name,
-                connection,
+            apply_album_mutation(
+                session,
                 AlbumMutation::Delete {
                     album_id: album_id.clone(),
                 },
+                AlbumVersionPlan {
+                    album_id: album_id.clone(),
+                    advance: false,
+                    deleted: true,
+                },
             )
             .map_err(album_write_error_from_mutation)?;
-            versions.album.remove(album_id);
             Ok(CheckedAlbumMutationResult::Deleted {
                 album_id: album_id.clone(),
             })
         }
         CheckedAlbumMutation::AddMembers { photo_ids, .. } => {
-            require_checked_photos(connection, &photo_ids)?;
+            require_checked_photos(session.connection(), &photo_ids)?;
             let existing = current
                 .ordered_photo_ids
                 .iter()
@@ -316,25 +308,18 @@ pub(super) fn mutate_album_checked(
                 .filter(|photo_id| existing.contains(photo_id.as_str()))
                 .cloned()
                 .collect::<Vec<_>>();
-            if !added_photo_ids.is_empty() && !versions.can_advance_album(album_id) {
+            if !added_photo_ids.is_empty() && !session.can_advance_album(album_id) {
                 return Err(AlbumWriteError::Persistence);
             }
             mutate_album_membership(
-                state,
-                database_name,
-                connection,
+                session,
                 AlbumMembershipMutation::Add {
                     album_id: album_id.clone(),
                     photo_ids,
                 },
             )
             .map_err(album_write_error_from_mutation)?;
-            if !added_photo_ids.is_empty() {
-                versions
-                    .advance_album(album_id)
-                    .map_err(album_write_error_from_mutation)?;
-            }
-            summary = read_album(connection, versions, album_id)
+            summary = read_album(session.connection(), session.versions(), album_id)
                 .map_err(|_| AlbumWriteError::Persistence)?
                 .ok_or_else(|| AlbumWriteError::AlbumNotFound {
                     album_id: album_id.clone(),
@@ -346,7 +331,7 @@ pub(super) fn mutate_album_checked(
             })
         }
         CheckedAlbumMutation::RemoveMembers { photo_ids, .. } => {
-            require_checked_photos(connection, &photo_ids)?;
+            require_checked_photos(session.connection(), &photo_ids)?;
             let existing = current
                 .ordered_photo_ids
                 .iter()
@@ -362,28 +347,21 @@ pub(super) fn mutate_album_checked(
                 .filter(|photo_id| !existing.contains(photo_id.as_str()))
                 .cloned()
                 .collect::<Vec<_>>();
-            if !removed_photo_ids.is_empty() && !versions.can_advance_album(album_id) {
+            if !removed_photo_ids.is_empty() && !session.can_advance_album(album_id) {
                 return Err(AlbumWriteError::Persistence);
             }
             mutate_album_membership(
-                state,
-                database_name,
-                connection,
+                session,
                 AlbumMembershipMutation::RemoveAdded {
                     album_id: album_id.clone(),
                     photo_ids,
                 },
             )
             .map_err(album_write_error_from_mutation)?;
-            if !removed_photo_ids.is_empty() {
-                versions
-                    .advance_album(album_id)
-                    .map_err(album_write_error_from_mutation)?;
-            }
             let saved_photo_id = current
                 .saved_photo_id
                 .filter(|saved| !removed_photo_ids.iter().any(|removed| removed == saved));
-            summary = read_album(connection, versions, album_id)
+            summary = read_album(session.connection(), session.versions(), album_id)
                 .map_err(|_| AlbumWriteError::Persistence)?
                 .ok_or_else(|| AlbumWriteError::AlbumNotFound {
                     album_id: album_id.clone(),
@@ -396,7 +374,7 @@ pub(super) fn mutate_album_checked(
             })
         }
         CheckedAlbumMutation::Reorder { photo_ids, .. } => {
-            require_checked_photos(connection, &photo_ids)?;
+            require_checked_photos(session.connection(), &photo_ids)?;
             if current.ordered_photo_ids.len() > ALBUM_MEMBERSHIP_BATCH_MAX {
                 return Err(AlbumWriteError::LimitExceeded {
                     limit: ALBUM_MEMBERSHIP_BATCH_MAX,
@@ -416,25 +394,23 @@ pub(super) fn mutate_album_checked(
                 });
             }
             let reordered = current.ordered_photo_ids != photo_ids;
-            if reordered && !versions.can_advance_album(album_id) {
+            if reordered && !session.can_advance_album(album_id) {
                 return Err(AlbumWriteError::Persistence);
             }
-            mutate_album(
-                state,
-                database_name,
-                connection,
+            apply_album_mutation(
+                session,
                 AlbumMutation::Reorder {
                     album_id: album_id.clone(),
                     photo_ids: photo_ids.clone(),
                 },
+                AlbumVersionPlan {
+                    album_id: album_id.clone(),
+                    advance: reordered,
+                    deleted: false,
+                },
             )
             .map_err(album_write_error_from_mutation)?;
-            if reordered {
-                versions
-                    .advance_album(album_id)
-                    .map_err(album_write_error_from_mutation)?;
-            }
-            summary.album_version = versions.album(album_id);
+            summary.album_version = session.album_token(album_id);
             Ok(CheckedAlbumMutationResult::Reordered {
                 album: summary,
                 ordered_photo_ids: photo_ids,
@@ -507,12 +483,22 @@ fn append_album_members(
 }
 
 pub(super) fn mutate_album(
-    state: &StateDirectory,
-    database_name: &DatabaseName,
-    connection: &mut Connection,
+    session: &mut WriteSession<'_>,
     mutation: AlbumMutation,
 ) -> Result<AlbumMutationResult, MutationError> {
-    mutation_transaction(state, database_name, connection, |transaction| {
+    let plan = album_version_plan(session.connection(), &mutation)?;
+    if plan.advance && !session.can_advance_album(&plan.album_id) {
+        return Err(MutationError::Persistence);
+    }
+    apply_album_mutation(session, mutation, plan)
+}
+
+fn apply_album_mutation(
+    session: &mut WriteSession<'_>,
+    mutation: AlbumMutation,
+    plan: AlbumVersionPlan,
+) -> Result<AlbumMutationResult, MutationError> {
+    session.mutation(|transaction, versions| {
         let (album_id, added_count, already_member_count) = match mutation {
             AlbumMutation::Create { name } => {
                 let id = uuid_v4()?;
@@ -654,11 +640,17 @@ pub(super) fn mutate_album(
                 (album_id, 0, 0)
             }
         };
-        Ok(AlbumMutationResult {
+        let result = AlbumMutationResult {
             album_id,
             added_count,
             already_member_count,
-        })
+        };
+        if plan.deleted {
+            versions.remove_album(&plan.album_id);
+        } else if plan.advance {
+            versions.advance_album(&plan.album_id)?;
+        }
+        Ok(result)
     })
 }
 
@@ -668,12 +660,10 @@ pub(super) fn mutate_album(
 /// lists preserve request order so the browser can retain an exact, bounded
 /// record without reconstructing membership from aggregate counts.
 pub(super) fn mutate_album_membership(
-    state: &StateDirectory,
-    database_name: &DatabaseName,
-    connection: &mut Connection,
+    session: &mut WriteSession<'_>,
     mutation: AlbumMembershipMutation,
 ) -> Result<AlbumMembershipResult, MutationError> {
-    mutation_transaction(state, database_name, connection, |transaction| {
+    session.mutation(|transaction, versions| {
         let (album_id, photo_ids) = match &mutation {
             AlbumMembershipMutation::Add {
                 album_id,
@@ -732,6 +722,9 @@ pub(super) fn mutate_album_membership(
                     position = position.checked_add(1).ok_or(MutationError::Conflict)?;
                     added_photo_ids.push(photo_id);
                 }
+                if !added_photo_ids.is_empty() {
+                    versions.advance_album(&album_id)?;
+                }
                 Ok(AlbumMembershipResult {
                     album_id,
                     added_photo_ids,
@@ -772,6 +765,9 @@ pub(super) fn mutate_album_membership(
                         )
                         .map_err(mutation_error_from_sqlite)?;
                     removed_photo_ids.push(photo_id);
+                }
+                if !removed_photo_ids.is_empty() {
+                    versions.advance_album(&album_id)?;
                 }
                 Ok(AlbumMembershipResult {
                     album_id,
