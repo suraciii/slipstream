@@ -325,7 +325,7 @@ export async function openPhotoEditorAdvanced(page: Page) {
   const details = page.locator("[data-photo-editor-advanced]");
   await expect(details).toBeVisible();
   if ((await details.getAttribute("open")) === null)
-    await details.locator("summary").click();
+    await details.locator(":scope > summary").click();
   await expect(details).toHaveAttribute("open", "");
 }
 
@@ -335,7 +335,7 @@ export async function openAdvancedFilters(page: Page) {
   const details = page.locator("[data-advanced-filters]");
   await expect(details).toBeVisible();
   if ((await details.getAttribute("open")) === null)
-    await details.locator("summary").click();
+    await details.locator(":scope > summary").click();
   await expect(details).toHaveAttribute("open", "");
 }
 
@@ -344,7 +344,7 @@ export async function openPhotoDetailsAdvanced(page: Page) {
   const details = page.locator("[data-details-advanced]");
   await expect(details).toBeVisible();
   if ((await details.getAttribute("open")) === null)
-    await details.locator("summary").click();
+    await details.locator(":scope > summary").click();
   await expect(details).toHaveAttribute("open", "");
 }
 
