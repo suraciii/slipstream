@@ -1,6 +1,7 @@
 //! Metadata sidecar records and the bounded work admission they describe:
 //! what the owner hands to the metadata supervisor and what it reads back.
 
+use super::{DatabaseName, StateDirectory};
 use rusqlite::{Connection, OptionalExtension, params};
 
 /// Metadata work runs on the state owner, excluding lifecycle mutations.
@@ -63,6 +64,8 @@ pub enum ObservedSidecarState {
 }
 
 pub struct MetadataContext<'a> {
+    state: &'a StateDirectory,
+    database_name: &'a DatabaseName,
     connection: &'a Connection,
     record: MetadataRecord,
     candidate_path: String,
@@ -77,6 +80,9 @@ impl MetadataContext<'_> {
         &self,
         observation: &ObservedSidecar,
     ) -> Result<u64, MetadataStoreError> {
+        self.state
+            .admit_sidecars(self.database_name)
+            .map_err(|_| MetadataStoreError::Storage)?;
         let transaction = self
             .connection
             .unchecked_transaction()
@@ -201,6 +207,8 @@ impl MetadataContext<'_> {
 }
 
 pub(super) fn metadata_context<'a>(
+    state: &'a StateDirectory,
+    database_name: &'a DatabaseName,
     connection: &'a Connection,
     photo_id: &str,
 ) -> Result<MetadataContext<'a>, MetadataStoreError> {
@@ -237,6 +245,8 @@ pub(super) fn metadata_context<'a>(
             retired_generation: row.get::<_, i64>(4)? as u64, observed_size: row.get::<_, Option<i64>>(5)?.map(|size| size as u64), observed_mtime_ms: row.get(6)?, observed_digest: row.get(7)? }),
     ).optional().map_err(|_| MetadataStoreError::Storage)?;
     Ok(MetadataContext {
+        state,
+        database_name,
         connection,
         candidate_path,
         record: MetadataRecord {
@@ -325,6 +335,29 @@ mod tests {
                 .unwrap(),
             Err(metadata::MetadataStoreError::OriginalUnavailable)
         );
+        persistence.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn record_observation_refuses_when_sidecar_admission_is_present() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_base, persistence, path) = metadata_fixture();
+        let sidecar = path.with_file_name("library.sqlite-wal");
+        let sidecar_for_work = sidecar.clone();
+        let result = persistence
+            .with_metadata_receiver("photo".into(), move |context| {
+                fs::write(&sidecar_for_work, b"operator recovery data")
+                    .map_err(|_| metadata::MetadataStoreError::Storage)?;
+                fs::set_permissions(&sidecar_for_work, fs::Permissions::from_mode(0o600))
+                    .map_err(|_| metadata::MetadataStoreError::Storage)?;
+                context.record_observation(&metadata_observation(7))
+            })
+            .unwrap()
+            .await
+            .unwrap();
+        assert_eq!(result, Err(metadata::MetadataStoreError::Storage));
+        let _ = fs::remove_file(&sidecar);
         persistence.shutdown().unwrap();
     }
 

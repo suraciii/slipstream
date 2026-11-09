@@ -1,4 +1,4 @@
-import type { NavigationDestination } from "./browser-navigation.js";
+import type { NavigationDestination } from "./navigation-address.js";
 import type {
   DestinationEstablishment,
   NavigationSession,

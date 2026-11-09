@@ -10,9 +10,11 @@ import {
   allPhotosDestination,
   gridDestination,
   type NavigationDestination,
-  type NavigationGridRestoration,
-  type NavigationOwner,
-  type NavigationTraversal,
+} from "./navigation-address.js";
+import type {
+  NavigationGridRestoration,
+  NavigationOwner,
+  NavigationTraversal,
 } from "./browser-navigation.js";
 import {
   destinationOrder,

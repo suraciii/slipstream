@@ -123,7 +123,7 @@ Complete labels MUST remain visible at every supported width and MUST NOT be sho
 
 The header budget MUST NOT compress targets below 44px. A truncated source title MUST remain complete to assistive technology and on pointer hover where available.
 
-The narrow Photo View header has a 50px reference height and MUST contain the back action, mono filename, and state chip. Its back target MUST be at least 44px. Its composition MUST remain within the owning viewport budgets.
+The narrow Photo View header has a 50px reference height and MUST contain the back action, visibly painted source title, mono filename, and state chip. The source title MAY truncate but MUST remain complete to assistive technology and on pointer hover. Its back target MUST be at least 44px. Its composition MUST remain within the owning viewport budgets.
 
 Photo View MUST omit the application bar at every width. The Photo header owns the back action and current Photo.
 
@@ -164,9 +164,9 @@ The matte MUST NOT appear in Grid or remain when the Preview is unavailable. It 
 | Desktop | `blur(90px) brightness(0.7) saturate(1.18)`  | `rgba(10,9,8,0)` to `rgba(10,9,8,0.46)` |
 | Narrow  | `blur(100px) brightness(0.55) saturate(1.2)` | 0.5 opacity                             |
 
-The fact line MUST use UI sans for state labels and mono for numeric or technical values. [Photo View](../library-browser/experience/spec.md#photo-view) owns which facts are primary or disclosed.
+The fact line MUST use UI sans for state labels and mono for numeric or technical values. It MAY use two rows at narrow widths; the capture time may span the first row, with Aperture, Shutter Speed, ISO, and Focal Length aligned beneath. [Photo View](../library-browser/experience/spec.md#photo-view) owns which facts are primary or disclosed.
 
-The filmstrip uses 72 by 48 thumbnails at 65% opacity and a 1px boundary. The current thumbnail MUST use full opacity and a 2px attention outline. The filmstrip MUST yield to the Preview and review dock in short viewports.
+The filmstrip uses 72 by 48 thumbnails at 65% opacity and a 1px boundary. The current thumbnail MUST use full opacity and a 2px attention outline. The filmstrip MUST yield to the Preview and review dock on narrow or short viewports where the primary controls would otherwise leave the safe viewport.
 
 The review dock has three zones:
 

@@ -12,7 +12,7 @@ import type { ViewFilterConditions } from "./library-browser-view-contract.js";
 import {
   sameConditions,
   validCaptureTimeBound,
-} from "../model/browser-navigation.js";
+} from "../model/navigation-address.js";
 
 export type ViewOptionsFilterElements = Readonly<{
   ratingMinimum: HTMLSelectElement;

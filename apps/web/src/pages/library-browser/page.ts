@@ -45,6 +45,7 @@ import {
   restorationOutcomeMessage,
 } from "./model/removal-review-controller.js";
 import { createAlbumMutationController } from "./model/album-mutation-controller.js";
+
 import {
   createPhotoOwner,
   type PhotoAuthority,
@@ -55,11 +56,8 @@ import {
   createPreviewFailureRefresh,
 } from "./model/photo-preview-flow.js";
 import { createSavedPositionOwner } from "./model/saved-position-owner.js";
-import {
-  createNavigationOwner,
-  sameConditions,
-  sameSourceView,
-} from "./model/browser-navigation.js";
+import { createNavigationOwner } from "./model/browser-navigation.js";
+import { sameConditions, sameSourceView } from "./model/navigation-address.js";
 import { emptySourceMessage } from "./model/empty-source-message.js";
 import {
   RESTORE_REOPEN,

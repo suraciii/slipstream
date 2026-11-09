@@ -1,7 +1,7 @@
 //! Persistence tests for Photo removal, restore, Trash, and record cleanup.
 use super::*;
 use crate::persistence::Persistence;
-use crate::persistence::owner::unix_millis;
+use crate::persistence::identity::unix_millis;
 use crate::persistence::test_support::*;
 use crate::{
     AlbumMutation, LibraryRoot, PhotoOperationRemainder, PhotoQuery, PhotoQueryOrder,

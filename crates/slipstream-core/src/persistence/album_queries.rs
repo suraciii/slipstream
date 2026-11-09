@@ -2,7 +2,8 @@
 //! write error surface and mutation normalization live in `album_write`.
 
 use super::codecs::parse_selection_state;
-use super::owner::{MutationVersions, PersistenceError};
+use super::owner::PersistenceError;
+use super::write_session::MutationVersions;
 use crate::{
     AlbumBrowseMember, AlbumBrowseTarget, AlbumMember, AlbumQueryFilter, AlbumRecord, AlbumSummary,
     PhotoAlbumMembership, PhotoQueryError,

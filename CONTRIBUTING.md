@@ -190,6 +190,63 @@ Mixed imports with a default runtime binding remain runtime edges even when
 all named bindings are type-only. Pure type imports are excluded only from
 runtime-cycle detection, not from layer or public-API checks.
 
+Capture inspection keeps descriptor lifetime and revision checks in
+`crates/slipstream-core/src/capture.rs`. Its private `capture_metadata.rs` codec
+owns bounded JPEG/TIFF parsing and metadata normalization. Run the focused
+Capture checks with:
+
+```sh
+cargo test --locked -p slipstream-core capture -- --test-threads=1
+```
+
+Embedded metadata extraction keeps descriptor ownership, container walking,
+field state, and the public metadata model in
+`crates/slipstream-core/src/metadata/embedded.rs`. Its private
+`embedded_codec.rs` decodes bounded TIFF/EXIF and IPTC IIM payloads. Run the
+focused extraction checks with:
+
+```sh
+cargo test --locked -p slipstream-core metadata::embedded -- --test-threads=1
+```
+
+XMP parsing keeps the field model, checked patches, and public document API in
+`crates/slipstream-core/src/metadata/xmp.rs`. Its private `xmp_document.rs`
+decodes the lossless XML tree, and `xmp_language.rs` canonicalizes bounded
+BCP 47 language tags. Run the focused XMP checks with:
+
+```sh
+cargo test --locked -p slipstream-core metadata::xmp -- --test-threads=1
+```
+
+Preview request admission, waiting, and shutdown stay in
+`crates/slipstream-core/src/preview.rs`. Its private `preview_job.rs` executes
+one queued job from published facts to result. Run the focused Preview checks
+with:
+
+```sh
+cargo test --locked -p slipstream-core preview -- --test-threads=1
+```
+
+Export persistence keeps lifecycle transactions, receipts, and retention policy
+in `crates/slipstream-core/src/persistence/export.rs`. Its private
+`export_codec.rs` owns stored-row decoding and the all-or-nothing integrity
+boundary for attempt, artifact, source, recipe-digest, and workload validation.
+Run the focused Export persistence checks with:
+
+```sh
+cargo test --locked -p slipstream-core --lib persistence::export -- --test-threads=1
+```
+
+Photo decision admission keeps its write error surface and request
+normalization in `crates/slipstream-core/src/persistence/photo_decision_write.rs`.
+The persistence owner and the decision SQL module share that contract instead
+of duplicating validation. Run the focused checks with:
+
+```sh
+cargo test --locked -p slipstream-core --lib persistence::decisions -- --test-threads=1
+cargo test --locked -p slipstream-core --lib persistence::owner -- --test-threads=1
+```
+
 `test:cli` runs the focused command parser, output, and real CLI-to-service tests. It covers `status`, Library checks, Folder, Album, and Photo commands, including Preview downloads, without running the complete repository gate.
 
 `test:cli-package` verifies the source-bound Linux amd64 candidate archive, its checksum and fixed metadata, and no-replace behavior using synthetic inputs. It runs in `just ci-fast` and `just ci-full`. To build an actual candidate from a clean committed tree, run `python3 scripts/package-cli.py`; see [CLI Candidate Installation](docs/cli-install.md). Packaging does not publish a tag or upload a release.

@@ -9,8 +9,8 @@
 import {
   sameSourceView,
   type NavigationDestination,
-  type NavigationGridRestoration,
-} from "./browser-navigation.js";
+} from "./navigation-address.js";
+import type { NavigationGridRestoration } from "./browser-navigation.js";
 import type { FileLocationWindow } from "./file-location-owner.js";
 import type {
   SourceAuthority,

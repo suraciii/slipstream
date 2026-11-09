@@ -6,13 +6,15 @@ import {
   decodeAddress,
   encodeAddress,
   gridDestination,
+  sameConditions,
+  sameSourceView,
+  type NavigationDestination,
+} from "./navigation-address.js";
+import {
   NAVIGATION_STATE_NAMESPACE,
   NAVIGATION_STATE_VERSION,
   readEntryState,
-  sameConditions,
-  sameSourceView,
   writeEntryState,
-  type NavigationDestination,
 } from "./browser-navigation.js";
 
 /// The illustrative identifiers the design's examples use. They satisfy the

@@ -1,12 +1,25 @@
-use super::*;
-use crate::persistence::Persistence;
 use crate::persistence::admission::StateDirectory;
+use crate::persistence::owner::Command;
 use crate::persistence::test_support::*;
+use crate::persistence::{MutationError, Persistence};
 use crate::{
     ExplicitPhotoRemovalMutation, ExplicitPhotoRestoreMutation, PhotoRemovalTarget,
     PhotoStateField, PhotoStateMutation, PhotoStateValue, SelectionState, TrashSelection,
 };
 use rusqlite::Connection;
+use tokio::sync::oneshot;
+
+async fn set_photo_version(persistence: &Persistence, photo_id: &str, counter: u64) {
+    let (reply, receive) = oneshot::channel();
+    persistence
+        .submit(Command::SetPhotoVersion {
+            photo_id: photo_id.to_owned(),
+            counter,
+            reply,
+        })
+        .unwrap();
+    receive.await.unwrap().unwrap();
+}
 
 #[tokio::test]
 async fn explicit_removal_and_restore_replay_stale_evidence_and_restart_safe_receipts() {
@@ -147,6 +160,32 @@ async fn explicit_removal_and_restore_replay_stale_evidence_and_restart_safe_rec
         .unwrap();
     assert_eq!(restore_replay, restored);
 
+    let active_after_restore = persistence
+        .photo_receiver("photo-1")
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let repeat_restore = persistence
+        .restore_photos_explicit_receiver(restore_mutation.clone())
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(repeat_restore, restored);
+    let active_after_replay = persistence
+        .photo_receiver("photo-1")
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        active_after_replay.decision_version,
+        active_after_restore.decision_version
+    );
+
     let removed_after_restore = persistence
         .removed_photos_receiver(0, 10)
         .unwrap()
@@ -210,6 +249,119 @@ async fn explicit_removal_and_restore_replay_stale_evidence_and_restart_safe_rec
         second.removed_markers[0].removed_at_ms
     );
     persistence.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn removal_and_restore_fail_closed_when_versions_would_saturate() {
+    let (base, library, state, name, path) = fixture();
+    let canonical_root = library.canonical_path().to_string_lossy().into_owned();
+    seed(
+        &path,
+        include_str!("../../../../../compatibility/sqlite/schema-v8.sql"),
+    );
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute(
+            "INSERT INTO library_metadata(key,value) VALUES('canonical_root',?)",
+            [&canonical_root],
+        )
+        .unwrap();
+    add_recipe_test_photo(
+        &connection,
+        RecipeTestPhoto {
+            original_id: "original-1",
+            photo_id: "photo-1",
+            relative_path: "shoot/one-1.ARW",
+            kind: "raw",
+            available: true,
+            size: 17,
+            mtime_ms: 1_000.0,
+        },
+    );
+    connection
+        .execute(
+            "UPDATE photos SET selection_state='rejected' WHERE id='photo-1'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+
+    let persistence = Persistence::open(state, name, canonical_root).unwrap();
+    set_photo_version(&persistence, "photo-1", u64::MAX).await;
+    let current = persistence
+        .photo_receiver("photo-1")
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let saturated_removal = persistence
+        .remove_photos_explicit_receiver(ExplicitPhotoRemovalMutation {
+            operation_id: "saturated-removal".to_owned(),
+            photos: vec![PhotoRemovalTarget {
+                photo_id: "photo-1".to_owned(),
+                expected_selection_state: SelectionState::Rejected,
+                expected_decision_version: current.decision_version,
+                expected_removed_at_ms: None,
+            }],
+        })
+        .unwrap()
+        .await
+        .unwrap();
+    assert!(matches!(saturated_removal, Err(MutationError::Persistence)));
+    let removed = persistence
+        .removed_photos_receiver(0, 10)
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(removed.0.is_empty());
+
+    set_photo_version(&persistence, "photo-1", 0).await;
+    let current = persistence
+        .photo_receiver("photo-1")
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let remove = persistence
+        .remove_photos_explicit_receiver(ExplicitPhotoRemovalMutation {
+            operation_id: "saturated-restore-removal".to_owned(),
+            photos: vec![PhotoRemovalTarget {
+                photo_id: "photo-1".to_owned(),
+                expected_selection_state: SelectionState::Rejected,
+                expected_decision_version: current.decision_version,
+                expected_removed_at_ms: None,
+            }],
+        })
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(remove.counts.removed, 1);
+    let marker = remove.removed_markers[0].clone();
+
+    set_photo_version(&persistence, "photo-1", u64::MAX).await;
+    let saturated_restore = persistence
+        .restore_photos_explicit_receiver(ExplicitPhotoRestoreMutation {
+            operation_id: "saturated-restore".to_owned(),
+            photos: vec![marker],
+        })
+        .unwrap()
+        .await
+        .unwrap();
+    assert!(matches!(saturated_restore, Err(MutationError::Persistence)));
+    let removed = persistence
+        .removed_photos_receiver(0, 10)
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(removed.0.len(), 1);
+
+    persistence.shutdown().unwrap();
+    drop(base);
 }
 
 #[tokio::test]

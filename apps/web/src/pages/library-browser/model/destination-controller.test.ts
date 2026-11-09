@@ -6,7 +6,7 @@ import {
 } from "./destination-controller.js";
 import { createNavigationSession } from "./navigation-session.js";
 import { createSourceGridOwner } from "./source-grid-owner.js";
-import type { NavigationDestination } from "./browser-navigation.js";
+import type { NavigationDestination } from "./navigation-address.js";
 
 type Deferred<T> = {
   promise: Promise<T>;
