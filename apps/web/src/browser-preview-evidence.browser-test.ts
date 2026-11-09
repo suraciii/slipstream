@@ -34,11 +34,12 @@ test("a 640 × 480 Preview exposes source-limited detail at Fit", async ({
     "fit",
   );
   await openPhotoToolsView(page, "details");
-  await expect(page.locator("[data-source]")).toHaveText(
-    "JPEG · 640 × 480 · limited detail · Preview pixels are not enlarged",
+  await expect(page.locator("[data-source]")).toHaveText("JPEG · 640 × 480");
+  await expect(page.locator("[data-preview]")).toHaveAccessibleDescription(
+    /limited detail.*Preview pixels are not enlarged/,
   );
-  await expect(page.locator(".photo-tools-preview")).toMatchAriaSnapshot(
-    "- paragraph: /JPEG.*640 × 480.*limited detail.*Preview pixels are not enlarged/",
+  await expect(page.locator(".photo-tools-preview")).toContainText(
+    "JPEG · 640 × 480",
   );
 });
 
@@ -58,8 +59,10 @@ test("a normal-review Preview reports enlargement at 200% and clears it at Fit",
   expect([image.naturalWidth, image.naturalHeight]).toEqual([2560, 1920]);
   await openPhotoToolsView(page, "details");
   const evidence = page.locator("[data-source]");
-  await expect(evidence).toHaveText(
-    "JPEG · 2560 × 1920 · normal review · Preview pixels are not enlarged",
+  const preview = page.locator("[data-preview]");
+  await expect(evidence).toHaveText("JPEG · 2560 × 1920");
+  await expect(preview).toHaveAccessibleDescription(
+    /normal review.*Preview pixels are not enlarged/,
   );
 
   await openPhotoToolsView(page, "zoom");
@@ -72,11 +75,9 @@ test("a normal-review Preview reports enlargement at 200% and clears it at Fit",
   );
   expect((await previewImageGeometry(page)).width).toBeCloseTo(5120, 0);
   await openPhotoToolsView(page, "details");
-  await expect(evidence).toHaveText(
-    "JPEG · 2560 × 1920 · normal review · Enlarged Preview pixels cannot add source detail",
-  );
-  await expect(page.locator(".photo-tools-preview")).toMatchAriaSnapshot(
-    "- paragraph: /JPEG.*2560 × 1920.*normal review.*Enlarged Preview pixels cannot add source detail/",
+  await expect(evidence).toHaveText("JPEG · 2560 × 1920");
+  await expect(preview).toHaveAccessibleDescription(
+    /normal review.*Enlarged Preview pixels cannot add source detail/,
   );
 
   await openPhotoToolsView(page, "zoom");
@@ -86,8 +87,9 @@ test("a normal-review Preview reports enlargement at 200% and clears it at Fit",
     "fit",
   );
   await openPhotoToolsView(page, "details");
-  await expect(evidence).toHaveText(
-    "JPEG · 2560 × 1920 · normal review · Preview pixels are not enlarged",
+  await expect(evidence).toHaveText("JPEG · 2560 × 1920");
+  await expect(preview).toHaveAccessibleDescription(
+    /normal review.*Preview pixels are not enlarged/,
   );
 });
 
@@ -105,8 +107,10 @@ test("resizing across the Fit enlargement threshold preserves Preview capability
   const source = await image.getAttribute("src");
   await openPhotoToolsView(page, "details");
   const evidence = page.locator("[data-source]");
-  await expect(evidence).toHaveText(
-    "JPEG · 640 × 480 · limited detail · Preview pixels are not enlarged",
+  const preview = page.locator("[data-preview]");
+  await expect(evidence).toHaveText("JPEG · 640 × 480");
+  await expect(preview).toHaveAccessibleDescription(
+    /limited detail.*Preview pixels are not enlarged/,
   );
   expect((await previewImageGeometry(page)).width).toBeLessThan(640);
 
@@ -114,11 +118,9 @@ test("resizing across the Fit enlargement threshold preserves Preview capability
   await expect
     .poll(async () => (await previewImageGeometry(page)).width)
     .toBeGreaterThan(640);
-  await expect(evidence).toHaveText(
-    "JPEG · 640 × 480 · limited detail · Enlarged Preview pixels cannot add source detail",
-  );
-  await expect(page.locator(".photo-tools-preview")).toMatchAriaSnapshot(
-    "- paragraph: /JPEG.*640 × 480.*limited detail.*Enlarged Preview pixels cannot add source detail/",
+  await expect(evidence).toHaveText("JPEG · 640 × 480");
+  await expect(preview).toHaveAccessibleDescription(
+    /limited detail.*Enlarged Preview pixels cannot add source detail/,
   );
   await expect(page.locator("[data-preview]")).toHaveAttribute(
     "data-zoom-state",
@@ -135,8 +137,9 @@ test("resizing across the Fit enlargement threshold preserves Preview capability
   await expect
     .poll(async () => (await previewImageGeometry(page)).width)
     .toBeLessThan(640);
-  await expect(evidence).toHaveText(
-    "JPEG · 640 × 480 · limited detail · Preview pixels are not enlarged",
+  await expect(evidence).toHaveText("JPEG · 640 × 480");
+  await expect(preview).toHaveAccessibleDescription(
+    /limited detail.*Preview pixels are not enlarged/,
   );
   expect(
     await image.evaluate(

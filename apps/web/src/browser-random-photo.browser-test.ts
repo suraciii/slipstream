@@ -452,7 +452,7 @@ test("the action admits one attempt and presents its pending state", async ({
   await expect(page.locator('[data-photo-index="0"]')).toBeEnabled();
 });
 
-test("an Original Folder names itself and keeps the action beside its source actions", async ({
+test("an Original Folder names itself and keeps the wide action in the header", async ({
   page,
 }) => {
   const { base, root } = await fixture();
@@ -479,8 +479,12 @@ test("an Original Folder names itself and keeps the action beside its source act
     "Open a random Photo from Coast 2024 · Folder",
   );
   await openViewOptions(page);
-  // Browse actions and the source's own actions share the surface without
-  // collapsing into one row.
-  await expect(page.getByText("Browse actions", { exact: true })).toBeVisible();
+  // The wide Grid promotes the random action to the header, so the empty
+  // Browse actions group is hidden. Source actions remain in View options.
+  await expect(page.getByText("Browse actions", { exact: true })).toBeHidden();
+  await expect(
+    page.locator("[data-grid-tools] [data-random-photo]"),
+  ).toBeVisible();
+  await expect(page.getByText("Source actions", { exact: true })).toBeVisible();
   await expect(page.locator("[data-refresh]")).toBeVisible();
 });

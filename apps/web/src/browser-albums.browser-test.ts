@@ -164,7 +164,7 @@ test("the current photo joins and leaves albums from the photo view", async ({
   await expect(page.locator("[data-status]")).toHaveText(
     "Removed from the Album. It stays in this open view until reopened.",
   );
-  await expect(page.getByText("1 / 1")).toBeVisible();
+  await expect(page.locator("[data-position]")).toHaveText("1 / 1");
   await expect(page.locator("[data-membership-list] li")).toHaveCount(0);
   await closePhotoTools(page);
   await closePhotoTools(page);
@@ -495,11 +495,11 @@ test("persists manual navigation and advanced current Photo across leave, reload
     albumId,
     page.getByRole("button", { name: /Photo 2 of 3/ }),
   );
-  await expect(page.getByText("2 / 3")).toBeVisible();
+  await expect(page.locator("[data-position]")).toHaveText("2 / 3");
   await page.reload();
   // The Photo address preserves the destination across a reload, so the
   // reloaded document reopens the same Photo instead of the Album Grid.
-  await expect(page.getByText("2 / 3")).toBeVisible();
+  await expect(page.locator("[data-position]")).toHaveText("2 / 3");
   await openPhotoToolsView(page, "tools");
   await closePhotoTools(page);
   await actionWithProgress(page, albumId, () =>
@@ -520,7 +520,7 @@ test("persists manual navigation and advanced current Photo across leave, reload
     albumId,
     page.getByRole("button", { name: /Photo 3 of 3/ }),
   );
-  await expect(page.getByText("3 / 3")).toBeVisible();
+  await expect(page.locator("[data-position]")).toHaveText("3 / 3");
 });
 
 test("a CLI-created Album opens in the Web with its ordered members and decisions", async ({
