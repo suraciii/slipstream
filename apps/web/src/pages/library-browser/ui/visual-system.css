@@ -188,8 +188,8 @@
 }
 
 .source-card span {
-  color: var(--fg-3);
-  font: 10.5px var(--font-mono);
+  color: var(--fg-2);
+  font: 0.75rem var(--font-ui);
 }
 
 .source-card.active span {
@@ -203,8 +203,8 @@
   min-height: 30px;
   padding: 0 8px;
   border: 0;
-  color: var(--fg-3);
-  font: 10px var(--font-mono);
+  color: var(--fg-2);
+  font: 0.75rem var(--font-ui);
 }
 
 .album-new {
@@ -225,8 +225,8 @@
 }
 
 .folder-page-label {
-  font: 10px var(--font-mono);
-  color: var(--fg-3);
+  font: 0.75rem var(--font-ui);
+  color: var(--fg-2);
 }
 
 .album-row {
@@ -252,8 +252,8 @@
 }
 
 .source-width-status {
-  color: var(--fg-3);
-  font: 10px var(--font-mono);
+  color: var(--fg-2);
+  font: 0.75rem var(--font-ui);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1460,11 +1460,75 @@
 }
 
 .options-body h3 {
-  color: var(--fg-3);
-  font: 0.75rem var(--font-ui);
-  font-weight: 500;
-  letter-spacing: 0.04em;
+  color: var(--fg-2);
+  font: 600 0.8rem var(--font-ui);
+  letter-spacing: 0.02em;
   text-transform: none;
+}
+
+[data-reset-filters] {
+  justify-self: start;
+  min-height: 32px;
+  padding-inline: 0.5rem;
+}
+
+/* Source and browse actions are immediate; keep them compact instead of
+   stretching recovery and maintenance controls across the sheet. */
+.options-body > .options-browse-actions,
+.options-body > .options-source-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.options-body > .options-browse-actions > h3,
+.options-body > .options-source-actions > h3,
+.options-body > .options-source-actions > .folder-album-controls {
+  flex-basis: 100%;
+}
+
+.options-advanced {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.options-advanced > summary {
+  color: var(--fg-2);
+  cursor: pointer;
+  font: 600 0.8rem/1.4 var(--font-ui);
+}
+
+.options-advanced-fields {
+  display: grid;
+  gap: 0.5rem;
+  padding-top: 0.35rem;
+}
+
+.options-help {
+  margin: 0;
+  color: var(--fg-2);
+  font: 0.75rem/1.4 var(--font-ui);
+}
+
+@media (max-width: 360px) {
+  .options-advanced-fields .options-field {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.25rem;
+  }
+
+  .options-advanced-fields .options-field select,
+  .options-advanced-fields .options-field input {
+    width: 100%;
+    max-width: none;
+  }
+}
+
+/* The wide Grid promotes the random action to the header, so the group can
+   be empty there; an empty heading is noise. */
+.options-browse-actions:not(:has(button:not([hidden]))) {
+  display: none;
 }
 
 .rating-wheel::before {

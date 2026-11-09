@@ -97,16 +97,17 @@ export function createMetadataPanel(
   const render = () => {
     host.replaceChildren();
     host.classList.add("external-metadata-panel");
-    host.append(element("h4", "External Metadata"));
     status = element("p");
     status.dataset.externalMetadataStatus = "";
     status.setAttribute("role", "status");
+    status.hidden = true;
     host.append(status);
     const refresh = button("Refresh inspection", () => void inspect());
     refresh.dataset.externalMetadataRefresh = "";
     refresh.disabled = saving();
     host.append(refresh);
     if (!facts || !photoId) {
+      status.hidden = false;
       status.textContent = photoId
         ? "Inspecting metadata…"
         : "No Photo selected.";
@@ -118,8 +119,7 @@ export function createMetadataPanel(
     const changedEvidence = drafts.changed(id, evidence);
     const busy = drafts.isSaving(id);
     const reason = !observed.saveAvailable
-      ? (observed.saveUnavailableReason ??
-        "This deployment cannot safely save Sidecars.")
+      ? "Metadata editing is unavailable in this deployment."
       : busy
         ? "An admitted Save for this Photo is still settling."
         : changedEvidence
@@ -127,11 +127,11 @@ export function createMetadataPanel(
           : draft?.needsInspection
             ? "Inspect current metadata and explicitly use that inspection before a new Save."
             : "";
+    // Routine inspection needs no status line; messages and drafts do.
     status.textContent =
       messages.get(id) ??
-      (draft
-        ? "Unsaved changes retained for this Photo."
-        : "Current metadata inspected. No pending Sidecar changes.");
+      (draft ? "Unsaved changes retained for this Photo." : "");
+    status.hidden = status.textContent === "";
     if (reason) host.append(element("p", reason));
     const discard = button("Discard changes", () => {
       drafts.discard(id);
@@ -160,7 +160,7 @@ export function createMetadataPanel(
       for (const [key, label] of metadataFields) {
         const original = draft.facts.fields[key];
         if (!original) continue;
-        baseline.append(element("h5", label));
+        baseline.append(element("h4", label));
         displaySource(baseline, original);
       }
       host.append(baseline);
@@ -168,6 +168,7 @@ export function createMetadataPanel(
     const ensureDraft = () => {
       draft = drafts.admit(id, observed, evidence);
       if (!draft) {
+        status.hidden = false;
         status.textContent =
           "The session holds 32 metadata drafts. Discard or save another Photo's changes before editing this Photo. This input was not retained.";
         return undefined;
@@ -194,23 +195,39 @@ export function createMetadataPanel(
         "p",
         `Observed Sidecar: ${observed.evidence.sidecar.state}${observed.evidence.sidecar.location ? ` — ${observed.evidence.sidecar.location}` : ""}${observed.evidence.sidecar.reason ? ` — ${observed.evidence.sidecar.reason}` : ""}`,
       ),
+      element(
+        "p",
+        `Save: ${observed.saveAvailable ? "available" : (observed.saveUnavailableReason ?? "unavailable")}`,
+      ),
     );
     for (const candidate of observed.association.candidates)
       sourceEvidence.append(element("p", candidate));
+    const absentOrdinary: string[] = [];
     for (const [key, label, kind] of metadataFields) {
       const field = observed.fields[key];
       if (!field) continue;
       const section = element("section");
       section.dataset.metadataField = key;
-      section.append(element("h5", label));
+      section.append(element("h4", label));
       const isOrdinary =
         key === "dc:title" || key === "dc:description" || key === "dc:subject";
-      (isOrdinary ? ordinary : advanced).append(section);
+      // Read-only deployments do not need three separate "absent" rows. The
+      // per-field evidence stays inspectable below, and one compact line
+      // answers the routine question.
+      const readOnlyAbsent =
+        isOrdinary &&
+        field.state === "absent" &&
+        field.value === undefined &&
+        field.inferredValue === undefined &&
+        (!observed.saveAvailable || !field.writable);
+      if (readOnlyAbsent) absentOrdinary.push(label);
+      else (isOrdinary ? ordinary : advanced).append(section);
       const sources = disclosure(`${label}: source values`);
       sources.append(element("p", key));
       displaySource(sources, field);
       for (const source of field.sources) displaySource(sources, source);
       sourceEvidence.append(sources);
+      if (readOnlyAbsent) continue;
       if (field.inferredValue !== undefined) {
         section.append(element("p", "Inferred, not stored:"));
         displayValue(section, field.inferredValue);
@@ -414,20 +431,22 @@ export function createMetadataPanel(
             control.disabled = true;
           });
     }
+    if (absentOrdinary.length)
+      ordinary.append(element("p", `Not set: ${absentOrdinary.join(", ")}.`));
     host.append(ordinary, advanced);
     const capture = disclosure(
       "Original capture facts and Sidecar representations",
     );
     for (const [key, fact] of Object.entries(observed.captureFacts)) {
       const row = element("section");
-      row.append(element("h5", `${key} · ${fact.identifier} · ${fact.unit}`));
+      row.append(element("h4", `${key} · ${fact.identifier} · ${fact.unit}`));
       displaySource(row, fact);
       capture.append(row);
     }
     for (const [key, field] of Object.entries(observed.fields))
       if (!metadataFields.some(([supported]) => supported === key)) {
         const row = element("section");
-        row.append(element("h5", `${key} (read-only representation)`));
+        row.append(element("h4", `${key} (read-only representation)`));
         displaySource(row, field);
         for (const source of field.sources) displaySource(row, source);
         capture.append(row);
@@ -553,6 +572,7 @@ export function createMetadataPanel(
       }
     } catch (error) {
       if (!current(id, epoch) || signal.aborted) return;
+      status.hidden = false;
       status.textContent = `${error instanceof Error ? error.message : "Read Metadata failed."}${drafts.get(id) ? " Your unsaved draft is retained. Refresh inspection to continue." : ""}`;
     }
   };

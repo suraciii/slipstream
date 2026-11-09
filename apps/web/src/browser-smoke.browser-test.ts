@@ -231,7 +231,7 @@ test("an idle browser reports a lost connection from the status probe", async ({
   // A decision stays refused, including through the keyboard path.
   await page.keyboard.press("p");
   await expect(page.locator("[data-selection]")).toHaveText("Unflagged");
-  await expect(page.getByText("1 / 2")).toBeVisible();
+  await expect(page.locator("[data-position]")).toHaveText("1 / 2");
   await openPhotoTools(page);
   await expect(page.locator("[data-dock-undo]")).toBeDisabled();
 

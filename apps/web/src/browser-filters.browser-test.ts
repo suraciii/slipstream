@@ -16,12 +16,28 @@ import {
 } from "./browser-test-support/fixtures.js";
 import {
   applyViewOptions,
+  openAdvancedFilters,
   openSources,
   openViewOptions,
   waitForGridFrame,
 } from "./browser-test-support/surfaces.js";
 
 setupBrowserSmoke();
+
+test("View options keeps advanced conditions behind one disclosure", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 1);
+  const running = await server(base, root);
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 1 Photo$/)).toBeVisible();
+  await openViewOptions(page);
+  const advanced = page.locator("[data-advanced-filters]");
+  await expect(advanced).not.toHaveAttribute("open", "");
+  await advanced.locator("summary").click();
+  await expect(advanced).toHaveAttribute("open", "");
+});
 
 /// The rating and Capture Time scenarios share six JPEG Photos:
 /// a–e have Capture Times from January 2 through January 6; f has none.
@@ -121,6 +137,7 @@ test("a selected high-rated view keeps its exact filtered count", async ({
   // Selection State and Rating combine with AND, and the Rating bound is
   // inclusive, so a picked Photo with Rating 4 or more matches.
   await openViewOptions(page);
+  await openAdvancedFilters(page);
   await page.locator("[data-filter-select]").selectOption("picked");
   await page.locator("[data-rating-min-select]").selectOption("4");
   await applyViewOptions(page);
@@ -161,6 +178,7 @@ test("a selected high-rated view keeps its exact filtered count", async ({
 
   // Rating 0 means No Rating, so a maximum of 0 matches only the unrated Photo.
   await openViewOptions(page);
+  await openAdvancedFilters(page);
   await page.locator("[data-rating-min-select]").selectOption("");
   await page.locator("[data-rating-max-select]").selectOption("0");
   await applyViewOptions(page);
@@ -172,6 +190,7 @@ test("a selected high-rated view keeps its exact filtered count", async ({
 
   // Clearing returns to the source default filter without changing source.
   await openViewOptions(page);
+  await openAdvancedFilters(page);
   await page.locator("[data-filter-select]").selectOption("all");
   await page.locator("[data-rating-max-select]").selectOption("");
   await applyViewOptions(page);
@@ -196,6 +215,7 @@ test("a RAW-only view keeps RAW and same-basename JPEG Photos independent", asyn
   await waitForGridFrame(page);
 
   await openViewOptions(page);
+  await openAdvancedFilters(page);
   await page.locator("[data-kind-select]").selectOption("raw");
   await applyViewOptions(page);
 
@@ -211,6 +231,7 @@ test("a RAW-only view keeps RAW and same-basename JPEG Photos independent", asyn
   // The complementary condition includes the same-basename JPEG and all
   // five other JPEGs, without merging it into the RAW Photo.
   await openViewOptions(page);
+  await openAdvancedFilters(page);
   await page.locator("[data-kind-select]").selectOption("jpeg");
   await applyViewOptions(page);
   await expect(page).toHaveURL(/kind=jpeg/);
@@ -256,6 +277,7 @@ test("an unavailable Original describes the Original File, not Preview readiness
   await waitForGridFrame(page);
 
   await openViewOptions(page);
+  await openAdvancedFilters(page);
   await page.locator("[data-available-select]").selectOption("false");
   await applyViewOptions(page);
 
@@ -294,6 +316,7 @@ test("an unavailable Original describes the Original File, not Preview readiness
 
   // The complementary condition keeps the other five.
   await openViewOptions(page);
+  await openAdvancedFilters(page);
   await page.locator("[data-available-select]").selectOption("true");
   await applyViewOptions(page);
   await expect(page).toHaveURL(/available=true/);
@@ -319,6 +342,7 @@ test("a Capture Time range is inclusive below and exclusive above", async ({
   // The lower bound includes its own second; the upper bound excludes it, and
   // the Photo without a Capture Time never matches a supplied bound.
   await openViewOptions(page);
+  await openAdvancedFilters(page);
   await page.locator("[data-captured-from]").fill(CAPTURE_TIMES.b);
   await page.locator("[data-captured-before]").fill(CAPTURE_TIMES.e);
   await applyViewOptions(page);
@@ -326,6 +350,7 @@ test("a Capture Time range is inclusive below and exclusive above", async ({
   await expect(page).toHaveURL(/captured-from=2026-01-03T09%3A00%3A45/);
   await expect(page).toHaveURL(/captured-before=2026-01-06T09%3A00%3A59/);
   await openViewOptions(page);
+  await openAdvancedFilters(page);
   await expect(page.locator("[data-captured-from]")).toHaveValue(
     CAPTURE_TIMES.b,
   );
@@ -358,6 +383,7 @@ test("Refresh, Retry, and Snapshot expiry retain the committed filter", async ({
   await page.goto(running.url);
   await expect(page.getByText(/^Ready · 6 Photos$/)).toBeVisible();
   await openViewOptions(page);
+  await openAdvancedFilters(page);
   await page.locator("[data-rating-min-select]").selectOption("4");
   await page.locator("[data-kind-select]").selectOption("jpeg");
   await page.locator("[data-available-select]").selectOption("true");
@@ -396,6 +422,7 @@ test("Refresh, Retry, and Snapshot expiry retain the committed filter", async ({
   });
   const refresh = async () => {
     await openViewOptions(page);
+    await openAdvancedFilters(page);
     await page.locator("[data-refresh]").click();
   };
   const assertFiltered = async () => {
@@ -432,6 +459,7 @@ test("Reset is staged, Cancel discards it, and Apply preserves order and size", 
   await page.goto(running.url);
   await expect(page.getByText(/^Ready · 6 Photos$/)).toBeVisible();
   await openViewOptions(page);
+  await openAdvancedFilters(page);
   await page.locator("[data-filter-select]").selectOption("unflagged");
   await page.locator("[data-kind-select]").selectOption("jpeg");
   await applyViewOptions(page);
@@ -444,6 +472,7 @@ test("Reset is staged, Cancel discards it, and Apply preserves order and size", 
     await route.continue();
   });
   await openViewOptions(page);
+  await openAdvancedFilters(page);
   await page.locator("[data-sort-select]").selectOption("capture-time-desc");
   await page.locator("[data-size-select]").selectOption("large");
   await page.locator("[data-reset-filters]").click();
@@ -453,6 +482,7 @@ test("Reset is staged, Cancel discards it, and Apply preserves order and size", 
   expect(opens).toHaveLength(0);
   await page.locator("[data-view-options-cancel]").click();
   await openViewOptions(page);
+  await openAdvancedFilters(page);
   await expect(page.locator("[data-filter-select]")).toHaveValue("unflagged");
   await expect(page.locator("[data-kind-select]")).toHaveValue("jpeg");
   await page.locator("[data-sort-select]").selectOption("capture-time-desc");
@@ -464,6 +494,7 @@ test("Reset is staged, Cancel discards it, and Apply preserves order and size", 
   expect(page.url()).not.toContain("kind=");
   await expect.poll(() => opens.length).toBe(1);
   await openViewOptions(page);
+  await openAdvancedFilters(page);
   await expect(page.locator("[data-size-select]")).toHaveValue("large");
   await expect(page.locator("[data-sort-select]")).toHaveValue(
     "capture-time-desc",
@@ -481,6 +512,7 @@ test("immediate Refresh discards dirty choices and reopens the committed filter"
   await page.goto(running.url);
   await expect(page.getByText(/^Ready · 6 Photos$/)).toBeVisible();
   await openViewOptions(page);
+  await openAdvancedFilters(page);
   await page.locator("[data-rating-min-select]").selectOption("4");
   await applyViewOptions(page);
   await expect(page.locator(".photo-cell")).toHaveCount(3);
@@ -491,6 +523,7 @@ test("immediate Refresh discards dirty choices and reopens the committed filter"
     await route.continue();
   });
   await openViewOptions(page);
+  await openAdvancedFilters(page);
   await page.locator("[data-filter-select]").selectOption("unflagged");
   await page.locator("[data-rating-min-select]").selectOption("3");
   await page.locator("[data-sort-select]").selectOption("capture-time-desc");
@@ -500,6 +533,7 @@ test("immediate Refresh discards dirty choices and reopens the committed filter"
   expect(opens[0]).toMatchObject({ ratingMinimum: 4 });
   await expect(page.locator(".photo-cell")).toHaveCount(3);
   await openViewOptions(page);
+  await openAdvancedFilters(page);
   await expect(page.locator("[data-filter-select]")).toHaveValue("all");
   await expect(page.locator("[data-rating-min-select]")).toHaveValue("4");
   await expect(page.locator("[data-sort-select]")).toHaveValue(
@@ -520,6 +554,7 @@ test("zero matches offer immediate Clear filters without changing order or size"
   await page.goto(`${running.url}/?source=album&albumId=${albumId}`);
   await expect(page.locator(".photo-cell")).toHaveCount(6);
   await openViewOptions(page);
+  await openAdvancedFilters(page);
   await page.locator("[data-kind-select]").selectOption("raw");
   await page.locator("[data-sort-select]").selectOption("capture-time-desc");
   await page.locator("[data-size-select]").selectOption("large");
@@ -540,6 +575,7 @@ test("zero matches offer immediate Clear filters without changing order or size"
   expect(page.url()).not.toContain("kind=");
   expect(await page.evaluate(() => history.length)).toBe(historyLength);
   await openViewOptions(page);
+  await openAdvancedFilters(page);
   await expect(page.locator("[data-size-select]")).toHaveValue("large");
   await expect(page.locator("[data-sort-select]")).toHaveValue(
     "capture-time-desc",
@@ -560,6 +596,7 @@ test("invalid camera-local bounds never open a source", async ({ page }) => {
   });
   const original = page.url();
   await openViewOptions(page);
+  await openAdvancedFilters(page);
   const from = page.locator("[data-captured-from]");
   const before = page.locator("[data-captured-before]");
   await from.fill("2026-10-29T12:30:45");
@@ -583,6 +620,18 @@ test("invalid camera-local bounds never open a source", async ({ page }) => {
     await before.evaluate(
       (input) => (input as HTMLInputElement).validity.valid,
     ),
+  ).toBe(false);
+  // Apply must reveal an invalid control that is inside a closed advanced
+  // disclosure instead of silently refusing to leave the dialog.
+  const advanced = page.locator("[data-advanced-filters]");
+  await from.fill("not-a-camera-time");
+  await advanced.locator("summary").click();
+  await expect(advanced).not.toHaveAttribute("open", "");
+  await page.locator("[data-view-options-apply]").click();
+  await expect(advanced).toHaveAttribute("open", "");
+  await expect(from).toBeFocused();
+  expect(
+    await from.evaluate((input) => (input as HTMLInputElement).validity.valid),
   ).toBe(false);
   expect(opens).toHaveLength(0);
   expect(page.url()).toBe(original);

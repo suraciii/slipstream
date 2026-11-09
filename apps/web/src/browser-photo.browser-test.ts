@@ -45,7 +45,7 @@ test("starts from a Album, shows facts, accessible controls, and resumes persist
   let running = await server(base, root);
   const { albumId } = await createAlbum(running.url, "Picks");
   await startReview(page, running.url, "Picks", albumId);
-  await expect(page.getByText("1 / 2")).toBeVisible();
+  await expect(page.locator("[data-position]")).toHaveText("1 / 2");
   await expect(page.locator(".app-header")).toBeHidden();
   await expect(page.locator("[data-selection]")).toHaveText("Unflagged");
   await expect(
@@ -55,7 +55,10 @@ test("starts from a Album, shows facts, accessible controls, and resumes persist
     page.getByRole("button", { name: "More", exact: true }),
   ).toBeVisible();
   await openPhotoToolsView(page, "details");
-  await expect(page.locator("[data-source]")).toContainText("limited detail");
+  await expect(page.locator("[data-source]")).toHaveText(/JPEG · \d+ × \d+/);
+  await expect(page.locator("[data-preview]")).toHaveAccessibleDescription(
+    /Preview detail is limited/,
+  );
   await openPhotoToolsView(page, "zoom");
   for (const name of [
     "Fit Window",
@@ -82,12 +85,14 @@ test("starts from a Album, shows facts, accessible controls, and resumes persist
   await closePhotoTools(page);
   await page.locator("[data-dock-pick]").click();
   await expect(page.locator("[data-selection]")).toHaveText("Picked");
-  await expect(page.getByText("1 / 2")).toBeVisible();
+  // Routine decision success stays in the controls instead of a footer status.
+  await expect(page.locator("[data-status]")).toBeHidden();
+  await expect(page.locator("[data-position]")).toHaveText("1 / 2");
   await page
     .locator("[data-photo-navigation]")
     .getByRole("button", { name: "Next", exact: true })
     .click();
-  await expect(page.getByText("2 / 2")).toBeVisible();
+  await expect(page.locator("[data-position]")).toHaveText("2 / 2");
   // More review actions change state in place; explicit Next advances the
   // Album position that the restart below verifies.
 
@@ -103,7 +108,7 @@ test("starts from a Album, shows facts, accessible controls, and resumes persist
     albumId,
     page.getByRole("button", { name: /Photo 2 of 2/ }),
   );
-  await expect(page.getByText("2 / 2")).toBeVisible();
+  await expect(page.locator("[data-position]")).toHaveText("2 / 2");
   await actionWithProgress(page, albumId, () =>
     page.keyboard.press("ArrowLeft"),
   );
@@ -688,7 +693,7 @@ test("Preview zoom is explicit, bounded, and never records a decision", async ({
   expect(afterPan.left - beforePan.left).toBeCloseTo(Math.min(limitX, 60), 0);
   expect(afterPan.top - beforePan.top).toBeCloseTo(Math.min(limitY, 10), 0);
   expect(stateRequests).toBe(0);
-  await expect(page.getByText("1 / 2")).toBeVisible();
+  await expect(page.locator("[data-position]")).toHaveText("1 / 2");
 
   // Dragging far cannot pull the image out of view.
   await page.mouse.move(center.x, center.y);
@@ -743,7 +748,7 @@ test("Preview zoom is explicit, bounded, and never records a decision", async ({
   // action, so the disclosure closes for it.
   await closePhotoTools(page);
   await page.keyboard.press("ArrowRight");
-  await expect(page.getByText("2 / 2")).toBeVisible();
+  await expect(page.locator("[data-position]")).toHaveText("2 / 2");
   await waitForLoadedReviewImage(page);
   await expect(preview).toHaveAttribute("data-zoom-state", "fit");
   await openPhotoToolsView(page, "zoom");

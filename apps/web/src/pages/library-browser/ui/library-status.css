@@ -4,10 +4,39 @@
   z-index: 5;
   right: max(0.75rem, env(safe-area-inset-right));
   bottom: max(0.75rem, env(safe-area-inset-bottom));
-  display: grid;
-  justify-items: end;
+  display: flex;
+  flex-direction: column-reverse;
+  align-items: flex-end;
   gap: 0.35rem;
   max-width: min(22rem, calc(100% - 1.5rem));
+  /* Only the visible button and notice should take pointer input. */
+  pointer-events: none;
+}
+
+.library-status-entry > * {
+  pointer-events: auto;
+}
+
+/* Keep the entry above the Photo View review dock and the Grid batch tray;
+   the notice opens upward so the primary controls stay clickable. */
+.app-shell:has(.photo-view:not([hidden])) .library-status-entry {
+  bottom: calc(max(0.75rem, env(safe-area-inset-bottom)) + 7.5rem);
+}
+
+.app-shell:has(.grid-batch:not([hidden])) .library-status-entry {
+  bottom: calc(
+    1rem + var(--grid-batch-height, var(--batch-tray-height, 4.5rem)) + 0.5rem
+  );
+}
+
+.library-status-entry[data-tone="failure"] [data-library-status-toggle] {
+  border-color: var(--warning);
+  color: var(--warning);
+}
+
+.library-status-entry[data-tone="complete"] [data-library-status-toggle] {
+  border-color: var(--selected);
+  color: var(--selected);
 }
 
 .library-status-notice {

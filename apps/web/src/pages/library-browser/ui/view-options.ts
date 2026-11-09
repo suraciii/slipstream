@@ -142,7 +142,7 @@ export function createViewOptions({
   // One owner for the staged fact conditions: Rating bounds, Original kind,
   // Original availability, and the Capture Time range. They commit together
   // with order and Selection State on one Apply.
-  const filters = createViewOptionsFilters(filterControls);
+  const filters = createViewOptionsFilters(filterControls, advancedFilters);
   const randomPhoto = required<HTMLButtonElement>(root, "[data-random-photo]");
   const gridTools = required<HTMLElement>(root, "[data-grid-tools]");
   const browseActions = required<HTMLElement>(root, "[data-browse-actions]");
@@ -193,8 +193,7 @@ export function createViewOptions({
     sortSelect.value = committedOrder;
     filterSelect.value = committedFilter;
     filters.reset(committedConditions);
-    if (advancedFilters)
-      advancedFilters.open = filters.committedLabels().length > 0;
+    if (advancedFilters) advancedFilters.open = filters.advancedActive();
     syncDraftNotice();
   };
   viewOptionsDialog.addEventListener("close", () => {

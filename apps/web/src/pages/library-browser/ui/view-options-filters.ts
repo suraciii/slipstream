@@ -81,6 +81,9 @@ export interface ViewOptionsFilters {
   read(): ViewFilterConditions | undefined;
   draftChanged(): boolean;
   committedLabels(): ReadonlyArray<string>;
+  /// Whether a committed non-default advanced condition is active, so the
+  /// dialog opens the advanced disclosure instead of hiding a value.
+  advancedActive(): boolean;
 }
 
 const fillSelect = (
@@ -99,10 +102,16 @@ const fillSelect = (
 
 export function createViewOptionsFilters(
   elements: ViewOptionsFilterElements,
+  advancedFilters?: HTMLDetailsElement | null,
 ): ViewOptionsFilters {
   const { ratingMinimum, ratingMaximum, kindSelect, availableSelect } =
     elements;
   const { capturedFrom, capturedBefore } = elements;
+  const reportInvalid = (control: HTMLInputElement | HTMLSelectElement) => {
+    if (advancedFilters?.contains(control)) advancedFilters.open = true;
+    control.focus();
+    control.reportValidity();
+  };
   fillSelect(ratingMinimum, RATING_OPTIONS);
   fillSelect(ratingMaximum, MAXIMUM_RATING_OPTIONS);
   fillSelect(kindSelect, KIND_OPTIONS);
@@ -219,7 +228,7 @@ export function createViewOptionsFilters(
         ratingMaximum.setCustomValidity(
           "Rating maximum must not be less than the minimum.",
         );
-        ratingMaximum.reportValidity();
+        reportInvalid(ratingMaximum);
         return undefined;
       }
       for (const [control, value] of [
@@ -230,7 +239,7 @@ export function createViewOptionsFilters(
           control.setCustomValidity(
             "Enter a camera-local time as YYYY-MM-DDTHH:MM:SS, without a time zone.",
           );
-          control.reportValidity();
+          reportInvalid(control);
           return undefined;
         }
       }
@@ -240,7 +249,7 @@ export function createViewOptionsFilters(
         conditions.capturedFrom >= conditions.capturedBefore
       ) {
         capturedBefore.setCustomValidity("Before must be later than From.");
-        capturedBefore.reportValidity();
+        reportInvalid(capturedBefore);
         return undefined;
       }
       return conditions;
@@ -250,6 +259,14 @@ export function createViewOptionsFilters(
     },
     committedLabels() {
       return labels(committed);
+    },
+    advancedActive() {
+      return (
+        committed.kind !== undefined ||
+        committed.available !== undefined ||
+        committed.capturedFrom !== undefined ||
+        committed.capturedBefore !== undefined
+      );
     },
   };
 }

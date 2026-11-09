@@ -329,6 +329,25 @@ export async function openPhotoEditorAdvanced(page: Page) {
   await expect(details).toHaveAttribute("open", "");
 }
 
+/** Opens the advanced filter conditions when a test needs the kind,
+ * availability, or Capture Time controls. */
+export async function openAdvancedFilters(page: Page) {
+  const details = page.locator("[data-advanced-filters]");
+  await expect(details).toBeVisible();
+  if ((await details.getAttribute("open")) === null)
+    await details.locator("summary").click();
+  await expect(details).toHaveAttribute("open", "");
+}
+
+/** Opens the metadata inspection and editing disclosure in Details. */
+export async function openPhotoDetailsAdvanced(page: Page) {
+  const details = page.locator("[data-details-advanced]");
+  await expect(details).toBeVisible();
+  if ((await details.getAttribute("open")) === null)
+    await details.locator("summary").click();
+  await expect(details).toHaveAttribute("open", "");
+}
+
 /// Returns from a Photo tools subview to its list. The return is local: it adds
 /// no browser history entry.
 export async function returnToPhotoTools(page: Page) {

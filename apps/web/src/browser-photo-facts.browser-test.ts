@@ -71,7 +71,11 @@ test("Photo View shows review capture metadata and explicit missing values", asy
   await expect(facts).not.toContainText("Preview");
 
   await openPhotoToolsView(page, "details");
-  await expect(page.locator("[data-metadata]")).toContainText("Details");
+  await expect(page.locator("[data-details-identity]")).toContainText(
+    "000.jpg",
+  );
+  await expect(page.locator("[data-details-identity]")).toContainText("1 / 1");
+  await expect(page.locator("[data-metadata]")).toContainText("Capture facts");
   // Capture Time is camera-local time with no timezone. The display keeps
   // the recorded date and minute and drops transport precision.
   await expect(page.locator("[data-metadata-capture-time]")).toHaveText(
@@ -135,6 +139,19 @@ test("Photo View clears capture facts on navigation and dashes each missing valu
   ])
     await expect(facts.locator(selector)).toHaveText("—");
   await expect(facts).not.toContainText("f/2.8");
+
+  // Details groups a completely missing capture set into one clear state
+  // instead of repeating five dash rows.
+  await openPhotoToolsView(page, "details");
+  await expect(page.locator("[data-metadata-empty]")).toBeVisible();
+  for (const row of [
+    "captureTime",
+    "aperture",
+    "iso",
+    "shutterSpeed",
+    "focalLength",
+  ])
+    await expect(page.locator(`[data-metadata-row='${row}']`)).toBeHidden();
 });
 
 test("short landscape keeps capture facts and the complete Rating value", async ({
