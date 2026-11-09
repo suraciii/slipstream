@@ -286,11 +286,18 @@ export async function openSources(page: Page) {
   const disclosure = page.locator(
     "[data-source-toggle]:visible, [data-photo-source-toggle]:visible",
   );
-  if ((await disclosure.count()) === 0) {
-    // A wide Grid keeps Sources as the resizable sidebar, which is always shown.
-    await expect(page.locator("#source-panel")).toBeVisible();
-    return;
-  }
+  // The first Grid paint may precede the narrow source disclosure. Wait for
+  // either the disclosure or the wide sidebar before deciding the layout.
+  await expect
+    .poll(
+      async () => {
+        if ((await disclosure.count()) > 0) return true;
+        return page.locator("#source-panel").isVisible();
+      },
+      { timeout: 15_000 },
+    )
+    .toBe(true);
+  if ((await disclosure.count()) === 0) return;
   if ((await disclosure.getAttribute("aria-expanded")) !== "true")
     await disclosure.click();
   await expect(page.locator("[data-source-dialog]")).toBeVisible();
