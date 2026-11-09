@@ -140,19 +140,19 @@ Undo MUST remain visible. When no undoable change exists it MAY be disabled, but
 
 [Touch Gestures](../spec.md#touch-gestures) owns the Fit swipe mapping, zoom priority, and decision and navigation effects. Manual Zoom gives one-finger panning priority over all four swipe actions.
 
-Vertical movement that does not commit navigation MUST retain the natural Photo View scroll path, including Preview letterbox regions. Direction feedback MUST name the candidate action; static gesture instructions belong in Help, not on the image.
+Vertical movement that does not commit navigation MUST retain the natural Photo View scroll path, including Preview letterbox regions. Direction feedback MUST name the candidate action; static gesture instructions belong in the named shortcuts disclosure, not on the image.
 
 The Preview MUST show transient direction feedback during a swipe. Feedback MUST NOT rely on color, haptics, or animation alone.
 
 More opens these supporting action groups:
 
 - **Review:** Clear flag with its existing availability rule, and Rating using the same choice surface as the primary Rating entry;
-- **Photo:** Edit, Album membership, Capture Details, Preview Source, Preview Zoom, and Nearby Photos;
+- **Photo:** Details with capture facts and Preview Source, Album membership, Edit, Preview Zoom, and Nearby Photos;
 - **Library:** Sources, View options, and Review unavailable Originals; and
-- **Help:** a named disclosure for the combined Preview detail-limit explanation
-  and gesture guidance.
+- **Shortcuts and gestures:** a named disclosure for the combined Preview
+  detail-limit explanation and gesture guidance.
 
-The combined Preview detail evidence MUST be programmatically available beside the Preview without opening Help. Help MAY repeat it and add gesture guidance.
+The combined Preview detail evidence MUST be programmatically available beside the Preview without opening the shortcuts disclosure. That disclosure MAY repeat it and add gesture guidance.
 
 The Preview MUST fit its complete composition; aspect-ratio empty space is acceptable. Closed supporting groups MUST occupy no space and expose no focusable controls.
 

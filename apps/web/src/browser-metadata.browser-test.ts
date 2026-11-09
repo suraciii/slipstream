@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import {
   fixture,
   server,
@@ -7,11 +7,18 @@ import {
 } from "./browser-test-support/fixtures.js";
 import {
   closePhotoSurfaces,
+  closePhotoTools,
+  openPhotoDetailsAdvanced,
   openPhotoToolsView,
   startReview,
 } from "./browser-test-support/surfaces.js";
 
 setupBrowserSmoke();
+
+const openDetails = async (page: Page) => {
+  await openPhotoToolsView(page, "details");
+  await openPhotoDetailsAdvanced(page);
+};
 
 // Qualified-looking Read/Save responses are injected for UI coverage only.
 // This smoke does not qualify the native Sidecar save environment.
@@ -101,7 +108,7 @@ test("metadata ordinary fields retain Photo drafts and explicitly review changed
     },
   );
   await startReview(page, running.url, "All Photos");
-  await openPhotoToolsView(page, "details");
+  await openDetails(page);
   const title = page.locator('[data-metadata-value="dc:title"]');
   await expect(title).toBeVisible();
   await expect(title).toHaveValue("Existing IPTC title");
@@ -146,14 +153,14 @@ test("metadata ordinary fields retain Photo drafts and explicitly review changed
   await expect(page.locator("[data-external-metadata-save]")).toBeDisabled();
   await closePhotoSurfaces(page);
   const beforeReopen = reads;
-  await openPhotoToolsView(page, "details");
+  await openDetails(page);
   await expect.poll(() => reads).toBeGreaterThan(beforeReopen);
   await expect(title).toHaveValue("Retained title");
   await closePhotoSurfaces(page);
   await page.getByRole("button", { name: "Back to Grid", exact: true }).click();
   await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
   revision++;
-  await openPhotoToolsView(page, "details");
+  await openDetails(page);
   await expect(title).toHaveValue("Retained title");
   await expect(
     page.locator("[data-external-metadata-accept-inspection]"),
@@ -205,8 +212,19 @@ test("metadata ordinary fields retain Photo drafts and explicitly review changed
   writable = false;
   await page.locator("[data-external-metadata-refresh]").click();
   await expect(
-    page.getByText("Sidecar access is read-only.", { exact: true }),
+    page.getByText("Metadata editing is unavailable in this deployment.", {
+      exact: true,
+    }),
   ).toBeVisible();
+  // The deployment's technical cause stays inspectable in the evidence
+  // disclosure instead of dominating the read-only state.
+  const evidenceSummary = page
+    .locator("summary")
+    .filter({ hasText: /^Sources and Sidecar evidence$/ });
+  await evidenceSummary.click();
+  await expect(evidenceSummary.locator("..")).toContainText(
+    "Sidecar access is read-only.",
+  );
   await expect(page.locator('[data-metadata-value="dc:title"]')).toHaveCount(0);
   await expect(page.locator('[data-metadata-field="dc:title"]')).toContainText(
     "Retained title",
@@ -276,7 +294,7 @@ test("delayed metadata Save settles for its Photo after A to B to A navigation (
   );
   try {
     await startReview(page, running.url, "All Photos");
-    await openPhotoToolsView(page, "details");
+    await openDetails(page);
     const title = page.locator('[data-metadata-value="dc:title"]');
     const status = page.locator("[data-external-metadata-status]");
     const discard = page.locator("[data-external-metadata-discard]");
@@ -289,14 +307,14 @@ test("delayed metadata Save settles for its Photo after A to B to A navigation (
     await closePhotoSurfaces(page);
     await page.keyboard.press("ArrowRight");
     await expect(page.getByText("2 / 2", { exact: true })).toBeVisible();
-    await openPhotoToolsView(page, "details");
+    await openDetails(page);
     await expect(title).toHaveValue("Existing title");
     expect(photoB).not.toBe(photoA);
     await title.fill("Photo B retained draft");
     await closePhotoSurfaces(page);
     await page.keyboard.press("ArrowLeft");
     await expect(page.getByText("1 / 2", { exact: true })).toBeVisible();
-    await openPhotoToolsView(page, "details");
+    await openDetails(page);
     await expect(title).toHaveValue("Photo A saved title");
     await expect(title).toBeDisabled();
     await expect(discard).toBeDisabled();
@@ -321,7 +339,7 @@ test("delayed metadata Save settles for its Photo after A to B to A navigation (
     await closePhotoSurfaces(page);
     await page.keyboard.press("ArrowRight");
     await expect(page.getByText("2 / 2", { exact: true })).toBeVisible();
-    await openPhotoToolsView(page, "details");
+    await openDetails(page);
     await expect(title).toHaveValue("Photo B retained draft");
     await expect(title).toBeEnabled();
     await expect(discard).toBeVisible();
@@ -336,4 +354,107 @@ test("delayed metadata Save settles for its Photo after A to B to A navigation (
   } finally {
     releaseSave();
   }
+});
+
+test("a rejected metadata draft admission keeps its error visible", async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  const { base, root } = await fixture();
+  await writePhotos(root, 33);
+  const running = await server(base, root);
+  // The real fixture is read-only in this environment; the draft-capacity
+  // path needs an editable Title on every Photo, not a Sidecar write.
+  await page.route(
+    /\/api\/photos\/[^/]+\/external-metadata$/,
+    async (route) => {
+      if (route.request().method() !== "GET") return route.continue();
+      const photoId = decodeURIComponent(
+        new URL(route.request().url()).pathname.split("/")[3]!,
+      );
+      await route.fulfill({
+        json: {
+          photoId,
+          originalLocation: "fixture.jpg",
+          association: { state: "eligible", candidates: [] },
+          libraryRating: 0,
+          saveAvailable: true,
+          captureFacts: {},
+          evidence: { revision: 1, sidecar: { state: "absent" } },
+          fields: {
+            "dc:title": {
+              state: "absent",
+              writable: true,
+              provenance: "sidecar",
+              sources: [],
+            },
+          },
+        },
+      });
+    },
+  );
+  await startReview(page, running.url, "All Photos");
+  for (let index = 0; index < 32; index += 1) {
+    await openPhotoToolsView(page, "details");
+    await openPhotoDetailsAdvanced(page);
+    await page
+      .locator('[data-metadata-value="dc:title"]')
+      .fill(`draft ${index}`);
+    await closePhotoTools(page);
+    await page.keyboard.press("ArrowRight");
+    await expect(page.locator("[data-position]")).toHaveText(
+      `${index + 2} / 33`,
+    );
+  }
+  await openPhotoToolsView(page, "details");
+  await openPhotoDetailsAdvanced(page);
+  await page.locator('[data-metadata-value="dc:title"]').fill("overflow");
+  const status = page.locator("[data-external-metadata-status]");
+  await expect(status).toBeVisible();
+  await expect(status).toContainText("32 metadata drafts");
+});
+
+test("a failed metadata refresh reopens the status line", async ({ page }) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 1);
+  const running = await server(base, root);
+  let failReads = false;
+  await page.route(
+    /\/api\/photos\/[^/]+\/external-metadata$/,
+    async (route) => {
+      if (route.request().method() !== "GET") return route.continue();
+      if (failReads) return route.abort("failed");
+      const photoId = decodeURIComponent(
+        new URL(route.request().url()).pathname.split("/")[3]!,
+      );
+      await route.fulfill({
+        json: {
+          photoId,
+          originalLocation: "fixture.jpg",
+          association: { state: "eligible", candidates: [] },
+          libraryRating: 0,
+          saveAvailable: true,
+          captureFacts: {},
+          evidence: { revision: 1, sidecar: { state: "absent" } },
+          fields: {
+            "dc:title": {
+              state: "absent",
+              writable: true,
+              provenance: "sidecar",
+              sources: [],
+            },
+          },
+        },
+      });
+    },
+  );
+  await startReview(page, running.url, "All Photos");
+  await openDetails(page);
+  const status = page.locator("[data-external-metadata-status]");
+  await expect(page.locator('[data-metadata-value="dc:title"]')).toBeVisible();
+  await expect(status).toBeHidden();
+  failReads = true;
+  await page.getByRole("button", { name: "Refresh inspection" }).click();
+  await expect(status).toBeVisible();
+  expect((await status.textContent())?.trim()).not.toBe("");
 });

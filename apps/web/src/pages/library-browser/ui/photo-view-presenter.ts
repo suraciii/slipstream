@@ -52,6 +52,8 @@ export interface PhotoViewPresentation {
   readonly photoStatusEmpty: boolean;
   isPhotoStatusSurfaceCurrent(this: void, surface: object): boolean;
   isReviewImageSurfaceCurrent(this: void, surface: object): boolean;
+  /// Presents a transient status message. Empty text restores the
+  /// informational status the current Photo shell owns.
   setPhotoStatus(this: void, text: string): void;
   renderPhotoFacts(this: void, model: PhotoFactsViewModel): void;
   renderPhotoMetadata(this: void, model?: PhotoMetadataViewModel): void;
@@ -149,6 +151,25 @@ export function createPhotoViewPresenter({
     root,
     "[data-metadata-focal-length]",
   );
+  const detailsIdentity = root.querySelector<HTMLElement>(
+    "[data-details-identity]",
+  );
+  const metadataEmpty = root.querySelector<HTMLElement>(
+    "[data-metadata-empty]",
+  );
+  const metadataRows = {
+    captureTime: root.querySelector<HTMLElement>(
+      "[data-metadata-row='captureTime']",
+    ),
+    aperture: root.querySelector<HTMLElement>("[data-metadata-row='aperture']"),
+    iso: root.querySelector<HTMLElement>("[data-metadata-row='iso']"),
+    shutterSpeed: root.querySelector<HTMLElement>(
+      "[data-metadata-row='shutterSpeed']",
+    ),
+    focalLength: root.querySelector<HTMLElement>(
+      "[data-metadata-row='focalLength']",
+    ),
+  };
   let alive = true;
   let currentPhotoId: string | undefined;
   let currentSelection: ViewSelectionState = "unflagged";
@@ -156,6 +177,7 @@ export function createPhotoViewPresenter({
   let photoStatusSurface: object = {};
   let source: ViewPreviewSource | undefined;
   let limited = false;
+  let baseStatusText = "";
   let dimensions: Readonly<{ width: number; height: number }> | undefined;
   let enlarged = false;
   let canReviewRecovery = false;
@@ -165,6 +187,8 @@ export function createPhotoViewPresenter({
     position.textContent = `${(model.index + 1).toLocaleString()} / ${model.total.toLocaleString()}`;
     filename.textContent = model.originalFilename ?? "—";
     filename.title = model.originalFilename ?? "";
+    if (detailsIdentity)
+      detailsIdentity.textContent = `${model.originalFilename ?? "Photo"} · ${position.textContent}`;
     currentSelection = model.selectionState ?? "unflagged";
     selectionChip.textContent = selectionLabel(currentSelection);
     selection.setAttribute(
@@ -174,10 +198,11 @@ export function createPhotoViewPresenter({
   };
   const renderPhotoMetadata = (model: PhotoMetadataViewModel = {}) => {
     if (!alive) return;
-    captureTime.textContent =
+    const captureTimeValue =
       model.captureTime === undefined
-        ? "—"
+        ? undefined
         : formatCaptureTime(model.captureTime);
+    captureTime.textContent = captureTimeValue ?? "—";
     factsCapture.textContent = captureTime.textContent;
     aperture.textContent = model.aperture ?? "—";
     factsAperture.textContent = aperture.textContent;
@@ -188,6 +213,18 @@ export function createPhotoViewPresenter({
     factsShutterSpeed.textContent = shutterSpeed.textContent;
     focalLength.textContent = model.focalLength ?? "—";
     factsFocalLength.textContent = focalLength.textContent;
+    // Details is a reading surface: show the facts that exist and one clear
+    // empty state instead of five rows of dashes.
+    const rows = [
+      [metadataRows.captureTime, captureTimeValue],
+      [metadataRows.aperture, model.aperture],
+      [metadataRows.iso, model.iso],
+      [metadataRows.shutterSpeed, model.shutterSpeed],
+      [metadataRows.focalLength, model.focalLength],
+    ] as const;
+    for (const [row, value] of rows) if (row) row.hidden = value === undefined;
+    if (metadataEmpty)
+      metadataEmpty.hidden = rows.some(([, value]) => value !== undefined);
   };
   const presentReviewImage = (
     url: string,
@@ -264,7 +301,11 @@ export function createPhotoViewPresenter({
           ? "Enlarged Preview pixels cannot add source detail"
           : "Preview pixels are not enlarged",
       );
-    previewSource.textContent = parts.join(" · ");
+    // Details names the Preview source and its actual pixels. The complete
+    // detail-limit explanation stays beside the Preview and in Help.
+    previewSource.textContent = dimensions
+      ? `${sourceLabel(source)} · ${dimensions.width} × ${dimensions.height}`
+      : sourceLabel(source);
     const explanation = `${parts.join(" · ")}. Preview detail is limited by its source pixels, not the Original's full resolution.`;
     previewDescription.textContent = explanation;
     previewHelp.textContent = explanation;
@@ -292,7 +333,7 @@ export function createPhotoViewPresenter({
   const setPhotoStatus = (text: string) => {
     if (!alive) return;
     photoStatusSurface = {};
-    renderStatus(text);
+    renderStatus(text || baseStatusText);
   };
   const clearAmbient = () => {
     ambient.hidden = true;
@@ -309,12 +350,11 @@ export function createPhotoViewPresenter({
     renderPhotoFacts(model);
     renderPhotoMetadata();
     setPreviewFacts(model.previewSource, Boolean(model.limitedDetail));
-
-    setPhotoStatus(
+    baseStatusText =
       model.photoId && model.available === false
         ? "Current Photo: Original File is unavailable. Decisions remain available."
-        : "",
-    );
+        : "";
+    setPhotoStatus(baseStatusText);
     let image: ReviewImagePresentation | undefined;
     if (model.previewUrl)
       image = presentReviewImage(model.previewUrl, model.index, model.total);

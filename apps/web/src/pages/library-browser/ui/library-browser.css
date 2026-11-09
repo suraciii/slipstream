@@ -782,7 +782,7 @@
     inset: 50% auto auto 50%;
     transform: translate(-50%, -50%);
     width: min(34rem, calc(100vw - 3rem));
-    max-height: min(85dvh, 44rem);
+    max-height: min(90dvh, 48rem);
     border-radius: 0.75rem;
     border-bottom: 1px solid var(--border-strong);
   }
@@ -794,7 +794,7 @@
   .removed-sheet,
   .photo-tools-sheet,
   .browser.sources-drawer .source-panel {
-    max-height: min(85dvh, 44rem);
+    max-height: min(90dvh, 48rem);
     padding: 1rem 1.15rem;
   }
 
@@ -1528,31 +1528,45 @@
   margin: 0;
 }
 
-/* Capture Details, the Preview Source, and the combined detail-limit
-   explanation are Photo tools content, so they scroll inside the surface
-   instead of stacking under the Preview. */
-.photo-tools-facts {
-  color: var(--muted);
-  font-size: 0.76rem;
+/* Details is a reading surface: identity, present capture facts, a compact
+   Preview source, then metadata inspection behind one explicit disclosure. */
+.photo-details {
+  display: grid;
+  gap: 0.9rem;
 }
 
-.photo-tools-facts strong {
-  display: block;
+.photo-details-identity {
+  margin: 0;
+  color: var(--fg-2);
+  font: 0.8rem/1.4 var(--font-ui);
+  overflow-wrap: anywhere;
+}
+
+.photo-tools-facts {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.photo-tools-facts h3 {
+  margin: 0;
   color: var(--text);
-  font-size: 0.68rem;
-  font-weight: 650;
+  font: 600 0.8rem/1.3 var(--font-ui);
 }
 
 .photo-tools-facts dl {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.25rem 0.9rem;
-  margin: 0.2rem 0 0;
+  gap: 0.35rem 1rem;
+  margin: 0.35rem 0 0;
 }
 
 .photo-tools-facts div {
   display: flex;
   gap: 0.3rem;
+}
+
+.photo-tools-facts div[hidden] {
+  display: none;
 }
 
 .photo-tools-facts dt {
@@ -1562,6 +1576,33 @@
 .photo-tools-facts dd {
   margin: 0;
   color: var(--text);
+}
+
+.photo-details-empty {
+  margin: 0.35rem 0 0;
+  color: var(--fg-2);
+}
+
+.photo-details-advanced {
+  margin-top: 0.1rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border-strong);
+}
+
+.photo-details-advanced > summary {
+  color: var(--fg-2);
+  cursor: pointer;
+  font: 600 0.8rem/1.4 var(--font-ui);
+}
+
+.photo-details-advanced[open] > summary {
+  margin-bottom: 0.75rem;
+}
+
+/* The advanced panel already owns its internal spacing and rules. */
+.photo-details-advanced .external-metadata-panel {
+  padding-top: 0;
+  border-top: 0;
 }
 
 .photo-tools-preview {
@@ -1629,8 +1670,10 @@
 
 .photo-tools-help {
   margin: 0.75rem 0 0;
-  color: var(--muted);
-  font-size: 0.75rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--border);
+  color: var(--fg-2);
+  font-size: 0.8rem;
   line-height: 1.4;
 }
 
@@ -1655,7 +1698,7 @@
 .photo-tools-actions {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: 0.3rem;
+  gap: 0.25rem;
 }
 
 .photo-tools-actions button {
@@ -1668,7 +1711,7 @@
 .photo-tools-entries {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: 0.75rem;
+  gap: 0.6rem;
   margin-top: 0.25rem;
   justify-content: flex-start;
   text-align: left;
@@ -1695,7 +1738,31 @@
   min-height: 44px;
   display: flex;
   align-items: center;
+  gap: 0.5rem;
+  border-radius: 6px;
   cursor: pointer;
+  color: var(--fg-2);
+  font-weight: 600;
+}
+
+.photo-tools-help summary svg {
+  width: 0.75rem;
+  height: 0.75rem;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.5;
+  transition: transform 150ms ease;
+}
+
+.photo-tools-help[open] summary svg {
+  transform: rotate(90deg);
+}
+
+.photo-tools-help summary:hover {
+  background: var(--raised-hover);
 }
 .photo-tools-help p {
   margin-top: 0.5rem;

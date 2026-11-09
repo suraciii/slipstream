@@ -66,8 +66,10 @@ export const createGridBatchPresenter = (
   review.className = "quiet";
   review.hidden = true;
   e.batchCompensate.before(review);
+  const batchHost =
+    gridView?.closest<HTMLElement>(".browser") ?? gridView ?? undefined;
   const syncBatchHeight = () => {
-    gridView?.style.setProperty(
+    batchHost?.style.setProperty(
       "--grid-batch-height",
       `${e.gridBatch.hidden ? 0 : Math.ceil(e.gridBatch.getBoundingClientRect().height)}px`,
     );

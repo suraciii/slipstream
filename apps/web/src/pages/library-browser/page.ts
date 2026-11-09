@@ -45,7 +45,6 @@ import {
   restorationOutcomeMessage,
 } from "./model/removal-review-controller.js";
 import { createAlbumMutationController } from "./model/album-mutation-controller.js";
-
 import {
   createPhotoOwner,
   type PhotoAuthority,
@@ -1536,9 +1535,6 @@ function mountPrivateLibraryBrowser(
     if (!connected || pageBusy) return;
     const admission = photoOwner.mutate(field, value, advance);
     if (!admission) return;
-    setDecisionStatus(
-      `Saving ${field === "rating" ? "Rating" : "Selection State"} for the current Photo…`,
-    );
     updateControls();
     const outcome = await admission.settlement;
     if (outcome.kind === "detached") return updateControls();
@@ -1558,9 +1554,11 @@ function mountPrivateLibraryBrowser(
     if (!outcome.applied) return;
     if (field === "selectionState" && outcome.photoId)
       gridMulti.noteExpectedSelection(outcome.photoId, value as SelectionState);
-    setDecisionStatus(
-      `${field === "rating" ? "Rating" : "Selection State"} saved for the current Photo.`,
-    );
+    // The decision itself updates the Selection State or Rating, so routine
+    // success needs no status line. Empty text restores the shell-owned
+    // status, which clears a failure left by an earlier attempt without
+    // discarding the unavailable Original notice.
+    view.setPhotoStatus("");
     if (outcome.advance) await moveTo(outcome.index + 1);
     else renderPhotoFacts();
     updateControls();

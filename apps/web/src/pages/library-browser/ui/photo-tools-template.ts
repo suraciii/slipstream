@@ -8,9 +8,9 @@ export const PHOTO_TOOLS_TEMPLATE = `
                 <div class="photo-tools-view" data-photo-tools-view="tools">
                   <div class="photo-tools-entries" data-photo-tools-entries>
                     <section aria-label="Review"><h3>Review</h3><div class="photo-tools-actions"><button type="button" class="quiet" data-photo-tools-clear>Clear flag</button><button type="button" data-photo-tools-entry="rating">Rating</button></div></section>
-                    <section aria-label="Photo"><h3>Photo</h3><div class="photo-tools-actions"><button type="button" data-photo-tools-entry="edit">Edit</button><button type="button" data-photo-tools-entry="albums">Albums</button><button type="button" data-photo-tools-entry="details">Capture Details / Preview Source</button><button type="button" data-photo-tools-entry="zoom">Preview Zoom</button><button type="button" data-photo-tools-entry="nearby">Nearby Photos</button></div></section>
+                    <section aria-label="Photo"><h3>Photo</h3><div class="photo-tools-actions"><button type="button" data-photo-tools-entry="details">Details</button><button type="button" data-photo-tools-entry="albums">Albums</button><button type="button" data-photo-tools-entry="edit">Edit</button><button type="button" data-photo-tools-entry="zoom">Preview Zoom</button><button type="button" data-photo-tools-entry="nearby">Nearby Photos</button></div></section>
                     <section aria-label="Library"><h3>Library</h3><div class="photo-tools-actions"><button type="button" data-photo-tools-entry="sources">Sources</button><button type="button" data-photo-tools-entry="view-options">View options</button><button type="button" data-photo-tools-entry="recovery">Review unavailable Originals</button></div></section>
-                    <details class="photo-tools-help"><summary>Help</summary><p data-preview-help></p><p>Fit Preview gestures: swipe right to Pick, left to Reject, up for Next, down for Previous. Manual Zoom uses one-finger pan; pinch zooms. Letterbox regions scroll Photo View. Keyboard alternatives: Arrow keys navigate; P Pick; X Reject; U Clear flag; 0–5 Rating.</p></details>
+                    <details class="photo-tools-help"><summary><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M4 2 8 6 4 10" /></svg>Shortcuts and gestures</summary><p data-preview-help></p><p>Fit Preview gestures: swipe right to Pick, left to Reject, up for Next, down for Previous. Manual Zoom uses one-finger pan; pinch zooms. Letterbox regions scroll Photo View. Keyboard alternatives: Arrow keys navigate; P Pick; X Reject; U Clear flag; 0–5 Rating.</p></details>
                   </div>
                 </div>
                 <div class="photo-tools-view" id="photo-tools-view-rating" data-photo-tools-view="rating" hidden>
@@ -24,9 +24,25 @@ ${PHOTO_EDITOR_TEMPLATE}
                 </div>
                 <div class="photo-tools-view" id="photo-tools-view-details" data-photo-tools-view="details" hidden>
                   <header class="photo-tools-view-header"><button type="button" class="quiet" data-photo-tools-return>Photo tools</button></header>
-                  <div class="photo-tools-facts" data-metadata aria-label="Capture details"><strong>Capture Details</strong><dl><div><dt>Capture Time</dt><dd data-metadata-capture-time>—</dd></div><div><dt>Aperture</dt><dd data-metadata-aperture>—</dd></div><div><dt>ISO</dt><dd data-metadata-iso>—</dd></div><div><dt>Shutter Speed</dt><dd data-metadata-shutter-speed>—</dd></div><div><dt>Focal Length</dt><dd data-metadata-focal-length>—</dd></div></dl></div>
-                  <p class="photo-tools-preview"><span class="photo-tools-preview-label">Preview Source</span><span data-source>—</span></p>
-                  <div class="external-metadata" data-external-metadata aria-label="External Metadata"></div>
+                  <div class="photo-details">
+                    <p class="photo-details-identity" data-details-identity>—</p>
+                    <section class="photo-tools-facts" data-metadata aria-label="Capture facts">
+                      <h3>Capture facts</h3>
+                      <dl>
+                        <div data-metadata-row="captureTime"><dt>Capture Time</dt><dd data-metadata-capture-time>—</dd></div>
+                        <div data-metadata-row="aperture"><dt>Aperture</dt><dd data-metadata-aperture>—</dd></div>
+                        <div data-metadata-row="iso"><dt>ISO</dt><dd data-metadata-iso>—</dd></div>
+                        <div data-metadata-row="shutterSpeed"><dt>Shutter Speed</dt><dd data-metadata-shutter-speed>—</dd></div>
+                        <div data-metadata-row="focalLength"><dt>Focal Length</dt><dd data-metadata-focal-length>—</dd></div>
+                      </dl>
+                      <p class="photo-details-empty" data-metadata-empty hidden>No capture metadata.</p>
+                    </section>
+                    <p class="photo-tools-preview"><span class="photo-tools-preview-label">Preview Source</span><span data-source>—</span></p>
+                    <details class="photo-details-advanced" data-details-advanced>
+                      <summary>Metadata inspection and editing</summary>
+                      <div class="external-metadata" data-external-metadata aria-label="External Metadata"></div>
+                    </details>
+                  </div>
                 </div>
                 <div class="photo-tools-view" id="photo-tools-view-zoom" data-photo-tools-view="zoom" hidden>
                   <header class="photo-tools-view-header"><button type="button" class="quiet" data-photo-tools-return>Photo tools</button></header>

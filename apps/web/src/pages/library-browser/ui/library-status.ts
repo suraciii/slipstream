@@ -53,8 +53,17 @@ export function createSummaryPresenter(
     const actionable = !!action && (state === "failed" || state === "complete");
     entry.hidden = !actionable;
     if (actionable) {
+      const failure = action.kind === "retry-library-check";
+      // Name the fact and the next action instead of a generic "status" word,
+      // so the entry earns its space beside the review controls.
+      toggle.textContent = failure
+        ? "Library check failed — Retry"
+        : "Library changed — Refresh";
+      entry.setAttribute("data-tone", failure ? "failure" : "complete");
       render(notice);
     } else {
+      toggle.textContent = "Library status";
+      entry.setAttribute("data-tone", "");
       notice.replaceChildren();
       notice.hidden = true;
       toggle.setAttribute("aria-expanded", "false");

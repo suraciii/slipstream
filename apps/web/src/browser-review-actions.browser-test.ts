@@ -95,13 +95,54 @@ test("Library status opens in Photo View without disturbing the review or Grid a
   const toggle = entry.locator("[data-library-status-toggle]");
   const notice = entry.locator("[data-library-status-notice]");
   await expect(entry).toBeVisible();
-  await expect(toggle).toHaveAccessibleName("Library status");
+  await expect(toggle).toHaveAccessibleName("Library check failed — Retry");
   await expect(toggle).toHaveAttribute("aria-expanded", "false");
   await expect(notice).toBeHidden();
+  // The entry and its notice must not cover the review dock's primary actions.
+  for (const selector of [
+    "[data-dock-reject]",
+    "[data-dock-rating]",
+    "[data-dock-pick]",
+    "[data-dock-undo]",
+    "[data-dock-more]",
+  ]) {
+    await expect
+      .poll(() =>
+        page.locator(selector).evaluate((button) => {
+          const rect = button.getBoundingClientRect();
+          const hit = document.elementFromPoint(
+            rect.left + rect.width / 2,
+            rect.top + rect.height / 2,
+          );
+          return hit === button || button.contains(hit);
+        }),
+      )
+      .toBe(true);
+  }
   await toggle.click();
   await expect(toggle).toHaveAttribute("aria-expanded", "true");
   await expect(notice).toBeVisible();
   await expect(notice).toContainText("Library check failed");
+  for (const selector of [
+    "[data-dock-reject]",
+    "[data-dock-rating]",
+    "[data-dock-pick]",
+    "[data-dock-undo]",
+    "[data-dock-more]",
+  ]) {
+    await expect
+      .poll(() =>
+        page.locator(selector).evaluate((button) => {
+          const rect = button.getBoundingClientRect();
+          const hit = document.elementFromPoint(
+            rect.left + rect.width / 2,
+            rect.top + rect.height / 2,
+          );
+          return hit === button || button.contains(hit);
+        }),
+      )
+      .toBe(true);
+  }
   await expect(page.locator("[data-review]")).toBeVisible();
   await expect(image).toHaveAttribute("src", photo!);
   await expect(page.locator("[data-position]")).toHaveText(position!);
@@ -202,6 +243,7 @@ test("Photo write failure stays visible in tools and after returning to review",
   await expect(page.locator("[data-dock-pick]")).toBeEnabled();
   await page.locator("[data-dock-pick]").click();
   await expect(page.locator("[data-selection]")).toHaveText("Picked");
+  await expect(status).toBeHidden();
 });
 
 test("unavailable Original keeps its Photo review and visible recovery action", async ({
@@ -482,7 +524,7 @@ test("gesture candidates name their effect only while active and tools retain lo
   );
   await expect(
     page.locator("[data-photo-tools-view=details] h3:visible"),
-  ).toHaveCount(0);
+  ).toHaveText("Capture facts");
   await page
     .locator("[data-photo-tools-view=details] [data-photo-tools-return]")
     .click();

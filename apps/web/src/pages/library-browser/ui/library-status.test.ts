@@ -150,6 +150,8 @@ describe("compact Library status", () => {
       );
       expect(ui.entry.hidden).toBe(false);
       expect(ui.notice.hidden).toBe(true);
+      expect(ui.toggle.textContent).toBe("Library check failed — Retry");
+      expect(ui.entry.getAttribute("data-tone")).toBe("failure");
       expect(ui.toggle.getAttribute("aria-expanded")).toBe("false");
 
       ui.toggle.click();
@@ -182,6 +184,8 @@ describe("compact Library status", () => {
         "complete",
       );
       expect(ui.entry.hidden).toBe(false);
+      expect(ui.toggle.textContent).toBe("Library changed — Refresh");
+      expect(ui.entry.getAttribute("data-tone")).toBe("complete");
       ui.toggle.click();
       expect(ui.notice.hidden).toBe(false);
       expect(ui.notice.textContent).toContain(
@@ -198,6 +202,8 @@ describe("compact Library status", () => {
       expect(ui.entry.hidden).toBe(true);
       expect(ui.notice.hidden).toBe(true);
       expect(ui.notice.textContent).toBe("");
+      expect(ui.toggle.textContent).toBe("Library status");
+      expect(ui.entry.getAttribute("data-tone")).toBe("");
       expect(ui.toggle.getAttribute("aria-expanded")).toBe("false");
       expect(ui.gridEmptyAction.disabled).toBe(false);
     } finally {

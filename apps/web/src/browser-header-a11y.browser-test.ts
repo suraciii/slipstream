@@ -437,6 +437,10 @@ test("narrow summary counts groups and exposes every committed value through Vie
   );
   await entry.focus();
   await page.keyboard.press("Enter");
+  await expect(page.locator("[data-advanced-filters]")).toHaveAttribute(
+    "open",
+    "",
+  );
   await expect(page.locator("[data-filter-select]")).toHaveValue("picked");
   await expect(page.locator("[data-rating-min-select]")).toHaveValue("2");
   await expect(page.locator("[data-rating-max-select]")).toHaveValue("4");

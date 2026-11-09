@@ -4,7 +4,7 @@ import { REMOVED_PANELS_TEMPLATE } from "./removed-panels.js";
 export const APP_SHELL_TEMPLATE = `
 <div class="app-shell">
   <header class="app-header"><div class="app-wordmark">Slipstream</div><p data-connection role="status">Connecting…</p></header>
-  <section class="browser" data-browser aria-labelledby="grid-title">
+  <section class="browser" data-browser>
     <div class="library-status-entry" data-library-status-entry hidden><button type="button" data-library-status-toggle aria-expanded="false" aria-controls="library-status-notice">Library status</button><div class="library-status-notice" id="library-status-notice" data-library-status-notice role="status" aria-live="polite" hidden></div></div>
     <dialog class="source-dialog" data-source-dialog>
       <nav class="source-panel" id="source-panel" data-library-screen aria-label="Library sources">
@@ -24,7 +24,7 @@ export const APP_SHELL_TEMPLATE = `
         <div class="grid-tools" data-grid-tools><button type="button" class="quiet" data-grid-view-options aria-label="View options">View options<span class="options-flag" data-view-options-flag hidden></span></button><button type="button" class="quiet" data-grid-select-mode aria-pressed="false">Select mode</button></div>
         <div class="grid-selection" data-grid-selection hidden><p class="grid-selection-count" data-batch-count></p><button type="button" class="quiet" data-grid-multi-done>Done</button></div>
       </div><p class="grid-summary" data-grid-summary role="status" aria-live="polite"></p></header>
-      <div class="grid-viewport" data-grid-viewport tabindex="0" aria-label="Photo Library Grid"><div class="grid-canvas" data-grid-canvas></div><div class="grid-layer" data-grid-layer></div><div class="grid-empty" data-grid-empty hidden><p data-grid-empty-message role="status"></p><button type="button" data-grid-empty-action hidden>Check Library</button><button type="button" data-grid-empty-clear-filters hidden>Clear filters</button></div></div>
+      <div class="grid-viewport" data-grid-viewport tabindex="0" role="group" aria-label="Photo Library Grid"><div class="grid-canvas" data-grid-canvas></div><div class="grid-layer" data-grid-layer></div><div class="grid-empty" data-grid-empty hidden><p data-grid-empty-message role="status"></p><button type="button" data-grid-empty-action hidden>Check Library</button><button type="button" data-grid-empty-clear-filters hidden>Clear filters</button></div></div>
       <div class="grid-batch" data-grid-batch hidden><p class="grid-batch-retained" data-batch-retained hidden>Selection remains active</p><details class="grid-batch-result" data-grid-batch-result hidden><summary>Result</summary><div class="grid-batch-result-details"><p data-grid-batch-result-text></p><button type="button" class="quiet" data-grid-batch-compensate hidden>Remove added Photos</button></div></details><div class="grid-batch-actions" data-batch-actions role="group" aria-label="Batch actions"><button type="button" data-batch-pick>Pick</button><button type="button" data-batch-reject>Reject</button><button type="button" data-batch-album-add>Add to Album</button></div></div>
     </section>
 ${PHOTO_VIEW_TEMPLATE}
@@ -38,10 +38,16 @@ ${PHOTO_VIEW_TEMPLATE}
           <div class="options-field"><label for="view-filter-select">Selection State</label><select id="view-filter-select" data-filter-select></select></div>
           <div class="options-field"><label for="view-rating-min-select">Rating minimum</label><select id="view-rating-min-select" data-rating-min-select></select></div>
           <div class="options-field"><label for="view-rating-max-select">Rating maximum</label><select id="view-rating-max-select" data-rating-max-select></select></div>
-          <div class="options-field"><label for="view-kind-select">Original kind</label><select id="view-kind-select" data-kind-select></select></div>
-          <div class="options-field"><label for="view-available-select">Original availability</label><select id="view-available-select" data-available-select></select></div>
-          <div class="options-field"><label for="view-captured-from">Capture Time From (inclusive)</label><input id="view-captured-from" type="text" data-captured-from></div>
-          <div class="options-field"><label for="view-captured-before">Capture Time Before (exclusive)</label><input id="view-captured-before" type="text" data-captured-before></div>
+          <details class="options-advanced" data-advanced-filters>
+            <summary>Advanced filters</summary>
+            <div class="options-advanced-fields">
+              <div class="options-field"><label for="view-kind-select">Original kind</label><select id="view-kind-select" data-kind-select></select></div>
+              <div class="options-field"><label for="view-available-select">Original availability</label><select id="view-available-select" data-available-select></select></div>
+              <div class="options-field"><label for="view-captured-from">Capture Time From (inclusive)</label><input id="view-captured-from" type="text" autocomplete="off" spellcheck="false" data-captured-from></div>
+              <div class="options-field"><label for="view-captured-before">Capture Time Before (exclusive)</label><input id="view-captured-before" type="text" autocomplete="off" spellcheck="false" data-captured-before></div>
+              <p class="options-help">Camera-local time as YYYY-MM-DDTHH:MM:SS. No time zone.</p>
+            </div>
+          </details>
           <button type="button" class="quiet" data-reset-filters>Reset filters</button></section>
           <section aria-labelledby="options-display-title"><h3 id="options-display-title">Order and display</h3>
           <div class="options-field"><label for="view-sort-select">Source order</label><select id="view-sort-select" data-sort-select></select></div>
