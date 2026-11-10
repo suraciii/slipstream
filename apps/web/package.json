@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "build": "vite build",
-    "test:unit": "bun test src/pages/library-browser",
+    "test:unit": "bun test src/app src/pages/library-browser",
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
