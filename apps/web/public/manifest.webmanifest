@@ -6,50 +6,6 @@
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
-  "launch_handler": {
-    "client_mode": "focus-existing"
-  },
-  "shortcuts": [
-    {
-      "name": "Picked Photos",
-      "short_name": "Picked",
-      "description": "Open the Library filtered to Picked Photos.",
-      "url": "/?selection=picked",
-      "icons": [
-        {
-          "src": "/icons/slipstream-192.png",
-          "sizes": "192x192",
-          "type": "image/png"
-        }
-      ]
-    },
-    {
-      "name": "Unflagged Photos",
-      "short_name": "Unflagged",
-      "description": "Open the Library filtered to Unflagged Photos.",
-      "url": "/?selection=unflagged",
-      "icons": [
-        {
-          "src": "/icons/slipstream-192.png",
-          "sizes": "192x192",
-          "type": "image/png"
-        }
-      ]
-    },
-    {
-      "name": "Rejected Photos",
-      "short_name": "Rejected",
-      "description": "Open the Library filtered to Rejected Photos.",
-      "url": "/?selection=rejected",
-      "icons": [
-        {
-          "src": "/icons/slipstream-192.png",
-          "sizes": "192x192",
-          "type": "image/png"
-        }
-      ]
-    }
-  ],
   "background_color": "#0b0c0e",
   "theme_color": "#0b0c0e",
   "icons": [
