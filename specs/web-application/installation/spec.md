@@ -10,6 +10,8 @@ On supported Chromium browsers, Slipstream MUST provide its name and icon for th
 
 A new window opened at the application start URL MUST open All Photos. Reactivating an existing window MUST NOT reset its current Destination.
 
+The installed application MUST use `focus-existing` launch behavior. An explicit application shortcut or in-scope launch target MUST open its declared Destination in the existing window. An ordinary start-URL relaunch MUST keep the current Destination. Application shortcuts MUST open the Library filtered to Picked, Unflagged, or Rejected Selection State through the ordinary Browser Address Contract; they MUST NOT introduce a separate Library, route, or mutation path.
+
 Opening a Destination and explicit Album Resume MUST follow [Library Browser Experience](../../library-browser/experience/spec.md). Installation MUST NOT create a separate Photo Library or copy Original Files.
 
 The application requires a reachable Slipstream server. Installation MUST NOT promise offline launch or offline selection. A disconnected open window MUST follow [Failure Behavior](../../library-browser/spec.md#failure-behavior).

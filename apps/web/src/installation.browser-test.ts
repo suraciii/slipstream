@@ -33,6 +33,13 @@ test("production application publishes usable online installation resources", as
     expect(response.headers()["cache-control"]).toBe("no-cache");
     const manifest = (await response.json()) as {
       icons: { src: string; sizes: string; type: string; purpose: string }[];
+      launch_handler: { client_mode: string };
+      shortcuts: {
+        name: string;
+        short_name: string;
+        url: string;
+        icons: { src: string; sizes: string; type: string }[];
+      }[];
     };
     expect(manifest).toMatchObject({
       id: "/",
@@ -41,7 +48,24 @@ test("production application publishes usable online installation resources", as
       start_url: "/",
       scope: "/",
       display: "standalone",
+      launch_handler: { client_mode: "focus-existing" },
     });
+    expect(manifest.shortcuts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          short_name: "Picked",
+          url: "/?selection=picked",
+        }),
+        expect.objectContaining({
+          short_name: "Unflagged",
+          url: "/?selection=unflagged",
+        }),
+        expect.objectContaining({
+          short_name: "Rejected",
+          url: "/?selection=rejected",
+        }),
+      ]),
+    );
     expect(manifest.icons).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ sizes: "192x192", purpose: "any" }),
@@ -55,6 +79,7 @@ test("production application publishes usable online installation resources", as
     if (!touchIcon) throw new Error("Missing touch icon");
     for (const icon of [
       ...manifest.icons,
+      ...manifest.shortcuts.flatMap((shortcut) => shortcut.icons),
       { src: touchIcon, sizes: "180x180", type: "image/png" },
     ]) {
       const imageResponse = await page.request.get(`${server.url}${icon.src}`);

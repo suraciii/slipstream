@@ -8,14 +8,18 @@ Vite publishes installation metadata and icons from the Web application's public
 
 Every manifest-declared icon MUST decode at its declared size.
 
-| Manifest property | Required value |
-| ----------------- | -------------- |
-| Identity          | `/`            |
-| Scope             | `/`            |
-| Start URL         | `/`            |
-| Display           | `standalone`   |
+| Manifest property | Required value                                                                                  |
+| ----------------- | ----------------------------------------------------------------------------------------------- |
+| Identity          | `/`                                                                                             |
+| Scope             | `/`                                                                                             |
+| Start URL         | `/`                                                                                             |
+| Display           | `standalone`                                                                                    |
+| Launch handler    | `focus-existing`                                                                                |
+| Shortcuts         | Picked `/?selection=picked`; Unflagged `/?selection=unflagged`; Rejected `/?selection=rejected` |
 
 Installation identity MUST NOT change with a build or Destination. The Library Browser retains ownership of navigation, decisions, and reconnection.
+
+The Launch Handler API consumer MUST apply only a same-origin target outside the application start URL. An ordinary start-URL relaunch therefore leaves the current Destination in place, while a shortcut or explicit deep link replaces it. Every shortcut target is an ordinary Browser Address; no shortcut owns separate Library state or bypasses access.
 
 The application MUST use the browser's installation interface. It MUST NOT register a service worker or add a local mutation queue. This manifest-only boundary avoids a second asset cache and worker lifecycle for the [online installation contract](spec.md).
 

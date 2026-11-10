@@ -1,5 +1,6 @@
 import "./styles/global.css";
 import { mountLibraryBrowser } from "../pages/library-browser/index.js";
+import { installLaunchTargetHandler } from "./launch-target.js";
 const isPwaInstallAllowed = (): boolean => {
   if (window.isSecureContext) return true;
   const host = window.location.hostname;
@@ -11,6 +12,8 @@ const isPwaInstallAllowed = (): boolean => {
 
 if (!isPwaInstallAllowed())
   document.querySelector<HTMLLinkElement>('link[rel="manifest"]')?.remove();
+
+installLaunchTargetHandler();
 
 const root = document.querySelector<HTMLElement>("#app");
 if (root) {
