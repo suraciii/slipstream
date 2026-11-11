@@ -881,14 +881,6 @@
   background: var(--canvas);
 }
 
-/* The transport warning is a security notice, not another toolbar. Let the
-   Preview absorb its height so the 44px review controls stay inside the safe
-   viewport on narrow screens. */
-.private-library:has(> .private-transport.access-transport-warning)
-  .photo-view {
-  grid-template-rows: auto auto minmax(0, 1fr) auto auto;
-}
-
 .photo-header {
   height: 60px;
   min-height: 60px;
@@ -1131,82 +1123,43 @@
 .swipe-feedback {
   position: absolute;
   z-index: 2;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 3rem;
   display: grid;
   place-items: center;
-  min-width: 4.25rem;
-  min-height: 2.75rem;
-  max-width: calc(100% - 1.5rem);
-  padding: 0 0.9rem;
   overflow: hidden;
-  border: 1px solid var(--border-strong);
-  border-radius: 999px;
-  background: var(--raised);
-  color: var(--text);
-  font: 600 0.75rem/1 var(--font-ui);
+  color: var(--fg-2);
+  font: 0.75rem var(--font-ui);
+  font-weight: 500;
   letter-spacing: 0.08em;
   text-transform: none;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   pointer-events: none;
-  writing-mode: horizontal-tb;
-}
-
-.swipe-feedback.pick,
-.swipe-feedback.reject {
-  top: 50%;
-  transform: translateY(-50%);
-}
-
-.swipe-feedback.reject {
-  left: 0.75rem;
-  background: var(--rejected-soft);
-  color: var(--rejected);
+  writing-mode: vertical-rl;
 }
 
 .swipe-feedback.pick {
-  right: 0.75rem;
-  background: var(--picked-soft);
+  right: 0;
+  left: auto;
   color: var(--picked);
 }
 
-.swipe-feedback.next,
-.swipe-feedback.previous {
-  left: 50%;
-  transform: translateX(-50%);
-}
-
-.swipe-feedback.next {
-  top: 0.75rem;
-}
-
-.swipe-feedback.previous {
-  bottom: 0.75rem;
+.swipe-feedback.reject {
+  color: var(--rejected);
 }
 
 .swipe-feedback.pending {
-  border-color: currentColor;
+  background: var(--picked-soft);
 }
 
-.swipe-feedback.pick.ready {
-  background: var(--picked);
-  color: var(--canvas);
+.swipe-feedback.reject.pending {
+  background: var(--rejected-soft);
 }
 
-.swipe-feedback.reject.ready {
-  background: var(--rejected);
-  color: var(--canvas);
-}
-
-.swipe-feedback.next.ready,
-.swipe-feedback.previous.ready {
-  background: var(--text);
-  color: var(--canvas);
-}
-
-.swipe-feedback.boundary {
-  border-color: var(--border-strong);
+.swipe-feedback.navigation {
+  color: var(--text);
   background: var(--raised);
-  color: var(--fg-2);
 }
 
 .filmstrip-host {

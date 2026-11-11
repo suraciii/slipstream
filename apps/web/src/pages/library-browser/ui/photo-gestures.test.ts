@@ -1,8 +1,5 @@
 import { expect, test } from "bun:test";
-import {
-  createPhotoGestures,
-  type NavigationAvailability,
-} from "./photo-gestures.js";
+import { createPhotoGestures } from "./photo-gestures.js";
 import type { PhotoZoomController } from "./photo-zoom.js";
 import type { RatingControls } from "./rating-controls.js";
 import type { LibraryBrowserIntent } from "./library-browser-view.js";
@@ -55,8 +52,6 @@ function fixture() {
   const stage = new Surface();
   const pick = new Surface();
   const reject = new Surface();
-  const next = new Surface();
-  const previous = new Surface();
   const imageTarget = new Surface();
   stage.parent = preview;
   imageTarget.parent = stage;
@@ -66,10 +61,6 @@ function fixture() {
   let photoId = "photo-a";
   let surface = {};
   let enabled = true;
-  let navigation: NavigationAvailability = {
-    previous: "enabled",
-    next: "enabled",
-  };
   let manual = false;
   let pinch = false;
   let wheel = false;
@@ -120,13 +111,8 @@ function fixture() {
   const gestures = createPhotoGestures({
     preview: preview as unknown as HTMLElement,
     stage: stage as unknown as HTMLElement,
-    gestureFeedback: {
-      pick: pick as unknown as HTMLElement,
-      reject: reject as unknown as HTMLElement,
-      next: next as unknown as HTMLElement,
-      previous: previous as unknown as HTMLElement,
-      navigationAvailability: () => navigation,
-    },
+    pickFeedback: pick as unknown as HTMLElement,
+    rejectFeedback: reject as unknown as HTMLElement,
     zoom,
     rating,
     isAlive: () => true,
@@ -143,11 +129,6 @@ function fixture() {
     stage,
     pick,
     reject,
-    next,
-    previous,
-    setNavigation(nextState: NavigationAvailability) {
-      navigation = nextState;
-    },
     get wheel() {
       return wheel;
     },
@@ -191,9 +172,6 @@ function fixture() {
       enabled = false;
       gestures.cancelUnavailableDecision();
     },
-    refresh() {
-      gestures.refreshFeedback();
-    },
     setRenderedImage(value: boolean) {
       renderedImage = value;
     },
@@ -214,8 +192,6 @@ test("direction feedback exists only for the active candidate and clears without
   try {
     expect(f.pick.hidden).toBe(true);
     expect(f.reject.hidden).toBe(true);
-    expect(f.next.hidden).toBe(true);
-    expect(f.previous.hidden).toBe(true);
     f.pointer("pointerdown", 100, 100);
     f.pointer("pointermove", 130, 100);
     expect(f.pick.hidden).toBe(false);
@@ -230,114 +206,10 @@ test("direction feedback exists only for the active candidate and clears without
     expect(f.reject.hidden).toBe(true);
     f.pointer("pointerdown", 100, 100);
     f.pointer("pointermove", 100, 60);
-    expect(f.next.textContent).toBe("Next");
-    expect(f.next.hidden).toBe(false);
-    expect(f.pick.hidden).toBe(true);
-    expect(f.previous.hidden).toBe(true);
+    expect(f.pick.textContent).toBe("Next");
+    expect(f.pick.classes.has("navigation")).toBe(true);
     f.changePhoto();
-    expect(f.next.hidden).toBe(true);
-    expect(f.writes).toEqual([]);
-  } finally {
-    f.dispose();
-  }
-});
-test("navigation feedback marks commit readiness and explains boundaries", () => {
-  const f = fixture();
-  try {
-    f.pointer("pointerdown", 100, 100);
-    f.pointer("pointermove", 100, 70);
-    expect(f.next.textContent).toBe("Next");
-    expect(f.next.classes.has("pending")).toBe(true);
-    expect(f.next.classes.has("ready")).toBe(false);
-    f.pointer("pointermove", 100, 10);
-    expect(f.next.classes.has("ready")).toBe(true);
-    f.pointer("pointercancel", 100, 10);
-    expect(f.next.hidden).toBe(true);
-
-    f.setNavigation({ previous: "boundary", next: "enabled" });
-    f.pointer("pointerdown", 100, 100);
-    f.pointer("pointermove", 100, 130);
-    expect(f.previous.textContent).toBe("First photo");
-    expect(f.previous.classes.has("boundary")).toBe(true);
-    expect(f.previous.classes.has("ready")).toBe(false);
-    f.pointer("pointerup", 100, 130);
-    expect(f.previous.hidden).toBe(true);
-
-    f.setNavigation({ previous: "disabled", next: "boundary" });
-    f.pointer("pointerdown", 100, 100);
-    f.pointer("pointermove", 100, 10);
-    expect(f.next.textContent).toBe("Last photo");
-    expect(f.next.classes.has("boundary")).toBe(true);
-    f.pointer("pointerup", 100, 10);
-    expect(f.next.hidden).toBe(true);
-
-    f.setNavigation({ previous: "disabled", next: "disabled" });
-    f.pointer("pointerdown", 100, 100);
-    f.pointer("pointermove", 100, 10);
-    expect(f.next.hidden).toBe(true);
-    expect(f.previous.hidden).toBe(true);
-    f.pointer("pointerup", 100, 10);
-    expect(f.writes).toEqual([]);
-  } finally {
-    f.dispose();
-  }
-});
-test("ready feedback expires when the gesture is no longer committable", () => {
-  const f = fixture();
-  try {
-    f.pointer("pointerdown", 100, 100);
-    f.advance(50);
-    f.pointer("pointermove", 100, 50);
-    expect(f.next.classes.has("ready")).toBe(true);
-    f.advance(600);
-    expect(f.next.classes.has("ready")).toBe(false);
-    f.pointer("pointerup", 100, 50);
-    expect(f.writes).toEqual([]);
-  } finally {
-    f.dispose();
-  }
-});
-test("timely release commits with ready feedback", () => {
-  const f = fixture();
-  try {
-    f.pointer("pointerdown", 100, 100);
-    f.advance(50);
-    f.pointer("pointermove", 100, 50);
-    expect(f.next.classes.has("ready")).toBe(true);
-    f.pointer("pointerup", 100, 50);
-    expect(f.writes).toEqual([{ kind: "next" }]);
-  } finally {
-    f.dispose();
-  }
-});
-test("release cannot commit a direction that was not shown", () => {
-  const f = fixture();
-  try {
-    f.pointer("pointerdown", 100, 100);
-    f.pointer("pointermove", 190, 100);
-    expect(f.pick.classes.has("ready")).toBe(true);
-    f.pointer("pointerup", 20, 100);
-    expect(f.writes).toEqual([]);
-
-    f.pointer("pointerdown", 100, 100);
-    f.pointer("pointermove", 100, 10);
-    expect(f.next.classes.has("ready")).toBe(true);
-    f.pointer("pointerup", 100, 200);
-    expect(f.writes).toEqual([]);
-  } finally {
-    f.dispose();
-  }
-});
-test("navigation availability changes clear held feedback", () => {
-  const f = fixture();
-  try {
-    f.pointer("pointerdown", 100, 100);
-    f.pointer("pointermove", 100, 10);
-    expect(f.next.classes.has("ready")).toBe(true);
-    f.setNavigation({ previous: "disabled", next: "disabled" });
-    f.refresh();
-    expect(f.next.hidden).toBe(true);
-    f.pointer("pointerup", 100, 10);
+    expect(f.pick.hidden).toBe(true);
     expect(f.writes).toEqual([]);
   } finally {
     f.dispose();
