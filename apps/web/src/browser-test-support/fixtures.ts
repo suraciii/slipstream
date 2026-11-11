@@ -180,8 +180,14 @@ export async function server(
   environment: Readonly<
     Record<string, string | undefined>
   > = noProcessingEnvironment,
+  transport: "http" | "https" = "https",
 ) {
-  const running = await startBrowserServer({ base, root, environment });
+  const running = await startBrowserServer({
+    base,
+    root,
+    environment,
+    transport,
+  });
   servers.push(running);
   const login = await activeContext.request.post(
     `${running.url}/api/access/session`,
