@@ -44,7 +44,6 @@ import { createConnectionPresenter } from "./connection-presenter.js";
 import { createPhotoToolsController } from "./photo-tools.js";
 import { createPhotoZoomController } from "./photo-zoom.js";
 import * as photoGestureModule from "./photo-gestures.js";
-import { createPhotoGestureFeedback } from "./photo-gesture-feedback.js";
 import { createPhotoEditorSurfaceController } from "./photo-editor-surface.js";
 import {
   createPhotoViewPresenter,
@@ -127,8 +126,6 @@ type ControlsViewModel = Readonly<{
   recoveryEnabled: boolean;
   previousEnabled: boolean;
   nextEnabled: boolean;
-  previousBoundary: boolean;
-  nextBoundary: boolean;
   undoEnabled: boolean;
   /// The one Grid browse action, whose accessible name and placement View
   /// options owns because it presents the button in both layouts.
@@ -603,7 +600,8 @@ export function createLibraryBrowserView(
     root.querySelectorAll<HTMLButtonElement>("[data-photo-tools-return]"),
   );
   const ratings = required<HTMLElement>(root, "[data-ratings]");
-  const gestureFeedback = createPhotoGestureFeedback(root);
+  const pickFeedback = required<HTMLElement>(root, "[data-pick-feedback]");
+  const rejectFeedback = required<HTMLElement>(root, "[data-reject-feedback]");
 
   const send = (intent: LibraryBrowserIntent): void => {
     if (!alive) return;
@@ -738,6 +736,7 @@ export function createLibraryBrowserView(
   /// state rather than to an empty source's Library check.
   let gridEmptyExplanation = false;
   let emptySourceAction: EmptySourcePresentation["action"] = "check-library";
+  let decisionInteractionEnabled = false;
 
   const compactSources = window.matchMedia("(max-width: 760px)");
   const mobileActionHierarchy = window.matchMedia(
@@ -987,7 +986,8 @@ export function createLibraryBrowserView(
   const photoGestures = photoGestureModule.createPhotoGestures({
     preview,
     stage,
-    gestureFeedback,
+    pickFeedback,
+    rejectFeedback,
     zoom: zoomController,
     rating: ratingControls,
     isAlive: () => alive,
@@ -995,7 +995,7 @@ export function createLibraryBrowserView(
       photoGestureModule.isPaintedImagePointer(event, stage),
     currentPhotoId: () => photoPresenter.currentPhotoId,
     currentSurface: () => photoPresenter.photoSurface,
-    decisionEnabled: gestureFeedback.decisionEnabled,
+    decisionEnabled: () => decisionInteractionEnabled,
     send,
   });
   const scheduleGridRender = gridPresenter.schedule;
@@ -1262,8 +1262,8 @@ export function createLibraryBrowserView(
       // write settles or a source changes readiness, and takes the cell back
       // when the Grid becomes interactive again.
       gridPresenter.setInteractive(model.gridEnabled);
-      gestureFeedback.update(model);
-      photoGestures?.refreshFeedback();
+      decisionInteractionEnabled = model.decisionEnabled;
+      if (!model.decisionEnabled) photoGestures?.cancelUnavailableDecision();
       ratingControls.setDecisionEnabled(model.decisionEnabled);
       dockPick.disabled = !model.decisionEnabled;
       dockReject.disabled = !model.decisionEnabled;

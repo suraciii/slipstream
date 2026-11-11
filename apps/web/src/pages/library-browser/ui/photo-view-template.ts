@@ -29,9 +29,7 @@ export const PHOTO_VIEW_TEMPLATE = `
     <div class="preview-ambient" data-preview-ambient aria-hidden="true" hidden></div>
     <p id="preview-detail-evidence" data-preview-description hidden></p>
     <div class="swipe-feedback reject" data-reject-feedback role="status" aria-live="polite" hidden></div>
-    <div class="swipe-feedback previous" data-previous-feedback role="status" aria-live="polite" hidden></div>
     <div class="image-stage" data-stage></div>
-    <div class="swipe-feedback next" data-next-feedback role="status" aria-live="polite" hidden></div>
     <div class="swipe-feedback pick" data-pick-feedback role="status" aria-live="polite" hidden></div>
     <div class="rating-wheel" data-rating-wheel hidden role="dialog" aria-label="Rating Wheel" aria-describedby="rating-wheel-instructions">
       <p class="rating-wheel-instructions" id="rating-wheel-instructions" data-rating-wheel-instructions>Move across a Rating and release to save.</p>

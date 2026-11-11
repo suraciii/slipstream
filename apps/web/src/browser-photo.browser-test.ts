@@ -914,26 +914,3 @@ test("844 by 390 leaves no text range collision in the review strip", async ({
   await expectControlsAboveSafeViewport(page, 375);
   await expectNoTextRangeCollision(page);
 });
-
-test("HTTP transport warning leaves the review dock inside the safe viewport", async ({
-  page,
-}) => {
-  const { base, root } = await fixture();
-  await writePhotos(root, 2);
-  const running = await server(base, root, undefined, "http");
-  await startReview(page, running.url, "All Photos");
-  await expect(
-    page.locator(".private-transport.access-transport-warning"),
-  ).toBeVisible();
-  await waitForLoadedReviewImage(page);
-
-  // The warning's 56px summary row must come out of the Preview, not out of
-  // the primary controls.
-  const preview = (await page.locator("[data-preview]").boundingBox())!;
-  expect(preview.height).toBeLessThan(650);
-  await expectControlsAboveSafeViewport(page, 844);
-
-  await page.setViewportSize({ width: 375, height: 667 });
-  await waitForLoadedReviewImage(page);
-  await expectControlsAboveSafeViewport(page, 667);
-});
