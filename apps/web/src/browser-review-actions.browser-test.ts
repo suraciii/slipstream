@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { unlink } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -22,6 +22,70 @@ import {
 } from "./browser-test-support/review-geometry.js";
 
 setupBrowserSmoke();
+
+async function startSwipe(
+  page: Page,
+  dx: number,
+  dy: number,
+  pointerType = "touch",
+) {
+  await page.locator("[data-preview]").evaluate(
+    (preview, args) => {
+      const image = preview.querySelector<HTMLImageElement>("[data-stage] img");
+      if (!image) throw new Error("Preview image is not rendered");
+      const box = image.getBoundingClientRect();
+      const init = {
+        bubbles: true,
+        cancelable: true,
+        pointerId: 1,
+        pointerType: args.pointerType,
+        isPrimary: true,
+        clientX: box.x + box.width / 2,
+        clientY: box.y + box.height / 2,
+      };
+      image.dispatchEvent(new PointerEvent("pointerdown", init));
+      image.dispatchEvent(
+        new PointerEvent("pointermove", {
+          ...init,
+          clientX: init.clientX + args.dx,
+          clientY: init.clientY + args.dy,
+        }),
+      );
+    },
+    { dx, dy, pointerType },
+  );
+}
+
+async function endSwipe(
+  page: Page,
+  dx: number,
+  dy: number,
+  action: "release" | "cancel" = "release",
+  pointerType = "touch",
+) {
+  await page.locator("[data-preview]").evaluate(
+    (preview, args) => {
+      const image = preview.querySelector<HTMLImageElement>("[data-stage] img");
+      if (!image) throw new Error("Preview image is not rendered");
+      const box = image.getBoundingClientRect();
+      preview.dispatchEvent(
+        new PointerEvent(
+          args.action === "cancel" ? "pointercancel" : "pointerup",
+          {
+            bubbles: true,
+            cancelable: true,
+            pointerId: 1,
+            pointerType: args.pointerType,
+            isPrimary: true,
+            clientX: box.x + box.width / 2 + args.dx,
+            clientY: box.y + box.height / 2 + args.dy,
+          },
+        ),
+      );
+    },
+    { dx, dy, action, pointerType },
+  );
+}
 
 test("Library status opens in Photo View without disturbing the review or Grid anchor", async ({
   page,
@@ -416,12 +480,17 @@ test("gesture candidates name their effect only while active and tools retain lo
   page,
 }) => {
   const { base, root } = await fixture();
-  await writePhotos(root, 2);
+  await writePhotos(root, 3);
   const running = await server(base, root);
   await page.setViewportSize({ width: 390, height: 844 });
   await startReview(page, running.url, "All Photos");
   await waitForLoadedReviewImage(page);
+  await expect(page.locator("[data-position]")).toHaveText("1 / 3");
+  await page.locator("[data-dock-next]").click();
+  await expect(page.locator("[data-position]")).toHaveText("2 / 3");
+  await waitForLoadedReviewImage(page);
   const feedback = page.locator(".swipe-feedback:visible");
+  const stage = (await page.locator("[data-stage]").boundingBox())!;
   await expect(feedback).toHaveCount(0);
   for (const pointerType of ["touch", "mouse", "pen"]) {
     for (const [dx, dy, label] of [
@@ -430,59 +499,28 @@ test("gesture candidates name their effect only while active and tools retain lo
       [0, -90, "Next"],
       [0, 90, "Previous"],
     ] as const) {
-      await page.locator("[data-stage] img").evaluate(
-        (image, args) => {
-          const box = image.getBoundingClientRect();
-          const init = {
-            bubbles: true,
-            pointerId: 1,
-            pointerType: args.pointerType,
-            isPrimary: true,
-            clientX: box.x + box.width / 2,
-            clientY: box.y + box.height / 2,
-          };
-          image.dispatchEvent(new PointerEvent("pointerdown", init));
-          image.dispatchEvent(
-            new PointerEvent("pointermove", {
-              ...init,
-              clientX: init.clientX + args.dx,
-              clientY: init.clientY + args.dy,
-            }),
-          );
-        },
-        { dx, dy, pointerType },
-      );
+      await startSwipe(page, dx, dy, pointerType);
       await expect(feedback).toHaveText(label);
-      await page.locator("[data-preview]").dispatchEvent("pointercancel", {
-        pointerId: 1,
-        pointerType,
-        isPrimary: true,
-      });
+      await expect(feedback).toHaveClass(/ready/);
+      await expect(feedback).toHaveCSS("writing-mode", "horizontal-tb");
+      const chip = (await feedback.boundingBox())!;
+      if (dx > 0) expect(chip.x).toBeGreaterThan(stage.x + stage.width / 2);
+      else if (dx < 0)
+        expect(chip.x + chip.width).toBeLessThan(stage.x + stage.width / 2);
+      else if (dy < 0) expect(chip.y).toBeLessThan(stage.y + 80);
+      else
+        expect(chip.y + chip.height).toBeGreaterThan(
+          stage.y + stage.height - 80,
+        );
+      await endSwipe(page, dx, dy, "cancel", pointerType);
       await expect(feedback).toHaveCount(0);
-      await expect(page.locator("[data-position]")).toHaveText("1 / 2");
+      await expect(page.locator("[data-position]")).toHaveText("2 / 3");
       await expect(page.locator("[data-selection]")).toHaveText("Unflagged");
     }
   }
   for (const trigger of ["keyboard", "wheel"]) {
     await page.keyboard.press("f");
-    await page.locator("[data-stage] img").evaluate((image) => {
-      const rect = image.getBoundingClientRect();
-      const init = {
-        bubbles: true,
-        pointerId: 1,
-        pointerType: "mouse",
-        isPrimary: true,
-        clientX: rect.x + rect.width / 2,
-        clientY: rect.y + rect.height / 2,
-      };
-      image.dispatchEvent(new PointerEvent("pointerdown", init));
-      image.dispatchEvent(
-        new PointerEvent("pointermove", {
-          ...init,
-          clientX: init.clientX + 90,
-        }),
-      );
-    });
+    await startSwipe(page, 90, 0, "mouse");
     await expect(feedback).toHaveText("Pick");
     if (trigger === "keyboard") await page.keyboard.press("d");
     else
@@ -494,10 +532,8 @@ test("gesture candidates name their effect only while active and tools retain lo
       "manual",
     );
     await expect(feedback).toHaveCount(0);
-    await page
-      .locator("[data-preview]")
-      .dispatchEvent("pointerup", { pointerId: 1 });
-    await expect(page.locator("[data-position]")).toHaveText("1 / 2");
+    await endSwipe(page, 90, 0, "release", "mouse");
+    await expect(page.locator("[data-position]")).toHaveText("2 / 3");
     await expect(page.locator("[data-selection]")).toHaveText("Unflagged");
   }
   await page.keyboard.press("f");
@@ -516,8 +552,10 @@ test("gesture candidates name their effect only while active and tools retain lo
   await expect(
     tools.getByRole("region", { name: "Library", exact: true }),
   ).toBeVisible();
-  await tools.locator("summary").click();
-  await expect(page.locator("[data-preview-help]")).toBeVisible();
+  await expect(
+    tools.getByRole("heading", { name: "Shortcuts and gestures" }),
+  ).toBeVisible();
+  await expect(tools.locator("[data-preview-help]")).toBeVisible();
   await tools.locator("[data-photo-tools-entry=details]").click();
   await expect(page.locator("[data-photo-tools] h2:visible")).toHaveText(
     "Details",
@@ -532,4 +570,35 @@ test("gesture candidates name their effect only while active and tools retain lo
   expect(page.url()).toBe(url);
   await page.keyboard.press("Escape");
   await expect(page.locator("[data-dock-more]")).toBeFocused();
+});
+
+test("gesture feedback explains navigation boundaries without navigating", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 2);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await startReview(page, running.url, "All Photos");
+  await waitForLoadedReviewImage(page);
+
+  await startSwipe(page, 0, 90);
+  await expect(page.locator("[data-previous-feedback]")).toHaveText(
+    "First photo",
+  );
+  await expect(page.locator("[data-previous-feedback]")).toHaveClass(
+    /boundary/,
+  );
+  await endSwipe(page, 0, 90);
+  await expect(page.locator("[data-position]")).toHaveText("1 / 2");
+
+  await page.locator("[data-dock-next]").click();
+  await expect(page.locator("[data-position]")).toHaveText("2 / 2");
+  await waitForLoadedReviewImage(page);
+
+  await startSwipe(page, 0, -90);
+  await expect(page.locator("[data-next-feedback]")).toHaveText("Last photo");
+  await expect(page.locator("[data-next-feedback]")).toHaveClass(/boundary/);
+  await endSwipe(page, 0, -90);
+  await expect(page.locator("[data-position]")).toHaveText("2 / 2");
 });
