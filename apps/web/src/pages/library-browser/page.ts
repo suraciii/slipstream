@@ -90,6 +90,7 @@ import {
 import { formatPhotoCount } from "./ui/photo-count.js";
 import { mountLibraryBrowserAccess } from "./ui/library-browser-access.js";
 import { createPageEditorController } from "./ui/editor-controller-composition.js";
+import { photoNavigationControls } from "./ui/photo-navigation-controls.js";
 import type { BrowserFetch } from "./api/browser-fetch.js";
 
 const SOURCE_ESTABLISHED = { kind: "established" } as const;
@@ -626,7 +627,6 @@ function mountPrivateLibraryBrowser(
       photoRetryPending ||
       photoOwner.busy ||
       removal.busy;
-    const navigationEnabled = !interactionBusy && !photoOwner.opening;
     const recoveryEnabled =
       !pageBusy &&
       !(gridPhotoNavigation?.pending ?? false) &&
@@ -661,11 +661,11 @@ function mountPrivateLibraryBrowser(
         sourceGrid.token !== "" &&
         sourceGrid.selection === "rejected" &&
         sourceGrid.total > 0,
-      previousEnabled: navigationEnabled && photoOwner.currentIndex > 0,
-      nextEnabled:
-        navigationEnabled &&
-        sourceGrid.total > 0 &&
-        photoOwner.currentIndex < sourceGrid.total - 1,
+      ...photoNavigationControls(
+        photoOwner.currentIndex,
+        sourceGrid.total,
+        !interactionBusy && !photoOwner.opening,
+      ),
       undoEnabled:
         connected &&
         !interactionBusy &&

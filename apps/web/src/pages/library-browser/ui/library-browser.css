@@ -1734,36 +1734,12 @@
   color: var(--muted);
   font: 500 0.75rem var(--font-ui);
 }
-.photo-tools-help summary {
-  min-height: 44px;
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  border-radius: 6px;
-  cursor: pointer;
+.photo-tools-help h3 {
+  margin: 0 0 0.35rem;
   color: var(--fg-2);
-  font-weight: 600;
+  font: 600 0.8rem var(--font-ui);
 }
 
-.photo-tools-help summary svg {
-  width: 0.75rem;
-  height: 0.75rem;
-  flex: none;
-  fill: none;
-  stroke: currentColor;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  stroke-width: 1.5;
-  transition: transform 150ms ease;
-}
-
-.photo-tools-help[open] summary svg {
-  transform: rotate(90deg);
-}
-
-.photo-tools-help summary:hover {
-  background: var(--raised-hover);
-}
 .photo-tools-help p {
   margin-top: 0.5rem;
 }

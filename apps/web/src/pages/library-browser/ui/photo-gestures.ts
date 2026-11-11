@@ -45,10 +45,23 @@ export function isPaintedImagePointer(
 export interface PhotoGestures {
   reset(): void;
   cancelUnavailableDecision(): void;
+  refreshFeedback(): void;
   cancelFitGesture(): void;
   dispose(): void;
 }
 type GestureAxis = "horizontal" | "vertical";
+export type NavigationFeedback = "enabled" | "boundary" | "disabled";
+export type NavigationAvailability = Readonly<{
+  previous: NavigationFeedback;
+  next: NavigationFeedback;
+}>;
+export type PhotoGestureFeedback = Readonly<{
+  pick: HTMLElement;
+  reject: HTMLElement;
+  next: HTMLElement;
+  previous: HTMLElement;
+  navigationAvailability: () => NavigationAvailability;
+}>;
 type PointerState = {
   id: number;
   startX: number;
@@ -67,8 +80,7 @@ type PointerState = {
 export function createPhotoGestures({
   preview,
   stage,
-  pickFeedback,
-  rejectFeedback,
+  gestureFeedback,
   zoom,
   rating,
   isAlive,
@@ -80,8 +92,7 @@ export function createPhotoGestures({
 }: Readonly<{
   preview: HTMLElement;
   stage: HTMLElement;
-  pickFeedback: HTMLElement;
-  rejectFeedback: HTMLElement;
+  gestureFeedback: PhotoGestureFeedback;
   zoom: PhotoZoomController;
   rating: RatingControls;
   isAlive: () => boolean;
@@ -91,22 +102,91 @@ export function createPhotoGestures({
   decisionEnabled: () => boolean;
   send: (intent: PhotoGestureIntent) => void;
 }>): PhotoGestures {
+  const {
+    pick: pickFeedback,
+    reject: rejectFeedback,
+    next: nextFeedback,
+    previous: previousFeedback,
+    navigationAvailability,
+  } = gestureFeedback;
   let pointer: PointerState | undefined;
   let holdTimer: number | undefined;
+  let readyExpiry: number | undefined;
   let alive = true;
   const listeners = new AbortController();
   const cancelHold = () => {
     if (holdTimer !== undefined) window.clearTimeout(holdTimer);
     holdTimer = undefined;
   };
-  const feedback = (element: HTMLElement, label = "") => {
+  const cancelReadyExpiry = () => {
+    if (readyExpiry !== undefined) window.clearTimeout(readyExpiry);
+    readyExpiry = undefined;
+  };
+  const feedback = (
+    element: HTMLElement,
+    label = "",
+    state: Readonly<{ ready?: boolean; boundary?: boolean }> = {},
+  ) => {
     element.hidden = !label;
     element.textContent = label;
     element.classList.toggle("pending", !!label);
-    element.classList.toggle(
-      "navigation",
-      label === "Next" || label === "Previous",
+    element.classList.toggle("ready", !!label && Boolean(state.ready));
+    element.classList.toggle("boundary", !!label && Boolean(state.boundary));
+  };
+  const clearFeedback = () => {
+    cancelReadyExpiry();
+    feedback(pickFeedback);
+    feedback(rejectFeedback);
+    feedback(nextFeedback);
+    feedback(previousFeedback);
+  };
+  const commitReady = (distance: number, elapsed: number) =>
+    distance >= SWIPE_COMMIT_PIXELS ||
+    (distance >= 48 &&
+      distance / Math.max(1, elapsed) >= SWIPE_COMMIT_VELOCITY);
+  const scheduleReadyExpiry = (
+    element: HTMLElement,
+    label: string,
+    distance: number,
+    elapsed: number,
+  ) => {
+    cancelReadyExpiry();
+    if (distance >= SWIPE_COMMIT_PIXELS) return;
+    const remaining = distance / SWIPE_COMMIT_VELOCITY - elapsed;
+    readyExpiry = window.setTimeout(
+      () => {
+        readyExpiry = undefined;
+        if (!alive || !isAlive()) return;
+        feedback(element, label);
+      },
+      Math.max(1, Math.ceil(remaining) + 1),
     );
+  };
+  const renderVerticalFeedback = (dy: number, elapsed: number) => {
+    if (!pointer) return;
+    cancelReadyExpiry();
+    const direction = dy < 0 ? "next" : "previous";
+    const state = navigationAvailability()[direction];
+    const label =
+      state === "boundary"
+        ? direction === "next"
+          ? "Last photo"
+          : "First photo"
+        : direction === "next"
+          ? "Next"
+          : "Previous";
+    const distance = Math.abs(dy);
+    const active = state !== "disabled" && distance >= SWIPE_PENDING_PIXELS;
+    const ready = state === "enabled" && commitReady(distance, elapsed);
+    const feedbackElement =
+      direction === "next" ? nextFeedback : previousFeedback;
+    const otherElement = direction === "next" ? previousFeedback : nextFeedback;
+    feedback(feedbackElement, active ? label : "", {
+      ready,
+      boundary: state === "boundary",
+    });
+    feedback(otherElement);
+    if (ready) scheduleReadyExpiry(feedbackElement, label, distance, elapsed);
   };
   const clearPointer = (releaseCapture = true) => {
     cancelHold();
@@ -115,8 +195,7 @@ export function createPhotoGestures({
     if (releaseCapture && id !== undefined && preview.hasPointerCapture(id))
       preview.releasePointerCapture(id);
     stage.style.transform = "";
-    feedback(pickFeedback);
-    feedback(rejectFeedback);
+    clearFeedback();
   };
   const reset = () => {
     cancelHold();
@@ -135,6 +214,22 @@ export function createPhotoGestures({
       rating.isWheelOpen()
     )
       reset();
+  };
+  const refreshFeedback = () => {
+    if (!alive || !isAlive()) return;
+    if (!decisionEnabled()) cancelUnavailableDecision();
+    if (
+      !pointer ||
+      pointer.axis !== "vertical" ||
+      pointer.pan ||
+      pointer.ratingWheel ||
+      zoom.isManual()
+    )
+      return;
+    renderVerticalFeedback(
+      pointer.lastY - pointer.startY,
+      performance.now() - pointer.startedAt,
+    );
   };
   const pointerDown = (event: PointerEvent) => {
     const photoId = currentPhotoId();
@@ -212,8 +307,7 @@ export function createPhotoGestures({
       active.ratingPending = false;
       active.ratingWheel = true;
       stage.style.transform = "";
-      feedback(pickFeedback);
-      feedback(rejectFeedback);
+      clearFeedback();
       rating.openWheel(active.lastX, active.lastY);
       rating.updateWheel(active.lastX, active.lastY);
     }, RATING_WHEEL_HOLD_MS);
@@ -237,8 +331,7 @@ export function createPhotoGestures({
       return;
     }
     if (pointer.pan || zoom.isManual()) {
-      feedback(pickFeedback);
-      feedback(rejectFeedback);
+      clearFeedback();
       zoom.panBy(stepX, stepY);
       return;
     }
@@ -250,22 +343,31 @@ export function createPhotoGestures({
       if (Math.abs(dx) !== Math.abs(dy))
         pointer.axis = Math.abs(dx) > Math.abs(dy) ? "horizontal" : "vertical";
     }
+    const elapsed = event.timeStamp - pointer.startedAt;
     if (pointer.axis === "vertical") {
       stage.style.transform = `translateY(${Math.max(-140, Math.min(140, dy))}px)`;
-      feedback(pickFeedback, dy < -SWIPE_PENDING_PIXELS ? "Next" : "");
-      feedback(rejectFeedback, dy > SWIPE_PENDING_PIXELS ? "Previous" : "");
+      renderVerticalFeedback(dy, elapsed);
       return;
     }
     if (pointer.axis === "horizontal") {
       stage.style.transform = `translateX(${Math.max(-140, Math.min(140, dx))}px)`;
-      feedback(
-        pickFeedback,
-        decisionEnabled() && dx > SWIPE_PENDING_PIXELS ? "Pick" : "",
-      );
-      feedback(
-        rejectFeedback,
-        decisionEnabled() && dx < -SWIPE_PENDING_PIXELS ? "Reject" : "",
-      );
+      cancelReadyExpiry();
+      const distance = Math.abs(dx);
+      const active = decisionEnabled() && distance >= SWIPE_PENDING_PIXELS;
+      const ready = active && commitReady(distance, elapsed);
+      feedback(pickFeedback, active && dx > 0 ? "Pick" : "", {
+        ready: ready && dx > 0,
+      });
+      feedback(rejectFeedback, active && dx < 0 ? "Reject" : "", {
+        ready: ready && dx < 0,
+      });
+      if (ready)
+        scheduleReadyExpiry(
+          dx > 0 ? pickFeedback : rejectFeedback,
+          dx > 0 ? "Pick" : "Reject",
+          distance,
+          elapsed,
+        );
     }
   };
   const finishPointer = (event: PointerEvent, cancelled = false) => {
@@ -312,21 +414,25 @@ export function createPhotoGestures({
     const dy = event.clientY - active.startY;
     const distance = active.axis === "horizontal" ? Math.abs(dx) : Math.abs(dy);
     const elapsed = Math.max(1, event.timeStamp - active.startedAt);
-    const velocity = distance / elapsed;
-    if (
-      distance < SWIPE_COMMIT_PIXELS &&
-      !(distance >= 48 && velocity >= SWIPE_COMMIT_VELOCITY)
-    )
-      return;
+    if (!commitReady(distance, elapsed)) return;
+    const lastX = active.lastX - active.startX;
+    const lastY = active.lastY - active.startY;
     if (active.axis === "vertical") {
-      send({ kind: dy < 0 ? "next" : "previous" });
+      const direction = dy < 0 ? "next" : "previous";
+      const lastDirection = lastY < 0 ? "next" : "previous";
+      if (lastY !== 0 && direction !== lastDirection) return;
+      if (navigationAvailability()[direction] !== "enabled") return;
+      send({ kind: direction });
       return;
     }
     if (!decisionEnabled()) return;
+    const direction = dx > 0 ? "picked" : "rejected";
+    const lastDirection = lastX > 0 ? "picked" : "rejected";
+    if (lastX !== 0 && direction !== lastDirection) return;
     send({
       kind: "photo-mutation",
       field: "selectionState",
-      value: dx > 0 ? "picked" : "rejected",
+      value: direction,
       advance: true,
     });
   };
@@ -358,6 +464,7 @@ export function createPhotoGestures({
   return {
     reset,
     cancelUnavailableDecision,
+    refreshFeedback,
     cancelFitGesture,
     dispose() {
       if (!alive) return;

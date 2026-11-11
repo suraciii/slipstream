@@ -720,6 +720,10 @@ These are navigation accelerators only: they never change Selection State, Ratin
 
 Direction feedback MUST name the mapped candidate action. Decision gestures use **Pick** or **Reject**; navigation gestures use **Next** or **Previous** without decision colors.
 
+Direction feedback MUST follow the gesture axis: horizontal decisions at the left or right edge, and vertical navigation at the top or bottom edge.
+
+At a source boundary, the unavailable candidate MUST be suppressed or replaced by a neutral boundary cue that does not name an action.
+
 Direction feedback MUST clear on:
 
 - release or below-threshold cancellation;
