@@ -41,7 +41,7 @@ export const PHOTO_VIEW_TEMPLATE = `
   </section>
   <div class="filmstrip-host" data-filmstrip-host><div class="filmstrip" data-filmstrip role="group" aria-label="Nearby Photos" hidden></div></div>
   <footer class="photo-review-controls" aria-label="Photo review">
-    <div class="photo-navigation" data-photo-navigation role="group" aria-label="Photo navigation"><button type="button" class="quiet" data-dock-previous disabled>Previous</button><p class="photo-position" data-position>0 / 0</p><button type="button" class="quiet" data-dock-next disabled>Next</button></div>
+    <div class="photo-navigation" data-photo-navigation role="group" aria-label="Photo navigation"><button type="button" class="quiet" data-dock-previous disabled>Previous</button><div class="photo-navigation-status"><p class="photo-position" data-position>0 / 0</p><p class="photo-boundary" data-photo-boundary hidden></p></div><button type="button" class="quiet" data-dock-next disabled>Next</button></div>
     <div class="quick-action-dock" data-quick-action-dock role="group" aria-label="Photo actions">
       <button type="button" class="reject-button" data-dock-reject>Reject</button>
       <button type="button" class="rating-dock-button" data-dock-rating disabled aria-controls="rating-choices" aria-expanded="false"><span class="rating-dock-stars" data-dock-stars aria-hidden="true">☆☆☆☆☆</span><span class="rating-dock-label" data-dock-rating-label>No Rating</span></button>

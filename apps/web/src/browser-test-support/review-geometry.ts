@@ -55,10 +55,11 @@ export async function expectNoTextRangeCollision(page: Page) {
   const overlaps = await page
     .locator("[data-photo-navigation]")
     .evaluate((strip) => {
-      const ranges = Array.from(strip.children).flatMap((child) => {
+      const ranges = Array.from(strip.children).flatMap((child, childIndex) => {
         const range = document.createRange();
         range.selectNodeContents(child);
         return Array.from(range.getClientRects()).map((rect) => ({
+          childIndex,
           text: child.textContent ?? "",
           rect,
         }));
@@ -68,6 +69,9 @@ export async function expectNoTextRangeCollision(page: Page) {
         for (let other = index + 1; other < ranges.length; other += 1) {
           const left = ranges[index]!;
           const right = ranges[other]!;
+          // A child with multiple line boxes or block children is allowed to
+          // stack its own text; only different tracks may collide.
+          if (left.childIndex === right.childIndex) continue;
           if (
             left.rect.left < right.rect.right &&
             right.rect.left < left.rect.right &&

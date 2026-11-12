@@ -1216,12 +1216,29 @@
   min-height: 2.75rem;
 }
 
+.photo-navigation-status {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.05rem;
+}
+
 .photo-position {
   margin: 0;
   color: var(--text);
   font-size: 0.78rem;
   font-variant-numeric: tabular-nums;
   text-align: center;
+}
+
+.photo-boundary {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.66rem;
+  line-height: 1.2;
+  text-align: center;
+  white-space: nowrap;
 }
 
 /* The wide layout shows the bounded neighbor strip beside the Preview. A

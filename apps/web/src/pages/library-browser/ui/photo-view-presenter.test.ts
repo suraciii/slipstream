@@ -64,6 +64,7 @@ const fixture = () => {
   for (const selector of [
     "[data-photo-title]",
     "[data-position]",
+    "[data-photo-boundary]",
     "[data-photo-filename]",
     "[data-selection]",
     "[data-selection-chip]",
@@ -93,6 +94,8 @@ const fixture = () => {
   });
   return {
     presenter,
+    position: root.selectors.get("[data-position]")!,
+    boundary: root.selectors.get("[data-photo-boundary]")!,
     restore: () => {
       if (previousDocument)
         Object.defineProperty(globalThis, "document", previousDocument);
@@ -154,6 +157,41 @@ describe("Photo view image surface", () => {
       expect(ui.presenter.isReviewImageSurfaceCurrent(first.photoSurface)).toBe(
         false,
       );
+    } finally {
+      ui.restore();
+    }
+  });
+
+  test("names the end of the view only on the last Photo", () => {
+    const ui = fixture();
+    try {
+      ui.presenter.renderPhotoShell(model("photo-1"));
+      expect(ui.position.textContent).toBe("1 / 2");
+      expect(ui.boundary.hidden).toBe(true);
+
+      ui.presenter.renderPhotoShell({
+        ...model("photo-2"),
+        index: 1,
+      });
+      expect(ui.position.textContent).toBe("2 / 2");
+      expect(ui.boundary.hidden).toBe(false);
+      expect(ui.boundary.textContent).toBe("End of view");
+
+      ui.presenter.renderPhotoShell(model("photo-1"));
+      expect(ui.boundary.hidden).toBe(true);
+      expect(ui.boundary.textContent).toBe("");
+
+      ui.presenter.renderPhotoShell({
+        ...model("only-photo"),
+        total: 1,
+      });
+      expect(ui.position.textContent).toBe("1 / 1");
+      expect(ui.boundary.hidden).toBe(false);
+      expect(ui.boundary.textContent).toBe("End of view");
+
+      ui.presenter.renderPhotoFacts({ index: 0, total: 0 });
+      expect(ui.boundary.hidden).toBe(true);
+      expect(ui.boundary.textContent).toBe("");
     } finally {
       ui.restore();
     }

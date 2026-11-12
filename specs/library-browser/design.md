@@ -486,6 +486,12 @@ Reopening applies the filter to the latest facts and re-anchors the current Phot
 
 Positions, `GET /api/browse/{token}/position`, windows, and Previous and Next navigation all resolve inside the frozen filtered sequence, so a filtered view stays one bounded sequence with one meaning for every position.
 
+The last position in a Browse Snapshot is a navigation boundary.
+
+Reaching it MUST NOT re-evaluate the filter, replace the Snapshot, or change its Photo membership or total.
+
+The browser MUST NOT infer source completion from that position.
+
 The server resolves Album saved position when it creates the Snapshot.
 
 It applies the unavailable-member fallback defined by the Product Spec.

@@ -372,7 +372,19 @@ Recomputing it MUST change no Photo fact, Selection State, Rating, Album members
 
 Limited Preview detail MUST NOT be presented as a separate fact row.
 
-The next and previous Photos MUST remain reachable without recording a decision.
+When a next or previous Photo exists, it MUST remain reachable without recording a decision.
+
+When the open sequence has no next Photo, Photo View MUST present an end-of-view boundary.
+
+The boundary MUST keep the current Photo and decision controls available.
+
+Next MUST be unavailable at the boundary; Previous MUST remain operable when a previous Photo exists.
+
+The navigation group MUST retain position and total and expose the boundary name. A disabled Next alone MUST NOT express the boundary.
+
+It MUST NOT report source completion or a zero-match result.
+
+The boundary MAY show source decision progress from existing source facts.
 
 Photo View MUST provide the current Photo's immediate neighbors as a bounded strip of thumbnails centered on the current Photo.
 

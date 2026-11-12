@@ -1,5 +1,6 @@
 import { formatCaptureTime } from "./capture-time.js";
 import type { ViewSelectionState } from "./library-browser-view.js";
+import { isPhotoSequenceEnd } from "./photo-navigation-controls.js";
 import { paragraph, required, selectionLabel } from "./presentation-helpers.js";
 
 export type ViewPreviewSource = "jpeg-original" | "raw-embedded-jpeg";
@@ -105,6 +106,7 @@ export function createPhotoViewPresenter({
 }>): PhotoViewPresenter {
   const title = required<HTMLElement>(root, "[data-photo-title]");
   const position = required<HTMLElement>(root, "[data-position]");
+  const boundary = required<HTMLElement>(root, "[data-photo-boundary]");
   const filename = required<HTMLElement>(root, "[data-photo-filename]");
   const selection = required<HTMLElement>(root, "[data-selection]");
   const selectionChip = required<HTMLElement>(root, "[data-selection-chip]");
@@ -185,6 +187,9 @@ export function createPhotoViewPresenter({
   const renderPhotoFacts = (model: PhotoFactsViewModel) => {
     if (!alive) return;
     position.textContent = `${(model.index + 1).toLocaleString()} / ${model.total.toLocaleString()}`;
+    const atEnd = isPhotoSequenceEnd(model.index, model.total);
+    boundary.textContent = atEnd ? "End of view" : "";
+    boundary.hidden = !atEnd;
     filename.textContent = model.originalFilename ?? "—";
     filename.title = model.originalFilename ?? "";
     if (detailsIdentity)
