@@ -85,3 +85,48 @@ export async function expectNoTextRangeCollision(page: Page) {
     });
   expect(overlaps).toEqual([]);
 }
+
+/// Asserts the position and end-of-view boundary paint as separate text ranges
+/// inside the navigation group's status stack.
+export async function expectNavigationStatusTextRangesClear(page: Page) {
+  const overlaps = await page
+    .locator("[data-photo-navigation]")
+    .evaluate((strip) => {
+      const status = strip.querySelector<HTMLElement>(
+        ".photo-navigation-status",
+      );
+      if (!status) return [];
+      const elements = Array.from(status.children).filter(
+        (child): child is HTMLElement =>
+          child instanceof HTMLElement &&
+          !child.hasAttribute("hidden") &&
+          (child.textContent ?? "").trim() !== "",
+      );
+      const ranges = elements.flatMap((element, elementIndex) => {
+        const range = document.createRange();
+        range.selectNodeContents(element);
+        return Array.from(range.getClientRects()).map((rect) => ({
+          elementIndex,
+          text: element.textContent ?? "",
+          rect,
+        }));
+      });
+      const collisions: string[] = [];
+      for (let index = 0; index < ranges.length; index += 1) {
+        for (let other = index + 1; other < ranges.length; other += 1) {
+          const left = ranges[index]!;
+          const right = ranges[other]!;
+          if (left.elementIndex === right.elementIndex) continue;
+          if (
+            left.rect.left < right.rect.right &&
+            right.rect.left < left.rect.right &&
+            left.rect.top < right.rect.bottom &&
+            right.rect.top < left.rect.bottom
+          )
+            collisions.push(`${left.text} / ${right.text}`);
+        }
+      }
+      return collisions;
+    });
+  expect(overlaps).toEqual([]);
+}

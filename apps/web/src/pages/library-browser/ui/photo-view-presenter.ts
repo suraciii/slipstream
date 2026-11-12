@@ -188,8 +188,8 @@ export function createPhotoViewPresenter({
     if (!alive) return;
     position.textContent = `${(model.index + 1).toLocaleString()} / ${model.total.toLocaleString()}`;
     const atEnd = isPhotoSequenceEnd(model.index, model.total);
-    boundary.textContent = atEnd ? "End of view" : "";
     boundary.hidden = !atEnd;
+    boundary.textContent = atEnd ? "End of view" : "";
     filename.textContent = model.originalFilename ?? "—";
     filename.title = model.originalFilename ?? "";
     if (detailsIdentity)
