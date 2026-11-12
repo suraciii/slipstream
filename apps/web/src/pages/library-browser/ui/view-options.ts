@@ -69,6 +69,7 @@ export type ViewOptionsElements = Readonly<{
   sortSelect: HTMLSelectElement;
   optionsProgress: HTMLElement;
   optionsVisibleResults: HTMLElement;
+  committedFilters: HTMLElement;
   filterSelect: HTMLSelectElement;
   sizeSelect: HTMLSelectElement;
   filters: ViewOptionsFilterElements;
@@ -135,6 +136,7 @@ export function createViewOptions({
     sortSelect,
     optionsProgress,
     optionsVisibleResults,
+    committedFilters,
     filterSelect,
     sizeSelect,
     filters: filterControls,
@@ -209,14 +211,22 @@ export function createViewOptions({
     onOpen: resetDraft,
   });
 
+  const summaryToken = (text: string): HTMLSpanElement => {
+    const token = document.createElement("span");
+    token.className = "options-summary-token";
+    token.textContent = text;
+    return token;
+  };
+
   const presentViewOptionsFlag = () => {
-    const parts: string[] = [];
+    const filterParts: string[] = [];
     if (committedFilter !== "all")
-      parts.push(
+      filterParts.push(
         FILTER_OPTIONS.find((option) => option.value === committedFilter)
           ?.label ?? "",
       );
-    parts.push(...filters.committedLabels());
+    filterParts.push(...filters.committedLabels());
+    const parts = [...filterParts];
     if (committedOrder !== "source-default")
       parts.push(
         SORT_OPTIONS[renderedSortKind ?? "library"].find(
@@ -224,16 +234,22 @@ export function createViewOptions({
         )?.label ?? "",
       );
     const text = parts.filter(Boolean).join(" · ");
-    const count =
-      (committedFilter === "all" ? 0 : 1) + filters.committedLabels().length;
     const compactParts = [
-      count ? `Filters: ${count}` : "",
+      filterParts.length ? `Filters: ${filterParts.length}` : "",
       committedOrder !== "source-default" ? "Custom order" : "",
     ].filter(Boolean);
-    wideSummary.textContent = text ? ` · ${text}` : "";
+    wideSummary.replaceChildren(...parts.map(summaryToken));
     compactSummary.textContent = compactParts.length
       ? ` · ${compactParts.join(" · ")}`
       : "";
+    committedFilters.replaceChildren();
+    if (filterParts.length > 0) {
+      const label = document.createElement("span");
+      label.className = "options-summary-label";
+      label.textContent = "Applied filter";
+      committedFilters.append(label, ...filterParts.map(summaryToken));
+    }
+    committedFilters.hidden = filterParts.length === 0;
     viewOptionsFlag.hidden = text === "";
     viewOptionsOpen.setAttribute(
       "aria-label",

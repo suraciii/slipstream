@@ -346,6 +346,16 @@ export async function openAdvancedFilters(page: Page) {
   await expect(details).toHaveAttribute("open", "");
 }
 
+/// Opens the second-precision Capture Time controls inside Advanced filters.
+export async function openExactTime(page: Page) {
+  await openAdvancedFilters(page);
+  const details = page.locator("[data-capture-exact]");
+  await expect(details).toBeVisible();
+  if ((await details.getAttribute("open")) === null)
+    await details.locator(":scope > summary").click();
+  await expect(details).toHaveAttribute("open", "");
+}
+
 /** Opens the metadata inspection and editing disclosure in Details. */
 export async function openPhotoDetailsAdvanced(page: Page) {
   const details = page.locator("[data-details-advanced]");

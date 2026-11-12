@@ -1540,16 +1540,116 @@
   gap: 0.5rem;
 }
 
-.options-advanced > summary {
+.options-advanced > summary,
+.options-exact-time > summary {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-height: 44px;
   color: var(--fg-2);
   cursor: pointer;
   font: 600 0.8rem/1.4 var(--font-ui);
+  list-style: none;
+}
+
+.options-advanced > summary::-webkit-details-marker,
+.options-exact-time > summary::-webkit-details-marker {
+  display: none;
+}
+
+.options-advanced > summary::before,
+.options-exact-time > summary::before {
+  content: "";
+  flex: none;
+  width: 5px;
+  height: 8px;
+  background: var(--muted);
+  clip-path: polygon(0 0, 100% 50%, 0 100%);
+  transition: transform 120ms ease;
+}
+
+.options-advanced[open] > summary::before,
+.options-exact-time[open] > summary::before {
+  transform: rotate(90deg);
 }
 
 .options-advanced-fields {
   display: grid;
   gap: 0.5rem;
   padding-top: 0.35rem;
+}
+
+.options-filter-group {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  display: grid;
+  gap: 0.5rem;
+  min-inline-size: 0;
+}
+
+.options-filter-group > legend {
+  padding: 0;
+  color: var(--fg-2);
+  font: 600 0.8rem/1.4 var(--font-ui);
+}
+
+.options-exact-time {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.options-exact-fields {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.options-inline-action {
+  justify-self: start;
+  min-height: 44px;
+  padding-inline: 0.5rem;
+}
+
+.options-error {
+  margin: 0;
+  color: var(--rejected);
+  font: 0.75rem/1.4 var(--font-ui);
+}
+
+.options-field input::placeholder {
+  color: var(--fg-2);
+  opacity: 1;
+}
+
+.options-summary-wide {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.1rem 0.3rem;
+}
+
+.options-summary-token + .options-summary-token::before {
+  content: "·";
+  margin-inline-end: 0.35rem;
+  color: var(--fg-3);
+}
+
+.options-committed-summary {
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.25rem 0.4rem;
+  color: var(--fg-2);
+  font: 0.72rem/1.4 var(--font-ui);
+}
+
+.options-committed-summary[hidden] {
+  display: none;
+}
+
+.options-summary-label {
+  color: var(--fg-3);
 }
 
 .options-help {

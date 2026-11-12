@@ -433,7 +433,7 @@ test("narrow summary counts groups and exposes every committed value through Vie
     /Filters: 5.*Custom order/,
   );
   await expect(entry).toHaveAccessibleName(
-    /Picked.*Rating 2–4.*JPEG.*Available Originals.*2026-01-02T12:30:45.*2026-01-04T12:30:59.*latest first/,
+    /Picked.*Rating 2–4.*JPEG.*Available Originals.*2026-01-02 12:30:45.*2026-01-04 12:30:59.*latest first/,
   );
   await entry.focus();
   await page.keyboard.press("Enter");
@@ -441,6 +441,11 @@ test("narrow summary counts groups and exposes every committed value through Vie
     "open",
     "",
   );
+  const committedSummary = page.locator("[data-committed-filter-summary]");
+  await expect(committedSummary).toContainText("Applied filter");
+  await expect(committedSummary).toContainText("Picked");
+  await expect(committedSummary).toContainText("Rating 2–4");
+  await expect(committedSummary).toContainText("JPEG only");
   await expect(page.locator("[data-filter-select]")).toHaveValue("picked");
   await expect(page.locator("[data-rating-min-select]")).toHaveValue("2");
   await expect(page.locator("[data-rating-max-select]")).toHaveValue("4");
