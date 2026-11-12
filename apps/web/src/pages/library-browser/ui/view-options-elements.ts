@@ -47,6 +47,10 @@ export function viewOptionsElements(root: ParentNode): ViewOptionsElements {
       root,
       "[data-grid-visible-results]",
     ),
+    committedFilters: required<HTMLElement>(
+      root,
+      "[data-committed-filter-summary]",
+    ),
     filterSelect: required<HTMLSelectElement>(root, "[data-filter-select]"),
     sizeSelect: required<HTMLSelectElement>(root, "[data-size-select]"),
     filters: {
@@ -58,11 +62,23 @@ export function viewOptionsElements(root: ParentNode): ViewOptionsElements {
         root,
         "[data-rating-max-select]",
       ),
+      ratingMatch: required<HTMLButtonElement>(root, "[data-rating-match]"),
+      ratingError: required<HTMLElement>(root, "[data-rating-error]"),
       kindSelect: required<HTMLSelectElement>(root, "[data-kind-select]"),
       availableSelect: required<HTMLSelectElement>(
         root,
         "[data-available-select]",
       ),
+      capturedFromDate: required<HTMLInputElement>(
+        root,
+        "[data-captured-from-date]",
+      ),
+      capturedThroughDate: required<HTMLInputElement>(
+        root,
+        "[data-captured-through-date]",
+      ),
+      captureExact: required<HTMLDetailsElement>(root, "[data-capture-exact]"),
+      captureError: required<HTMLElement>(root, "[data-capture-time-error]"),
       capturedFrom: required<HTMLInputElement>(root, "[data-captured-from]"),
       capturedBefore: required<HTMLInputElement>(
         root,

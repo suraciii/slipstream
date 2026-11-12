@@ -17,6 +17,7 @@ import {
 import {
   applyViewOptions,
   openAdvancedFilters,
+  openExactTime,
   openSources,
   openViewOptions,
   waitForGridFrame,
@@ -33,9 +34,10 @@ test("View options keeps advanced conditions behind one disclosure", async ({
   await page.goto(running.url);
   await expect(page.getByText(/^Ready · 1 Photo$/)).toBeVisible();
   await openViewOptions(page);
+  await expect(page.locator("[data-committed-filter-summary]")).toBeHidden();
   const advanced = page.locator("[data-advanced-filters]");
   await expect(advanced).not.toHaveAttribute("open", "");
-  await advanced.locator("summary").click();
+  await advanced.locator(":scope > summary").click();
   await expect(advanced).toHaveAttribute("open", "");
 });
 
@@ -197,6 +199,29 @@ test("a selected high-rated view keeps its exact filtered count", async ({
   await expect(page.locator(".photo-cell")).toHaveCount(6);
 });
 
+test("Match minimum pairs an exact Rating bound", async ({ page }) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 1);
+  const running = await server(base, root);
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 1 Photo$/)).toBeVisible();
+
+  await openViewOptions(page);
+  await page.locator("[data-rating-min-select]").selectOption("3");
+  const match = page.locator("[data-rating-match]");
+  await expect(match).toBeEnabled();
+  // Options below the chosen minimum cannot produce a reversed pair.
+  await expect(
+    page.locator("[data-rating-max-select] option[value='2']"),
+  ).toBeDisabled();
+  await match.click();
+  await expect(page.locator("[data-rating-max-select]")).toHaveValue("3");
+  await applyViewOptions(page);
+
+  await expect(page).toHaveURL(/rating-min=3/);
+  await expect(page).toHaveURL(/rating-max=3/);
+});
+
 test("a RAW-only view keeps RAW and same-basename JPEG Photos independent", async ({
   page,
 }) => {
@@ -342,7 +367,7 @@ test("a Capture Time range is inclusive below and exclusive above", async ({
   // The lower bound includes its own second; the upper bound excludes it, and
   // the Photo without a Capture Time never matches a supplied bound.
   await openViewOptions(page);
-  await openAdvancedFilters(page);
+  await openExactTime(page);
   await page.locator("[data-captured-from]").fill(CAPTURE_TIMES.b);
   await page.locator("[data-captured-before]").fill(CAPTURE_TIMES.e);
   await applyViewOptions(page);
@@ -350,7 +375,7 @@ test("a Capture Time range is inclusive below and exclusive above", async ({
   await expect(page).toHaveURL(/captured-from=2026-01-03T09%3A00%3A45/);
   await expect(page).toHaveURL(/captured-before=2026-01-06T09%3A00%3A59/);
   await openViewOptions(page);
-  await openAdvancedFilters(page);
+  await openExactTime(page);
   await expect(page.locator("[data-captured-from]")).toHaveValue(
     CAPTURE_TIMES.b,
   );
@@ -371,6 +396,201 @@ test("a Capture Time range is inclusive below and exclusive above", async ({
   );
 });
 
+test("whole-day Capture Time controls write exact camera-local bounds", async ({
+  page,
+}) => {
+  test.setTimeout(180_000);
+  const { base, root } = await fixture();
+  await seedFilterSource(page, root);
+  const running = await server(base, root);
+
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 6 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+
+  await openViewOptions(page);
+  await openAdvancedFilters(page);
+  await page.locator("[data-captured-from-date]").fill("2026-01-03");
+  await page.locator("[data-captured-through-date]").fill("2026-01-04");
+  await applyViewOptions(page);
+
+  // The date shortcut still commits the exact lower bound and the exclusive
+  // next-day upper bound, so the day range is inclusive on both ends.
+  await expect(page).toHaveURL(/captured-from=2026-01-03T00%3A00%3A00/);
+  await expect(page).toHaveURL(/captured-before=2026-01-05T00%3A00%3A00/);
+  await expect(page.locator(".photo-cell")).toHaveCount(2);
+  for (const name of ["b.jpg", "c.jpg"]) {
+    await expect(
+      page.locator(".photo-cell").filter({ hasText: name }),
+    ).toHaveCount(1);
+  }
+
+  await openViewOptions(page);
+  await openAdvancedFilters(page);
+  await expect(page.locator("[data-captured-from-date]")).toHaveValue(
+    "2026-01-03",
+  );
+  await expect(page.locator("[data-captured-through-date]")).toHaveValue(
+    "2026-01-04",
+  );
+  const exact = page.locator("[data-capture-exact]");
+  await expect(exact).not.toHaveAttribute("open", "");
+  await expect(page.locator("[data-captured-from]")).toHaveValue(
+    "2026-01-03T00:00:00",
+  );
+  await expect(page.locator("[data-captured-before]")).toHaveValue(
+    "2026-01-05T00:00:00",
+  );
+  await page.locator("[data-view-options-cancel]").click();
+});
+
+test("a second-precision bound retains the other whole-day shortcut", async ({
+  page,
+}) => {
+  test.setTimeout(180_000);
+  const { base, root } = await fixture();
+  await seedFilterSource(page, root);
+  const running = await server(base, root);
+
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 6 Photos$/)).toBeVisible();
+  await openViewOptions(page);
+  await openAdvancedFilters(page);
+  await page.locator("[data-captured-from-date]").fill("2026-01-03");
+  await page.locator("[data-captured-through-date]").fill("2026-01-04");
+
+  await openExactTime(page);
+  await page.locator("[data-captured-from]").fill("2026-01-03T12:30:45");
+  // The exact lower bound has no whole-day shortcut, but the upper bound
+  // remains a date instead of being discarded with it.
+  await expect(page.locator("[data-captured-from-date]")).toHaveValue("");
+  await expect(page.locator("[data-captured-through-date]")).toHaveValue(
+    "2026-01-04",
+  );
+  await page.locator("[data-captured-through-date]").fill("2026-01-05");
+  await applyViewOptions(page);
+
+  await expect(page).toHaveURL(/captured-from=2026-01-03T12%3A30%3A45/);
+  await expect(page).toHaveURL(/captured-before=2026-01-06T00%3A00%3A00/);
+  await expect(page.locator(".photo-cell")).toHaveCount(2);
+
+  await openViewOptions(page);
+  await openExactTime(page);
+  await expect(page.locator("[data-captured-from]")).toHaveValue(
+    "2026-01-03T12:30:45",
+  );
+  await expect(page.locator("[data-captured-before]")).toHaveValue(
+    "2026-01-06T00:00:00",
+  );
+  await expect(page.locator("[data-captured-from-date]")).toHaveValue("");
+  await expect(page.locator("[data-captured-through-date]")).toHaveValue(
+    "2026-01-05",
+  );
+  await page.locator("[data-view-options-cancel]").click();
+});
+
+test("an incomplete date cannot silently clear its whole-day bound", async ({
+  page,
+}) => {
+  test.setTimeout(180_000);
+  const { base, root } = await fixture();
+  await seedFilterSource(page, root);
+  const running = await server(base, root);
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 6 Photos$/)).toBeVisible();
+  const original = page.url();
+
+  await openViewOptions(page);
+  await openAdvancedFilters(page);
+  const fromDate = page.locator("[data-captured-from-date]");
+  await fromDate.fill("2026-01-03");
+  await page.locator("[data-captured-through-date]").fill("2026-01-04");
+  await expect(page.locator("[data-captured-from]")).toHaveValue(
+    "2026-01-03T00:00:00",
+  );
+  await expect(page.locator("[data-captured-before]")).toHaveValue(
+    "2026-01-05T00:00:00",
+  );
+
+  // A partially entered native date has no value but reports badInput. It
+  // must not be mistaken for a deliberate clear of the bound.
+  await fromDate.click();
+  await fromDate.press("Backspace");
+  expect(
+    await fromDate.evaluate(
+      (input) => (input as HTMLInputElement).validity.badInput,
+    ),
+  ).toBe(true);
+  await expect(page.locator("[data-captured-from]")).toHaveValue(
+    "2026-01-03T00:00:00",
+  );
+  await expect(page.locator("[data-draft-discard-notice]")).toBeVisible();
+
+  // Editing the other bound in Exact time must not replace the in-progress
+  // From date and hide the incomplete entry.
+  await openExactTime(page);
+  await page.locator("[data-captured-before]").fill("2026-01-05T00:00:00");
+  expect(
+    await fromDate.evaluate(
+      (input) => (input as HTMLInputElement).validity.badInput,
+    ),
+  ).toBe(true);
+
+  await page.locator("[data-view-options-apply]").click();
+  const dialog = page.locator("[data-view-options]");
+  await expect(dialog).toBeVisible();
+  await expect(page.locator("[data-capture-time-error]")).toHaveText(
+    "Enter a complete date or clear the field.",
+  );
+  await expect(fromDate).toBeFocused();
+  await expect(fromDate).toHaveAccessibleDescription(
+    /Enter a complete date or clear the field/,
+  );
+  expect(page.url()).toBe(original);
+
+  await fromDate.fill("2026-01-03");
+  await page.locator("[data-view-options-apply]").click();
+  await expect(dialog).toBeHidden();
+  await expect(page).toHaveURL(/captured-from=2026-01-03T00%3A00%3A00/);
+  await expect(page).toHaveURL(/captured-before=2026-01-05T00%3A00%3A00/);
+});
+
+test("a reversed whole-day range blocks Apply", async ({ page }) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 1);
+  const running = await server(base, root);
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 1 Photo$/)).toBeVisible();
+  const original = page.url();
+
+  await openViewOptions(page);
+  await openAdvancedFilters(page);
+  await page.locator("[data-captured-from-date]").fill("2026-01-05");
+  await page.locator("[data-captured-through-date]").fill("2026-01-04");
+  await page.locator("[data-view-options-apply]").click();
+
+  const dialog = page.locator("[data-view-options]");
+  await expect(dialog).toBeVisible();
+  const error = page.locator("[data-capture-time-error]");
+  await expect(error).toHaveText(
+    "Through date must not be before the From date.",
+  );
+  const throughDate = page.locator("[data-captured-through-date]");
+  await expect(throughDate).toBeFocused();
+  await expect(throughDate).toHaveAccessibleDescription(
+    /Through date must not be before the From date/,
+  );
+  expect(page.url()).toBe(original);
+
+  // Correcting the range clears the error and commits the whole days.
+  await page.locator("[data-captured-through-date]").fill("2026-01-06");
+  await expect(error).toBeHidden();
+  await page.locator("[data-view-options-apply]").click();
+  await expect(dialog).toBeHidden();
+  await expect(page).toHaveURL(/captured-from=2026-01-05T00%3A00%3A00/);
+  await expect(page).toHaveURL(/captured-before=2026-01-07T00%3A00%3A00/);
+});
+
 test("Refresh, Retry, and Snapshot expiry retain the committed filter", async ({
   page,
 }) => {
@@ -383,7 +603,7 @@ test("Refresh, Retry, and Snapshot expiry retain the committed filter", async ({
   await page.goto(running.url);
   await expect(page.getByText(/^Ready · 6 Photos$/)).toBeVisible();
   await openViewOptions(page);
-  await openAdvancedFilters(page);
+  await openExactTime(page);
   await page.locator("[data-rating-min-select]").selectOption("4");
   await page.locator("[data-kind-select]").selectOption("jpeg");
   await page.locator("[data-available-select]").selectOption("true");
@@ -596,7 +816,7 @@ test("invalid camera-local bounds never open a source", async ({ page }) => {
   });
   const original = page.url();
   await openViewOptions(page);
-  await openAdvancedFilters(page);
+  await openExactTime(page);
   const from = page.locator("[data-captured-from]");
   const before = page.locator("[data-captured-before]");
   await from.fill("2026-10-29T12:30:45");
@@ -625,7 +845,7 @@ test("invalid camera-local bounds never open a source", async ({ page }) => {
   // disclosure instead of silently refusing to leave the dialog.
   const advanced = page.locator("[data-advanced-filters]");
   await from.fill("not-a-camera-time");
-  await advanced.locator("summary").click();
+  await advanced.locator(":scope > summary").click();
   await expect(advanced).not.toHaveAttribute("open", "");
   await page.locator("[data-view-options-apply]").click();
   await expect(advanced).toHaveAttribute("open", "");

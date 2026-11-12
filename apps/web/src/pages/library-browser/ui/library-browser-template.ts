@@ -32,20 +32,39 @@ ${PHOTO_VIEW_TEMPLATE}
       <div class="options-sheet">
         <header class="options-header"><h2 id="view-options-title">View options</h2><button type="button" class="quiet" data-view-options-close>Close</button></header>
         <div class="options-body">
+          <p class="options-committed-summary" data-committed-filter-summary hidden></p>
           <p class="options-progress" data-grid-source-progress role="status"></p>
           <p class="options-progress" data-grid-visible-results role="status"></p>
           <section aria-labelledby="options-filter-title"><h3 id="options-filter-title">Filter</h3>
           <div class="options-field"><label for="view-filter-select">Selection State</label><select id="view-filter-select" data-filter-select></select></div>
-          <div class="options-field"><label for="view-rating-min-select">Rating minimum</label><select id="view-rating-min-select" data-rating-min-select></select></div>
-          <div class="options-field"><label for="view-rating-max-select">Rating maximum</label><select id="view-rating-max-select" data-rating-max-select></select></div>
+          <fieldset class="options-filter-group" data-rating-group>
+            <legend>Rating</legend>
+            <div class="options-field"><label for="view-rating-min-select">Minimum</label><select id="view-rating-min-select" data-rating-min-select aria-describedby="rating-help"></select></div>
+            <div class="options-field"><label for="view-rating-max-select">Maximum</label><select id="view-rating-max-select" data-rating-max-select aria-describedby="rating-help rating-error"></select></div>
+            <button type="button" class="quiet options-inline-action" data-rating-match disabled>Match minimum</button>
+            <p class="options-help" id="rating-help">Use the same minimum and maximum for an exact Rating.</p>
+            <p class="options-error" id="rating-error" data-rating-error role="alert" hidden></p>
+          </fieldset>
           <details class="options-advanced" data-advanced-filters>
             <summary>Advanced filters</summary>
             <div class="options-advanced-fields">
               <div class="options-field"><label for="view-kind-select">Original kind</label><select id="view-kind-select" data-kind-select></select></div>
               <div class="options-field"><label for="view-available-select">Original availability</label><select id="view-available-select" data-available-select></select></div>
-              <div class="options-field"><label for="view-captured-from">Capture Time From (inclusive)</label><input id="view-captured-from" type="text" autocomplete="off" spellcheck="false" data-captured-from></div>
-              <div class="options-field"><label for="view-captured-before">Capture Time Before (exclusive)</label><input id="view-captured-before" type="text" autocomplete="off" spellcheck="false" data-captured-before></div>
-              <p class="options-help">Camera-local time as YYYY-MM-DDTHH:MM:SS. No time zone.</p>
+              <fieldset class="options-filter-group" data-capture-time-group>
+                <legend>Capture Time</legend>
+                <div class="options-field"><label for="view-captured-from-date">From date</label><input id="view-captured-from-date" type="date" data-captured-from-date aria-describedby="capture-time-help capture-time-error"></div>
+                <div class="options-field"><label for="view-captured-through-date">Through date</label><input id="view-captured-through-date" type="date" data-captured-through-date aria-describedby="capture-time-help capture-time-error"></div>
+                <details class="options-exact-time" data-capture-exact>
+                  <summary>Exact time</summary>
+                  <div class="options-exact-fields">
+                    <div class="options-field"><label for="view-captured-from">From (inclusive)</label><input id="view-captured-from" type="text" autocomplete="off" spellcheck="false" data-captured-from aria-describedby="capture-time-help capture-exact-help capture-time-error"></div>
+                    <div class="options-field"><label for="view-captured-before">Before (exclusive)</label><input id="view-captured-before" type="text" autocomplete="off" spellcheck="false" data-captured-before aria-describedby="capture-time-help capture-exact-help capture-time-error"></div>
+                    <p class="options-help" id="capture-exact-help">Camera-local time as YYYY-MM-DDTHH:MM:SS. No time zone.</p>
+                  </div>
+                </details>
+                <p class="options-help" id="capture-time-help">Day range uses camera-local whole days. Through date is inclusive; use Exact time for second precision.</p>
+                <p class="options-error" id="capture-time-error" data-capture-time-error role="alert" hidden></p>
+              </fieldset>
             </div>
           </details>
           <button type="button" class="quiet" data-reset-filters>Reset filters</button></section>
