@@ -31,6 +31,7 @@ import {
 } from "./browser-test-support/surfaces.js";
 import {
   expectControlsAboveSafeViewport,
+  expectNavigationStatusTextRangesClear,
   expectNoTextRangeCollision,
 } from "./browser-test-support/review-geometry.js";
 
@@ -799,6 +800,7 @@ test("Photo View shows a bounded filmstrip of neighbors and navigates through it
   const windows = recordWindowRequests(page);
   await strip.locator('[data-filmstrip-index="4"]').click();
   await expect(page.locator("[data-position]")).toHaveText("5 / 6");
+  await expect(page.locator("[data-photo-boundary]")).toBeHidden();
   expect(windows.requested).toEqual([]);
   await expect(page.locator("[data-photo-filename]")).toHaveText("004.jpg");
   await waitForLoadedReviewImage(page);
@@ -818,6 +820,17 @@ test("Photo View shows a bounded filmstrip of neighbors and navigates through it
   // never wraps around the source.
   await strip.locator('[data-filmstrip-index="5"]').click();
   await expect(page.locator("[data-position]")).toHaveText("6 / 6");
+  await expect(page.locator("[data-photo-boundary]")).toHaveText("End of view");
+  await expect(page.locator("[data-photo-boundary]")).toBeVisible();
+  await expect(page.locator("[data-photo-boundary]")).toHaveAttribute(
+    "role",
+    "status",
+  );
+  await expect(page.locator("[data-photo-boundary]")).toHaveAttribute(
+    "aria-live",
+    "polite",
+  );
+  await expect(page.locator("[data-dock-next]")).toBeDisabled();
   await waitForLoadedReviewImage(page);
   expect(await filmstripIndices(page)).toEqual([3, 4, 5]);
   await expect(strip.locator('[data-filmstrip-index="5"]')).toHaveAttribute(
@@ -882,6 +895,25 @@ test("375 by 667 keeps every primary control inside the review viewport beside a
       () => document.documentElement.scrollWidth <= innerWidth,
     ),
   ).toBe(true);
+
+  // The end-of-view boundary is a second text line in the navigation group;
+  // it must not push the review dock out of the same safe viewport.
+  await page.locator("[data-dock-next]").click();
+  await expect(page.locator("[data-position]")).toHaveText("2 / 2");
+  await expect(page.locator("[data-photo-boundary]")).toHaveText("End of view");
+  await waitForLoadedReviewImage(page);
+  await expectControlsAboveSafeViewport(page, 667);
+  const position = (await page.locator("[data-position]").boundingBox())!;
+  const boundary = (await page.locator("[data-photo-boundary]").boundingBox())!;
+  expect(boundary.y).toBeGreaterThanOrEqual(0);
+  expect(boundary.y).toBeGreaterThanOrEqual(position.y + position.height - 1);
+  expect(boundary.y + boundary.height).toBeLessThanOrEqual(667);
+  await expectNavigationStatusTextRangesClear(page);
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
 });
 
 test("844 by 390 leaves no text range collision in the review strip", async ({
@@ -907,12 +939,27 @@ test("844 by 390 leaves no text range collision in the review strip", async ({
   }
   await expectControlsAboveSafeViewport(page, 390);
 
+  await page.locator("[data-dock-next]").click();
+  await expect(page.locator("[data-position]")).toHaveText("2 / 2");
+  await expect(page.locator("[data-photo-boundary]")).toHaveText("End of view");
+  await waitForLoadedReviewImage(page);
+  await expectControlsAboveSafeViewport(page, 390);
+  await expectNoTextRangeCollision(page);
+  await expectNavigationStatusTextRangesClear(page);
+
   // The same short layout must also hold when the viewport is narrower than
   // the stacked two-row fallback; navigation and the dock stay one row.
   await page.setViewportSize({ width: 667, height: 375 });
   await waitForLoadedReviewImage(page);
+  await expect(page.locator("[data-position]")).toHaveText("2 / 2");
   await expectControlsAboveSafeViewport(page, 375);
+  const position = (await page.locator("[data-position]").boundingBox())!;
+  const boundary = (await page.locator("[data-photo-boundary]").boundingBox())!;
+  expect(boundary.y).toBeGreaterThanOrEqual(0);
+  expect(boundary.y).toBeGreaterThanOrEqual(position.y + position.height - 1);
+  expect(boundary.y + boundary.height).toBeLessThanOrEqual(375);
   await expectNoTextRangeCollision(page);
+  await expectNavigationStatusTextRangesClear(page);
 });
 
 test("HTTP transport warning leaves the review dock inside the safe viewport", async ({

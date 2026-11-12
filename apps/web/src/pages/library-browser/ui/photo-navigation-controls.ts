@@ -12,6 +12,10 @@ export type PhotoNavigationControls = Readonly<{
   nextBoundary: boolean;
 }>;
 
+export function isPhotoSequenceEnd(index: number, total: number): boolean {
+  return total > 0 && index >= total - 1;
+}
+
 export function photoNavigationControls(
   index: number,
   total: number,
@@ -19,9 +23,9 @@ export function photoNavigationControls(
 ): PhotoNavigationControls {
   return {
     previousEnabled: enabled && index > 0,
-    nextEnabled: enabled && total > 0 && index < total - 1,
+    nextEnabled: enabled && total > 0 && !isPhotoSequenceEnd(index, total),
     previousBoundary: index <= 0 || total === 0,
-    nextBoundary: total === 0 || index >= total - 1,
+    nextBoundary: total === 0 || isPhotoSequenceEnd(index, total),
   };
 }
 

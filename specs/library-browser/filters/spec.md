@@ -86,6 +86,12 @@ Editing a draft MUST NOT relabel the committed count as a preview of the draft's
 
 A valid zero result MUST be presented as no matches, not an empty Library.
 
+The end of a frozen filtered sequence is a view boundary, not a zero-match result.
+
+The boundary MUST NOT re-evaluate the filter, replace the Snapshot, or present an empty source.
+
+The boundary presentation follows [Library Browsing and Selection](../spec.md#photo-view).
+
 The service MUST order the complete source, apply the defined conditions, and freeze the resulting Photo ID sequence before pagination. Grid windows, Photo View, Previous, Next, position numbers, and source return MUST use that sequence; the browser MUST NOT derive membership from loaded Grid windows.
 
 Fact changes and newly matching Photos MUST NOT alter an open filtered sequence. Refresh, reopening, or an explicit source or filter change creates a new sequence and re-anchors by Photo identity where possible.

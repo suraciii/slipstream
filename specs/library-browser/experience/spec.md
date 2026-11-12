@@ -132,6 +132,12 @@ The primary region MUST present one Reject action, one Rating entry with its exp
 
 Previous and Next MUST remain visible in one separate navigation group with position and total. They MUST NOT share an activation target with Pick or Reject. Portrait layouts MAY place navigation immediately above the main actions; short landscape MUST consolidate without shrinking touch targets.
 
+At the end of the open Photo sequence, the navigation group MUST present the [end-of-view boundary](../spec.md#photo-view).
+
+The boundary MUST NOT replace the current Photo, Previous, or the review dock.
+
+It MUST NOT add a separate full-screen surface.
+
 The Photographer MUST be able to review and navigate without a supporting surface, gesture, or memorized shortcut. The context row, navigation group, and review dock MUST remain together inside the safe viewport at 375 by 667, 390 by 844, and the specified short-landscape viewports.
 
 Selection State MUST be presented with Photo identity in the context row, not in a forced separate row. Short landscape MUST move content rather than reduce a 44 by 44 CSS pixel target.
