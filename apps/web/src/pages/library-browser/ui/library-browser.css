@@ -1749,7 +1749,8 @@
 .photo-tools-help p {
   margin-top: 0.5rem;
 }
-.options-body > section {
+.options-main-view > section,
+.options-subview > section {
   display: grid;
   gap: 0.5rem;
 }
@@ -2261,7 +2262,7 @@
 @media (max-width: 420px) {
   .photo-header button {
     padding-inline: 0.45rem;
-    font-size: 0.72rem;
+    font-size: 0.75rem;
   }
 
   .photo-view {

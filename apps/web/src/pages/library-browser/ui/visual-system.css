@@ -419,6 +419,10 @@
   outline-offset: -2px;
 }
 
+.album-actions-item.danger {
+  color: var(--rejected-strong);
+}
+
 .grid-source-path {
   display: block;
   max-width: 100%;
@@ -444,6 +448,31 @@
     width: 44px;
     min-width: 44px;
   }
+
+  .album-actions-menu[data-presentation="sheet"] {
+    inset: auto 0 0 0;
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+    padding: max(0.75rem, env(safe-area-inset-top)) 12px
+      max(0.85rem, env(safe-area-inset-bottom));
+    border-width: 1px 0 0;
+    border-radius: 16px 16px 0 0;
+    background: var(--panel);
+    box-shadow: 0 -1rem 2.5rem rgb(0 0 0 / 45%);
+  }
+
+  .album-actions-menu[data-presentation="sheet"] .album-actions-title {
+    padding: 4px 8px 8px;
+    color: var(--text);
+    font: 500 17px/1.2 var(--font-display);
+  }
+
+  .album-actions-menu[data-presentation="sheet"] .album-actions-item {
+    min-height: 44px;
+    padding: 0 10px;
+    font: 0.8rem/1.3 var(--font-ui);
+  }
 }
 
 /* ------------------------------------------------------------------------- */
@@ -452,8 +481,12 @@
 
 .grid-view {
   position: relative;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
   background: var(--canvas);
+}
+
+.grid-mobile-actions {
+  display: none;
 }
 
 .grid-header {
@@ -503,7 +536,7 @@
 }
 
 /* A wide header may give active conditions their own line. The narrow
-   header keeps its two-row budget and shares the second row instead. */
+   thumb-zone action bar keeps them with the View options entry. */
 @media (min-width: 761px) {
   .grid-header:has(.options-flag:not([hidden])) {
     height: auto;
@@ -693,6 +726,7 @@
   color: var(--fg-2);
   font: 11px var(--font-mono);
   font-weight: 400;
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
@@ -1097,6 +1131,32 @@
 .photo-view {
   grid-template-rows: auto auto minmax(480px, 1fr) auto auto;
   background: var(--canvas);
+}
+
+/* Regions hold explicit rows so the optional capture-facts line can hide
+   without sliding the Preview out of its reserved floor. */
+.photo-view > .photo-header {
+  grid-row: 1;
+}
+
+.photo-view > .photo-facts-line {
+  grid-row: 2;
+}
+
+.photo-view > .preview {
+  grid-row: 3;
+}
+
+.photo-view > .filmstrip-host {
+  grid-row: 4;
+}
+
+.photo-view > .photo-review-controls {
+  grid-row: 5;
+}
+
+.photo-view::after {
+  grid-row: 6;
 }
 
 /* The transport warning is a security notice, not another toolbar. Let the
@@ -1739,18 +1799,36 @@
 
 /* Source and browse actions are immediate; keep them compact instead of
    stretching recovery and maintenance controls across the sheet. */
-.options-body > .options-browse-actions,
-.options-body > .options-source-actions {
+.options-main-view > .options-browse-actions,
+.options-main-view > .options-source-entry,
+.options-source-actions {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 0.5rem;
 }
 
-.options-body > .options-browse-actions > h3,
-.options-body > .options-source-actions > h3,
-.options-body > .options-source-actions > .folder-album-controls {
+.options-main-view > .options-browse-actions > h3,
+.options-source-actions > h3,
+.options-source-actions > .folder-album-controls {
   flex-basis: 100%;
+}
+
+.options-main-view,
+.options-subview {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.options-subview-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.options-subview-header button {
+  min-height: 44px;
 }
 
 .options-advanced {
@@ -1982,7 +2060,7 @@
 
   .grid-header {
     height: auto;
-    min-height: 88px;
+    min-height: 44px;
     max-width: 100%;
     overflow: visible;
     padding: 0 16px;
@@ -1991,11 +2069,32 @@
   .grid-header-row {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
-    grid-template-rows: repeat(2, minmax(44px, auto));
+    grid-template-rows: minmax(44px, auto);
     align-items: center;
     gap: 0;
     width: 100%;
-    min-height: 88px;
+    min-height: 44px;
+  }
+
+  .grid-mobile-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 8px 16px max(8px, env(safe-area-inset-bottom));
+    border-top: 1px solid var(--border);
+    background: var(--panel);
+  }
+
+  .grid-mobile-actions .grid-tools,
+  .grid-mobile-actions .grid-selection {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .grid-mobile-actions .grid-tools {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
   }
 
   .grid-header .grid-source {
@@ -2054,7 +2153,7 @@
     justify-self: end;
     align-self: center;
     min-height: 20px;
-    font-size: 10px;
+    font-size: 12px;
   }
 
   .grid-tools {
@@ -2116,7 +2215,6 @@
   .grid-selection-count {
     min-width: 0;
     overflow: hidden;
-    font-size: 11px;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
@@ -2131,7 +2229,7 @@
 
   .grid-batch {
     right: 12px;
-    bottom: 12px;
+    bottom: calc(60px + env(safe-area-inset-bottom));
     left: 12px;
     min-height: 56px;
     max-height: calc(100% - 100px);
@@ -2246,24 +2344,28 @@
   .photo-facts-line {
     height: auto;
     min-height: 32px;
-    display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    align-content: center;
-    gap: 1px 8px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 2px 8px;
     padding: 3px 16px;
     font-size: 11px;
     line-height: 1.15;
-    white-space: nowrap;
+    white-space: normal;
+    overflow: visible;
+  }
+
+  .photo-facts-line > span {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    text-overflow: clip;
+    white-space: normal;
   }
 
   .photo-facts-line > span + span {
     margin-left: 0;
     padding-left: 0;
     border-left: 0;
-  }
-
-  .photo-facts-line > [data-photo-facts-capture] {
-    grid-column: 1 / -1;
   }
 
   .cell-footer {
@@ -2371,6 +2473,13 @@
     display: block;
     height: 32px;
     content: "";
+  }
+
+  /* The travel below the dock belongs to the review floor, not to the
+     capture-facts row: without capture facts the spacer keeps the view
+     scrollable by the same margin. */
+  .photo-view:not(:has(> .photo-facts-line:not([hidden])))::after {
+    height: 64px;
   }
 
   .photo-review-controls {

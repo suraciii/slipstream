@@ -29,6 +29,22 @@
   );
 }
 
+/* At narrow widths the Grid's thumb-zone action bar owns the bottom edge,
+   so the entry clears the bar and any batch tray stacked on it. */
+@media (max-width: 760px) {
+  .app-shell:has(.grid-view:not([hidden])) .library-status-entry {
+    bottom: calc(max(0.75rem, env(safe-area-inset-bottom)) + 4.25rem);
+  }
+
+  .app-shell:has(.grid-view:not([hidden])):has(.grid-batch:not([hidden]))
+    .library-status-entry {
+    bottom: calc(
+      max(0.75rem, env(safe-area-inset-bottom)) + 4.25rem +
+        var(--grid-batch-height, var(--batch-tray-height, 4.5rem))
+    );
+  }
+}
+
 .library-status-entry[data-tone="failure"] [data-library-status-toggle] {
   border-color: var(--warning);
   color: var(--warning);

@@ -70,6 +70,7 @@ const fixture = () => {
     "[data-selection-chip]",
     "[data-stage]",
     "[data-preview-ambient]",
+    "[data-photo-facts-line]",
     "[data-photo-facts-capture] [data-photo-facts-value]",
     "[data-photo-facts-aperture] [data-photo-facts-value]",
     "[data-photo-facts-shutter-speed] [data-photo-facts-value]",

@@ -41,7 +41,9 @@ The application MUST have exactly one application-level main landmark. The Acces
 
 ## Grid View
 
-The normal header MUST contain the source title, compact count or loading status, View options, and Select mode. The Photo Grid fills the remaining area; routine progress MUST NOT add a toolbar row.
+The normal header MUST contain the source title and compact count or loading status. At wide widths it MUST also contain View options and Select mode. At narrow widths their complete labels sit in a thumb-zone action bar.
+
+The Photo Grid fills the remaining area; routine progress MUST NOT add a toolbar row.
 
 Refresh is a recovery action and MUST NOT occupy a permanently prominent primary slot.
 
@@ -68,7 +70,7 @@ Narrow layouts MUST use a compact **Filters: N** summary instead of a scrollable
 
 Either or both bounds of one range count as one group; defaults count as zero. Order and thumbnail size are not filters; non-default order MUST have a separate text indication, **Custom order**.
 
-The summary belongs to the View options entry, not a second filter button or header row. Its accessible description MUST name every committed condition with its values and the actual non-default order.
+The summary belongs to the View options entry, not a second filter button or header row. Its accessible description MUST name every committed condition with its values and the actual non-default order. When shown, the summary MUST also name the complete-source decision counts.
 
 Opening View options exposes those values as readable, keyboard-operable controls; neither hover nor a tiny nested scroll area MAY be the only complete-condition path. With no active filter, the count summary MAY be omitted.
 
@@ -134,11 +136,15 @@ Closing a chooser or result disclosure MUST NOT cancel admitted work, erase unce
 
 ## Photo View
 
-Photo View MUST contain a compact source-return and filename row, capture-facts line, Preview, and primary action region. Position, Selection State, and Rating MUST be understandable without opening Photo tools.
+Photo View MUST contain a compact source-return and filename row, Preview, and primary action region. The capture-facts line sits below the row when any capture fact is available. Position, Selection State, and Rating MUST be understandable without opening Photo tools.
 
 At every supported width, the current source MUST remain visibly painted above the filename. A long source name MAY truncate, but its complete value MUST remain available to assistive technology and on pointer hover.
 
-The capture-facts line MUST present Capture Time, Aperture, Shutter Speed, ISO, and Focal Length together when available. Each missing or unreadable field MUST display an explicit `—`. Routine Original availability and Preview Source MUST NOT occupy this line; Original unavailable remains visible through the owning status and recovery path, while Preview Source and detail evidence remain disclosed through Photo tools and the Preview description.
+The capture-facts line MUST present Capture Time, Aperture, Shutter Speed, ISO, and Focal Length together when available. A missing or unreadable field MUST NOT appear in the line, and the line MUST be absent when no capture fact is available.
+
+Routine Original availability and Preview Source MUST NOT occupy this line; Original unavailable remains visible through the owning status and recovery path, while Preview Source and detail evidence remain disclosed through Photo tools and the Preview description.
+
+Photo tools Details MUST list only available capture facts and present one explicit empty state when the capture set has none.
 
 The primary region MUST present one Reject action, one Rating entry with its explicit current value including zero, one Pick action, one Undo action, and More.
 
@@ -168,9 +174,9 @@ More opens these supporting action groups:
 - **Photo:** Details with capture facts and Preview Source, Album membership, Edit, Preview Zoom, and Nearby Photos;
 - **Library:** Browse Library, View options, and Review unavailable Originals; and
 - **Shortcuts and gestures:** a named disclosure for the combined Preview
-  detail-limit explanation and gesture guidance.
+  detail-limit explanation, Selection State semantics, and gesture guidance.
 
-The combined Preview detail evidence MUST be programmatically available beside the Preview without opening the shortcuts disclosure. That disclosure MAY repeat it and add gesture guidance.
+The combined Preview detail evidence MUST be programmatically available beside the Preview without opening the shortcuts disclosure. That disclosure MAY repeat it and add Selection State semantics and gesture guidance.
 
 The Preview MUST fit its complete composition; aspect-ratio empty space is acceptable. Closed supporting groups MUST occupy no space and expose no focusable controls.
 

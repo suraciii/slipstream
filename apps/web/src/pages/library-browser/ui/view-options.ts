@@ -62,6 +62,11 @@ export type ViewOptionsElements = Readonly<{
   viewOptionsClose: HTMLButtonElement;
   viewOptionsApply: HTMLButtonElement;
   viewOptionsCancel: HTMLButtonElement;
+  optionsFooter: HTMLElement;
+  optionsMainView: HTMLElement;
+  sourceActionsView: HTMLElement;
+  sourceActionsOpen: HTMLButtonElement;
+  sourceActionsReturn: HTMLButtonElement;
   resetFilters: HTMLButtonElement;
   draftDiscardNotice: HTMLElement;
   advancedFilters: HTMLDetailsElement | null;
@@ -131,6 +136,11 @@ export function createViewOptions({
     viewOptionsClose,
     viewOptionsApply,
     viewOptionsCancel,
+    optionsFooter,
+    optionsMainView,
+    sourceActionsView,
+    sourceActionsOpen,
+    sourceActionsReturn,
     resetFilters,
     draftDiscardNotice,
     advancedFilters,
@@ -174,7 +184,7 @@ export function createViewOptions({
   let renderedSortKind: ViewSourceKind | undefined;
   let filterRendered = false;
   let renderedProgressText = "";
-  let renderedSourceProgressText = "";
+  let renderedProgressSummary = "";
   const wideSummary = document.createElement("span");
   wideSummary.className = "options-summary-wide";
   const compactSummary = document.createElement("span");
@@ -205,11 +215,13 @@ export function createViewOptions({
     if (advancedFilters) advancedFilters.open = filters.advancedActive();
     syncDraftNotice();
   };
-  viewOptionsDialog.addEventListener("close", () => {
+  const onClose = () => {
     resetDraft();
+    resetOptionsView();
     viewOptionsOpen.setAttribute("aria-expanded", "false");
     syncSecondarySurface?.();
-  });
+  };
+  viewOptionsDialog.addEventListener("close", onClose);
 
   surfaces.register("view-options", {
     dialog: viewOptionsDialog,
@@ -240,12 +252,19 @@ export function createViewOptions({
           (option) => option.value === committedOrder,
         )?.label ?? "",
       );
-    const text = parts.filter(Boolean).join(" · ");
+    // The summary exists for filter and order state; decision counts ride
+    // along only while it is shown, so the idle entry keeps its one-row
+    // header budget.
+    const summaryParts = parts.length
+      ? [...parts, renderedProgressSummary].filter(Boolean)
+      : [];
+    const text = summaryParts.join(" · ");
     const compactParts = [
       filterParts.length ? `Filters: ${filterParts.length}` : "",
       committedOrder !== "source-default" ? "Custom order" : "",
+      parts.length ? renderedProgressSummary : "",
     ].filter(Boolean);
-    wideSummary.replaceChildren(...parts.map(summaryToken));
+    wideSummary.replaceChildren(...summaryParts.map(summaryToken));
     compactSummary.textContent = compactParts.length
       ? ` · ${compactParts.join(" · ")}`
       : "";
@@ -265,6 +284,18 @@ export function createViewOptions({
   };
   presentViewOptionsFlag();
 
+  const showOptionsView = (
+    view: "main" | "source-actions",
+    focus?: HTMLElement,
+  ): void => {
+    const sourceActions = view === "source-actions";
+    optionsMainView.hidden = sourceActions;
+    sourceActionsView.hidden = !sourceActions;
+    optionsFooter.hidden = sourceActions;
+    focus?.focus();
+  };
+  const resetOptionsView = (): void => showOptionsView("main");
+
   const openViewOptions = () => {
     if (!alive) return;
     // Read the invoker before closing the surface that holds it, exactly as
@@ -276,6 +307,7 @@ export function createViewOptions({
     resetGestures();
     closePhotoTools(false);
     closeRatingChoices(false);
+    resetOptionsView();
     surfaces.open("view-options", invoker);
     viewOptionsOpen.setAttribute("aria-expanded", "true");
     syncSecondarySurface?.();
@@ -329,6 +361,14 @@ export function createViewOptions({
   });
   viewOptionsClose.addEventListener("click", () => closeViewOptions());
   viewOptionsCancel.addEventListener("click", () => closeViewOptions());
+  sourceActionsOpen.addEventListener("click", () => {
+    if (!alive) return;
+    showOptionsView("source-actions", sourceActionsReturn);
+  });
+  sourceActionsReturn.addEventListener("click", () => {
+    if (!alive) return;
+    showOptionsView("main", sourceActionsOpen);
+  });
   viewOptionsApply.addEventListener("click", () => applyViewOptions());
   resetFilters.addEventListener("click", () => {
     draftFilter = "all";
@@ -436,19 +476,23 @@ export function createViewOptions({
         model.visible && model.sourceTotal > 0
           ? `Visible results: ${model.visibleTotal.toLocaleString()} of ${model.sourceTotal.toLocaleString()} Photos`
           : "";
-      const sourceText =
+      const progressSummary =
         model.visible && model.sourceTotal > 0
-          ? `Source progress: ${model.picked.toLocaleString()} picked · ${model.rejected.toLocaleString()} rejected · ${model.unflagged.toLocaleString()} unflagged`
+          ? `${model.picked.toLocaleString()} picked · ${model.rejected.toLocaleString()} rejected · ${model.unflagged.toLocaleString()} unflagged`
           : "";
+      const sourceText = progressSummary
+        ? `Source progress: ${progressSummary}`
+        : "";
       if (
         visibleText === renderedProgressText &&
-        sourceText === renderedSourceProgressText
+        progressSummary === renderedProgressSummary
       )
         return;
       renderedProgressText = visibleText;
-      renderedSourceProgressText = sourceText;
+      renderedProgressSummary = progressSummary;
       optionsVisibleResults.textContent = visibleText;
       optionsProgress.textContent = sourceText;
+      presentViewOptionsFlag();
     },
     renderRandom(model) {
       if (!alive) return;
@@ -472,7 +516,7 @@ export function createViewOptions({
     },
     dispose() {
       alive = false;
-      viewOptionsDialog.removeEventListener("close", resetDraft);
+      viewOptionsDialog.removeEventListener("close", onClose);
       compact.removeEventListener("change", onCompactChange);
       randomHeader.removeEventListener("change", onCompactChange);
     },

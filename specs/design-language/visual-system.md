@@ -78,7 +78,8 @@ The spacing scale is 4, 8, 12, 16, 24, 32, and 48px. Reference composition measu
 | Desktop application bar                                   | 46px                                                                                                                                                   |
 | Desktop source header                                     | 88px                                                                                                                                                   |
 | Photo View header, fact line, filmstrip, review dock      | 60px, 32px, 82px, 64px respectively                                                                                                                    |
-| Narrow Grid header                                        | 88px, two 44px rows, no separate brand row                                                                                                             |
+| Narrow Grid header                                        | 44px, one row, no separate brand row                                                                                                                   |
+| Narrow Grid thumb-zone action bar                         | One row of 44px targets above the safe-area inset                                                                                                      |
 | Narrow Photo View context, navigation, and review regions | Within the [owning viewport budgets](../library-browser/experience/spec.md#accessibility-and-space-acceptance), not a sum of independent fixed heights |
 | Grid                                                      | Reference Large step with width-derived columns; illustrated counts are not fixed layout requirements                                                  |
 
@@ -112,10 +113,9 @@ Hover, opacity, and lift use 160ms ease-out. Reduced motion MUST set duration to
 
 The desktop application bar MUST contain the serif wordmark, compact status with a dot and `Ready`, and account. It MUST NOT repeat Library or source counts.
 
-The narrow Grid MUST use two 44px header rows within 88px and no separate brand row. The rows contain:
+The narrow Grid header MUST use one 44px row and no separate brand row. The row contains the source title, count, and compact status.
 
-1. The source title, count, and compact status.
-2. The complete `View options` and `Select mode` labels.
+The narrow thumb-zone action bar carries the complete `View options` and `Select mode` labels, and the Select count and Done while **Select** mode is active, in one row of 44px targets above the safe-area inset.
 
 The compact filter-group count and non-default-order indication belong to the View options entry under [Grid View](../library-browser/experience/spec.md#grid-view). Full conditions MUST remain readable in the opened surface and its accessible description; an internally scrolling condition strip is not part of the reference.
 

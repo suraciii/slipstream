@@ -10,6 +10,7 @@ import {
 } from "./browser-test-support/fixtures.js";
 import {
   openSources,
+  openSourceActions,
   openViewOptions,
   applyViewOptions,
   waitForGridFrame,
@@ -49,6 +50,7 @@ test("thumbnail size commits only on Apply without reopening the source", async 
     expect(await cellWidth()).toBe(initialWidth);
     if (close === "escape") await page.keyboard.press("Escape");
     else if (close === "management") {
+      await openSourceActions(page);
       await page.locator("[data-removed-open]").click();
       await page.locator("[data-removed-close]").click();
     } else await page.locator(`[data-view-options-${close}]`).click();

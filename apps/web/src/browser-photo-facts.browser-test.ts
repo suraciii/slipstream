@@ -14,7 +14,7 @@ import { expectControlsAboveSafeViewport } from "./browser-test-support/review-g
 
 setupBrowserSmoke();
 
-test("Photo View shows review capture metadata and explicit missing values", async ({
+test("Photo View shows review capture metadata in the facts line and Details", async ({
   page,
 }) => {
   const { base, root } = await fixture();
@@ -91,7 +91,7 @@ test("Photo View shows review capture metadata and explicit missing values", asy
   );
 });
 
-test("Photo View clears capture facts on navigation and dashes each missing value", async ({
+test("Photo View clears capture facts on navigation and omits missing values", async ({
   page,
 }) => {
   const { base, root } = await fixture();
@@ -121,24 +121,25 @@ test("Photo View clears capture facts on navigation and dashes each missing valu
   await expect(
     facts.locator("[data-photo-facts-aperture] [data-photo-facts-value]"),
   ).toHaveText("f/2.8");
+  // Missing facts are omitted from the line instead of shown as placeholders.
   for (const selector of [
-    "[data-photo-facts-shutter-speed] [data-photo-facts-value]",
-    "[data-photo-facts-iso] [data-photo-facts-value]",
-    "[data-photo-facts-focal-length] [data-photo-facts-value]",
+    "[data-photo-facts-shutter-speed]",
+    "[data-photo-facts-iso]",
+    "[data-photo-facts-focal-length]",
   ])
-    await expect(facts.locator(selector)).toHaveText("—");
+    await expect(facts.locator(selector)).toBeHidden();
 
   await page.keyboard.press("ArrowRight");
   await expect(page.locator("[data-position]")).toHaveText("2 / 2");
   for (const selector of [
-    "[data-photo-facts-capture] [data-photo-facts-value]",
-    "[data-photo-facts-aperture] [data-photo-facts-value]",
-    "[data-photo-facts-shutter-speed] [data-photo-facts-value]",
-    "[data-photo-facts-iso] [data-photo-facts-value]",
-    "[data-photo-facts-focal-length] [data-photo-facts-value]",
+    "[data-photo-facts-capture]",
+    "[data-photo-facts-aperture]",
+    "[data-photo-facts-shutter-speed]",
+    "[data-photo-facts-iso]",
+    "[data-photo-facts-focal-length]",
   ])
-    await expect(facts.locator(selector)).toHaveText("—");
-  await expect(facts).not.toContainText("f/2.8");
+    await expect(facts.locator(selector)).toBeHidden();
+  await expect(facts).toBeHidden();
 
   // Details groups a completely missing capture set into one clear state
   // instead of repeating five dash rows.

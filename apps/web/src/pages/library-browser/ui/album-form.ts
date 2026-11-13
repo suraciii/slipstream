@@ -724,20 +724,36 @@ export function createAlbumForm({
       }
       openAlbumMenu?.close(false);
       menu.hidden = false;
-      const rect = trigger.getBoundingClientRect();
-      const width = menu.offsetWidth;
-      const height = menu.offsetHeight;
-      const left = Math.max(
-        8,
-        Math.min(window.innerWidth - width - 8, rect.right - width),
-      );
-      const below = rect.bottom + 6;
-      const top =
-        below + height <= window.innerHeight - 8
-          ? below
-          : Math.max(8, rect.top - height - 6);
-      menu.style.left = `${left}px`;
-      menu.style.top = `${top}px`;
+      const narrowSheet = window.matchMedia("(max-width: 760px)").matches;
+      if (narrowSheet) {
+        // Touch layouts present Album actions as the same bottom sheet idiom
+        // as the rest of the supporting surfaces instead of a hover popup.
+        menu.dataset.presentation = "sheet";
+        menu.style.left = "0px";
+        menu.style.right = "0px";
+        menu.style.top = "auto";
+        menu.style.bottom = "0px";
+        menu.style.transform = "none";
+      } else {
+        delete menu.dataset.presentation;
+        menu.style.removeProperty("right");
+        menu.style.removeProperty("bottom");
+        menu.style.removeProperty("transform");
+        const rect = trigger.getBoundingClientRect();
+        const width = menu.offsetWidth;
+        const height = menu.offsetHeight;
+        const left = Math.max(
+          8,
+          Math.min(window.innerWidth - width - 8, rect.right - width),
+        );
+        const below = rect.bottom + 6;
+        const top =
+          below + height <= window.innerHeight - 8
+            ? below
+            : Math.max(8, rect.top - height - 6);
+        menu.style.left = `${left}px`;
+        menu.style.top = `${top}px`;
+      }
       trigger.setAttribute("aria-expanded", "true");
       openAlbumMenu = { close: closeMenu, trigger };
       document.addEventListener("pointerdown", onOutside, true);
@@ -759,12 +775,13 @@ export function createAlbumForm({
       albumActionFocusKey("rename", album.id),
       () => openAlbumForm("rename", album.id, album.name),
     );
-    addItem(
+    const deleteItem = addItem(
       "Delete",
       `Delete ${album.name}`,
       albumActionFocusKey("delete", album.id),
       () => openAlbumForm("delete", album.id, album.name),
     );
+    deleteItem.classList.add("danger");
     if (album.hasSavedPosition)
       addItem(
         "Resume",

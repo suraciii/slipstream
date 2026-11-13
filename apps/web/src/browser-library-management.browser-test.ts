@@ -6,6 +6,7 @@ import {
   writePhotos,
 } from "./browser-test-support/fixtures.js";
 import {
+  openSourceActions,
   openViewOptions,
   applyViewOptions,
   waitForGridFrame,
@@ -29,6 +30,7 @@ test("Trash distinguishes loading, failure and empty after a real removal and Un
   // the choices shown after returning, never a hidden draft from before Trash.
   await openViewOptions(page);
   await page.locator("[data-filter-select]").selectOption("rejected");
+  await openSourceActions(page);
   await page.locator("[data-removed-open]").click();
   await expect(page.locator("[data-removed-status]")).toHaveText(
     "Trash is empty.",
@@ -65,6 +67,7 @@ test("Trash distinguishes loading, failure and empty after a real removal and Un
     await expect(page.locator("[data-grid-select-mode]")).toBeInViewport();
   }
   await openViewOptions(page);
+  await openSourceActions(page);
   await page.locator("[data-removal-open]").click();
   await page.locator("[data-removal-confirm]").click();
   await expect(page.locator("[data-removal-undo]")).toBeVisible();
@@ -84,6 +87,7 @@ test("Trash distinguishes loading, failure and empty after a real removal and Un
     await route.fulfill({ status: 503, json: { error: "unavailable" } });
   });
   await openViewOptions(page);
+  await openSourceActions(page);
   await page.locator("[data-removed-open]").click();
   await expect(page.locator("[data-removed-status]")).toHaveText(
     "Loading Trash…",
@@ -108,6 +112,7 @@ test("Trash distinguishes loading, failure and empty after a real removal and Un
   await page.locator("[data-removed-close]").click();
   await page.reload();
   await openViewOptions(page);
+  await openSourceActions(page);
   await page.locator("[data-removed-open]").click();
   await expect(page.locator("[data-removed-status]")).toHaveText(
     "Trash is empty.",
