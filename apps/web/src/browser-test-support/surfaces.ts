@@ -398,6 +398,16 @@ export async function openViewOptions(page: Page) {
   await expect(surface).toBeVisible();
 }
 
+/// Opens the Source actions subview of the View options surface, where Refresh
+/// Current Source, removal review, Trash, and Add Folder live. It is a no-op
+/// when the subview is already open.
+export async function openSourceActions(page: Page) {
+  const entry = page.locator("[data-source-actions-open]");
+  if (!(await entry.isVisible())) return;
+  await entry.click();
+  await expect(page.locator("[data-source-actions-view]")).toBeVisible();
+}
+
 /// Reads the Library summary. A narrow layout keeps it inside the Sources
 /// surface, which stays closed until it is disclosed.
 export async function applyViewOptions(page: Page) {

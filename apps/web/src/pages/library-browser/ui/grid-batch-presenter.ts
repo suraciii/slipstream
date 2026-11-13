@@ -1,5 +1,6 @@
 import type { GridViewModel } from "./library-browser-view.js";
 import type { BatchAlbumsViewModel } from "../model/grid-batch-albums-contract.js";
+import { required } from "./presentation-helpers.js";
 
 type GridBatchResultViewModel = NonNullable<GridViewModel["multi"]["result"]>;
 
@@ -13,7 +14,6 @@ type BatchElements = Readonly<{
   gridBatch: HTMLElement;
   gridTools: HTMLElement;
   gridSelection: HTMLElement;
-  gridSelectMode: HTMLButtonElement;
   multiDone: HTMLButtonElement;
   batchCount: HTMLElement;
   batchRetained: HTMLElement;
@@ -33,12 +33,14 @@ export type GridBatchPresenter = Readonly<{
   multiCount(): number;
   multiSelected(index: number): boolean;
   applyMulti(): void;
+  selectMode: HTMLButtonElement;
   dispose(): void;
 }>;
 
 export const createGridBatchPresenter = (
   options: Readonly<{
     elements: BatchElements;
+    compact: MediaQueryList;
     alive: () => boolean;
     send: (intent: BatchIntent) => void;
     openAlbumChooser: (invoker: HTMLElement, count: number) => void;
@@ -46,6 +48,10 @@ export const createGridBatchPresenter = (
   }>,
 ): GridBatchPresenter => {
   const { elements: e } = options;
+  const gridSelectMode = required<HTMLButtonElement>(
+    e.gridTools,
+    "[data-grid-select-mode]",
+  );
   let mode = false,
     count = 0,
     limit = 0,
@@ -79,6 +85,25 @@ export const createGridBatchPresenter = (
       ? undefined
       : new ResizeObserver(syncBatchHeight);
   batchResize?.observe(e.gridBatch);
+  /// The compact Grid keeps its primary browsing controls in a thumb-zone
+  /// action bar; a wide Grid owns them in the header beside the source
+  /// identity. The tool groups return to the header when the layout leaves
+  /// the compact boundary.
+  const headerRow = gridView?.querySelector<HTMLElement>(".grid-header-row");
+  const actionBar = gridView?.querySelector<HTMLElement>(
+    "[data-grid-mobile-actions]",
+  );
+  const syncToolChrome = (): void => {
+    if (!headerRow || !actionBar) return;
+    const host = options.compact.matches ? actionBar : headerRow;
+    if (e.gridTools.parentElement !== host) host.append(e.gridTools);
+    if (e.gridSelection.parentElement !== host) host.append(e.gridSelection);
+  };
+  const onCompactChange = () => {
+    if (!disposed) syncToolChrome();
+  };
+  options.compact.addEventListener("change", onCompactChange);
+  syncToolChrome();
   const render = (multi: GridViewModel["multi"]) => {
     if (disposed || !options.alive()) return;
     mode = multi.mode;
@@ -108,13 +133,13 @@ export const createGridBatchPresenter = (
     const visible = mode || count > 0;
     gridView?.classList.toggle("multi-mode", visible);
     e.gridBatch.hidden = count === 0;
-    e.gridSelectMode.setAttribute("aria-pressed", String(mode));
+    gridSelectMode.setAttribute("aria-pressed", String(mode));
     const toolsFocus = e.gridTools.contains(document.activeElement),
       selectionFocus = e.gridSelection.contains(document.activeElement);
     e.gridTools.hidden = visible;
     e.gridSelection.hidden = !visible;
     if (toolsFocus && visible) e.multiDone.focus();
-    else if (selectionFocus && !visible) e.gridSelectMode.focus();
+    else if (selectionFocus && !visible) gridSelectMode.focus();
     if (!visible) {
       e.batchCount.textContent = "";
       e.batchRetained.hidden = true;
@@ -127,7 +152,10 @@ export const createGridBatchPresenter = (
       syncBatchHeight();
       return;
     }
-    e.batchCount.textContent = `${count.toLocaleString()} / ${limit.toLocaleString()} selected`;
+    e.batchCount.textContent =
+      count >= limit
+        ? `${count.toLocaleString()} / ${limit.toLocaleString()} selected · limit reached`
+        : `${count.toLocaleString()} / ${limit.toLocaleString()} selected`;
     e.batchRetained.hidden = count === 0 || result === undefined;
     e.batchResult.hidden = result === undefined;
     e.batchResultText.textContent = result?.message ?? "";
@@ -209,9 +237,11 @@ export const createGridBatchPresenter = (
     multiCount: () => count,
     multiSelected: (index) => selected(index),
     applyMulti: options.applyMultiSelection,
+    selectMode: gridSelectMode,
     dispose: () => {
       disposed = true;
       batchResize?.disconnect();
+      options.compact.removeEventListener("change", onCompactChange);
       batchClearance.remove();
       review.remove();
       e.batchPick.removeEventListener("click", onPick);

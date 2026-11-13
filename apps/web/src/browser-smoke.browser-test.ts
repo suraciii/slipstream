@@ -118,12 +118,14 @@ test("narrow Grid discloses Library as one named modal surface and restores focu
   );
   await expect(panel).toBeHidden();
   await expect(dialog).toBeHidden();
-  // The Grid keeps the height the app leaves below the view controls and
-  // reaches the bottom of the window.
+  // The Grid reaches the bottom of the window through its thumb-zone action
+  // bar, leaving no dead space below the controls.
   expect(
-    await gridViewport.evaluate((node) =>
-      Math.round(window.innerHeight - node.getBoundingClientRect().bottom),
-    ),
+    await page
+      .locator("[data-grid-mobile-actions]")
+      .evaluate((node) =>
+        Math.round(window.innerHeight - node.getBoundingClientRect().bottom),
+      ),
   ).toBe(0);
   const closedGridHeight = await gridHeight();
   // One compact header row replaces the stacked toolbar, so the Grid keeps

@@ -112,6 +112,7 @@ export function createPhotoViewPresenter({
   const selectionChip = required<HTMLElement>(root, "[data-selection-chip]");
   const stage = required<HTMLElement>(root, "[data-stage]");
   const ambient = required<HTMLElement>(root, "[data-preview-ambient]");
+  const factsLine = required<HTMLElement>(root, "[data-photo-facts-line]");
   const factsCapture = required<HTMLElement>(
     root,
     "[data-photo-facts-capture] [data-photo-facts-value]",
@@ -207,17 +208,30 @@ export function createPhotoViewPresenter({
       model.captureTime === undefined
         ? undefined
         : formatCaptureTime(model.captureTime);
-    captureTime.textContent = captureTimeValue ?? "—";
+    captureTime.textContent = captureTimeValue ?? "";
     factsCapture.textContent = captureTime.textContent;
-    aperture.textContent = model.aperture ?? "—";
+    aperture.textContent = model.aperture ?? "";
     factsAperture.textContent = aperture.textContent;
-    iso.textContent = model.iso === undefined ? "—" : String(model.iso);
+    iso.textContent = model.iso === undefined ? "" : String(model.iso);
     factsIso.textContent =
-      model.iso === undefined ? "—" : `ISO ${String(model.iso)}`;
-    shutterSpeed.textContent = model.shutterSpeed ?? "—";
+      model.iso === undefined ? "" : `ISO ${String(model.iso)}`;
+    shutterSpeed.textContent = model.shutterSpeed ?? "";
     factsShutterSpeed.textContent = shutterSpeed.textContent;
-    focalLength.textContent = model.focalLength ?? "—";
+    focalLength.textContent = model.focalLength ?? "";
     factsFocalLength.textContent = focalLength.textContent;
+    const factItems = [
+      [factsCapture.parentElement, captureTimeValue],
+      [factsAperture.parentElement, model.aperture],
+      [
+        factsIso.parentElement,
+        model.iso === undefined ? undefined : String(model.iso),
+      ],
+      [factsShutterSpeed.parentElement, model.shutterSpeed],
+      [factsFocalLength.parentElement, model.focalLength],
+    ] as const;
+    for (const [item, value] of factItems)
+      if (item) item.hidden = value === undefined;
+    factsLine.hidden = factItems.every(([, value]) => value === undefined);
     // Details is a reading surface: show the facts that exist and one clear
     // empty state instead of five rows of dashes.
     const rows = [

@@ -19,6 +19,7 @@ import {
   openAdvancedFilters,
   openExactTime,
   openSources,
+  openSourceActions,
   openViewOptions,
   waitForGridFrame,
 } from "./browser-test-support/surfaces.js";
@@ -643,6 +644,7 @@ test("Refresh, Retry, and Snapshot expiry retain the committed filter", async ({
   const refresh = async () => {
     await openViewOptions(page);
     await openAdvancedFilters(page);
+    await openSourceActions(page);
     await page.locator("[data-refresh]").click();
   };
   const assertFiltered = async () => {
@@ -748,6 +750,7 @@ test("immediate Refresh discards dirty choices and reopens the committed filter"
   await page.locator("[data-rating-min-select]").selectOption("3");
   await page.locator("[data-sort-select]").selectOption("capture-time-desc");
   await expect(page.locator("[data-draft-discard-notice]")).toBeVisible();
+  await openSourceActions(page);
   await page.locator("[data-refresh]").click();
   await expect.poll(() => opens.length).toBe(1);
   expect(opens[0]).toMatchObject({ ratingMinimum: 4 });

@@ -23,6 +23,7 @@ import {
   closePhotoSurfaces,
   openSources,
   openPhotoToolsView,
+  openSourceActions,
   returnToPhotoTools,
   closePhotoTools,
   openRatingChoices,
@@ -218,6 +219,7 @@ test("Photo View gestures navigate and decide while More owns one review sheet",
     .getByRole("button", { name: "View options", exact: true })
     .click();
   await expect(page.locator("[data-view-options]")).toBeVisible();
+  await openSourceActions(page);
   await expect(page.locator("[data-removed-open]")).toBeVisible();
   await page.locator("[data-view-options-close]").click();
   await expect(page.locator("[data-view-options]")).toBeHidden();

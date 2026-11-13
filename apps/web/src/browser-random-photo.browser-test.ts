@@ -14,6 +14,7 @@ import {
 import {
   applyViewOptions,
   openSources,
+  openSourceActions,
   openViewOptions,
   waitForGridFrame,
 } from "./browser-test-support/surfaces.js";
@@ -400,7 +401,9 @@ test("an expired Snapshot keeps the Grid and names Refresh Current Source", asyn
   expect(requests).toEqual(["60"]);
 
   await openViewOptions(page);
+  await openSourceActions(page);
   await expect(page.locator("[data-refresh]")).toBeVisible();
+  await openSourceActions(page);
   await page.locator("[data-refresh]").click();
   await expect(page.locator("[data-grid-status]")).toHaveText(
     "Ready · 120 Photos",
@@ -480,11 +483,15 @@ test("an Original Folder names itself and keeps the wide action in the header", 
   );
   await openViewOptions(page);
   // The wide Grid promotes the random action to the header, so the empty
-  // Browse actions group is hidden. Source actions remain in View options.
+  // Browse actions group is hidden. Source actions remain in View options
+  // behind their own entry.
   await expect(page.getByText("Browse actions", { exact: true })).toBeHidden();
   await expect(
     page.locator("[data-grid-tools] [data-random-photo]"),
   ).toBeVisible();
-  await expect(page.getByText("Source actions", { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Source actions", exact: true }),
+  ).toBeVisible();
+  await openSourceActions(page);
   await expect(page.locator("[data-refresh]")).toBeVisible();
 });

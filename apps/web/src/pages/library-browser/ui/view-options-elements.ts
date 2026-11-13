@@ -32,6 +32,20 @@ export function viewOptionsElements(root: ParentNode): ViewOptionsElements {
       root,
       "[data-view-options-cancel]",
     ),
+    optionsFooter: required<HTMLElement>(root, "[data-options-footer]"),
+    optionsMainView: required<HTMLElement>(root, "[data-options-main-view]"),
+    sourceActionsView: required<HTMLElement>(
+      root,
+      "[data-source-actions-view]",
+    ),
+    sourceActionsOpen: required<HTMLButtonElement>(
+      root,
+      "[data-source-actions-open]",
+    ),
+    sourceActionsReturn: required<HTMLButtonElement>(
+      root,
+      "[data-source-actions-return]",
+    ),
     resetFilters: required<HTMLButtonElement>(root, "[data-reset-filters]"),
     draftDiscardNotice: required<HTMLElement>(
       root,

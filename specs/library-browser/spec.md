@@ -355,7 +355,7 @@ It MUST make the following facts and actions available, with their primary or di
 
 Capture metadata is read-only.
 
-A missing or unreadable field MUST display an explicit `—` value.
+A missing or unreadable field MUST NOT be presented. A capture set with no readable field MUST present one explicit empty state.
 
 The displayed values come from the Photo's own Original File.
 
@@ -1060,13 +1060,13 @@ Grid View supports multi-selection in addition to the single open target:
 
 One batch addresses at most 100 Photos.
 
-While **Select** mode is active, its header MUST show the count, including `0 / 100 selected`, and Done. The action tray appears only for a nonempty selection under the [experience contract](experience/spec.md).
+While **Select** mode is active, the header at wide widths and the thumb-zone action bar at narrow widths MUST show the count, including `0 / 100 selected`, and Done. The action tray appears only for a nonempty selection under the [experience contract](experience/spec.md).
 
 The Grid refuses to grow the multi-selection past that bound, names the bound when it does, and keeps the selection it already holds, so a batch the server would refuse can never be built.
 
 A refused toggle or range is one operation: the selection and its anchor do not change.
 
-The Grid MUST say: `Selection limit reached. Remove a Photo to extend the range.`
+The Grid MUST say: `Selection limit reached. Remove a Photo to continue selecting.`
 
 The selection tray MUST state `Selection remains active` after a batch operation.
 

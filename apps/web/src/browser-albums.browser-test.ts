@@ -121,6 +121,13 @@ test("album management creates, renames, and deletes Albums with confirmation", 
   await expect(
     page.getByRole("menuitem", { name: "Rename Other" }),
   ).toBeVisible();
+  // The narrow presentation is a bottom sheet spanning the viewport edge,
+  // not a popup beside the trigger.
+  const menu = page.getByRole("menu", { name: "Other actions" });
+  const box = (await menu.boundingBox())!;
+  const viewport = page.viewportSize()!;
+  expect(box.width).toBeGreaterThanOrEqual(viewport.width - 2);
+  expect(box.y + box.height).toBeGreaterThanOrEqual(viewport.height - 2);
 });
 
 test("the current photo joins and leaves albums from the photo view", async ({

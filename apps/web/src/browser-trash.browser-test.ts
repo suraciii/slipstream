@@ -10,6 +10,7 @@ import {
 } from "./browser-test-support/fixtures.js";
 import {
   waitForGridFrame,
+  openSourceActions,
   openViewOptions,
   applyViewOptions,
 } from "./browser-test-support/surfaces.js";
@@ -54,6 +55,7 @@ test("rejected Photos leave the Library, return from Undo, and are restored from
   // The review names the result it covers and removes nothing by itself.
   const review = page.locator("[data-removal-review]");
   await openViewOptions(page);
+  await openSourceActions(page);
   await page.locator("[data-removal-open]").click();
   await expect(review).toBeVisible();
   await expect(page.locator("[data-removal-summary]")).toHaveText(
@@ -92,6 +94,7 @@ test("rejected Photos leave the Library, return from Undo, and are restored from
     page.getByRole("link", { name: /^All Photos 1 Photo$/ }),
   ).toBeVisible();
   await openViewOptions(page);
+  await openSourceActions(page);
   await page.locator("[data-removed-open]").click();
   const removed = page.locator("[data-removed-panel]");
   await expect(page.locator("[data-removed-status]")).toHaveText(
@@ -127,6 +130,7 @@ test("rejected Photos leave the Library, return from Undo, and are restored from
   // Remove again, then restore one named Photo from the listing: the durable
   // per-Photo path survives a reload.
   await openViewOptions(page);
+  await openSourceActions(page);
   await page.locator("[data-removal-open]").click();
   await expect(page.locator("[data-removal-summary]")).toHaveText(
     /^2 Photos reviewed as Rejected\./,
@@ -137,6 +141,7 @@ test("rejected Photos leave the Library, return from Undo, and are restored from
   );
   await page.locator("[data-removal-close]").click();
   await openViewOptions(page);
+  await openSourceActions(page);
   await page.locator("[data-removed-open]").click();
   await expect(page.locator("[data-removed-list] .removed-item")).toHaveCount(
     2,
@@ -158,6 +163,7 @@ test("rejected Photos leave the Library, return from Undo, and are restored from
     page.getByRole("link", { name: /^All Photos 2 Photos$/ }),
   ).toBeVisible();
   await openViewOptions(page);
+  await openSourceActions(page);
   await page.locator("[data-removed-open]").click();
   await expect(page.locator("[data-removed-list] .removed-item")).toHaveCount(
     1,
@@ -238,6 +244,7 @@ test("Trash cleanup reviews records and recovers a lost mixed outcome", async ({
     "Ready · 2 Photos",
   );
   await openViewOptions(page);
+  await openSourceActions(page);
   await page.locator("[data-removal-open]").click();
   await page.locator("[data-removal-confirm]").click();
   await expect(page.locator("[data-removal-message]")).toContainText(
@@ -249,6 +256,7 @@ test("Trash cleanup reviews records and recovers a lost mixed outcome", async ({
   // outside the application before explicitly requesting record cleanup.
   await rm(join(root, "000.jpg"));
   await openViewOptions(page);
+  await openSourceActions(page);
   await page.locator("[data-removed-open]").click();
   const panel = page.locator("[data-removed-panel]");
   await expect(panel.locator("[data-removed-list] .removed-item")).toHaveCount(
@@ -354,6 +362,7 @@ test("Trash cleanup reviews records and recovers a lost mixed outcome", async ({
   // remaining record. The unknown outcome must survive the empty list.
   await panel.locator("[data-removed-close]").click();
   await openViewOptions(page);
+  await openSourceActions(page);
   await page.locator("[data-removed-open]").click();
   await expect(panel.locator(".removed-location")).toHaveText("001.jpg");
   await panel.getByRole("button", { name: "Restore", exact: true }).click();
@@ -369,6 +378,7 @@ test("Trash cleanup reviews records and recovers a lost mixed outcome", async ({
   // Recovery reads the original operation and converges without another cleanup.
   await page.reload();
   await openViewOptions(page);
+  await openSourceActions(page);
   await page.locator("[data-removed-open]").click();
   await expect(panel.locator("[data-removed-status]")).toHaveText(
     "Trash is empty.",
@@ -397,6 +407,7 @@ test("Trash cleanup displays a named retained-work blocker", async ({
   await page.locator("[data-filter-select]").selectOption("rejected");
   await applyViewOptions(page);
   await openViewOptions(page);
+  await openSourceActions(page);
   await page.locator("[data-removal-open]").click();
   await page.locator("[data-removal-confirm]").click();
   await expect(page.locator("[data-removal-message]")).toContainText(
@@ -447,6 +458,7 @@ test("Trash cleanup displays a named retained-work blocker", async ({
     });
   });
   await openViewOptions(page);
+  await openSourceActions(page);
   await page.locator("[data-removed-open]").click();
   const panel = page.locator("[data-removed-panel]");
   await panel.locator("[data-removed-select-all]").click();
@@ -508,6 +520,7 @@ test("captured Trash selection follows a retained cursor and excludes a row", as
     "Ready · 3 Photos",
   );
   await openViewOptions(page);
+  await openSourceActions(page);
   await page.locator("[data-removal-open]").click();
   const removal = page.locator("[data-removal-review]");
   await expect(removal).toBeVisible();
@@ -597,6 +610,7 @@ test("captured Trash selection follows a retained cursor and excludes a row", as
     route.fulfill({ json: { albums: [] } }),
   );
   await openViewOptions(page);
+  await openSourceActions(page);
   await page.locator("[data-removed-open]").click();
   const panel = page.locator("[data-removed-panel]");
   await expect(panel.locator("[data-removed-list] .removed-item")).toHaveCount(

@@ -21,6 +21,7 @@ import {
 } from "./browser-test-support/workspace-edit-fixtures.js";
 import type { ToolJob } from "./pages/library-browser/index.js";
 import {
+  openSourceActions,
   openViewOptions,
   applyViewOptions,
   waitForLoadedReviewImage,
@@ -563,6 +564,7 @@ for (const firstTransport of ["https", "http"] as const) {
         "Ready · 1 Photo",
       );
       await openViewOptions(page);
+      await openSourceActions(page);
       await page.locator("[data-removal-open]").click();
       await expect(page.locator("[data-removal-summary]")).toHaveText(
         /^1 Photo reviewed as Rejected\./,
@@ -574,6 +576,7 @@ for (const firstTransport of ["https", "http"] as const) {
       await page.locator("[data-removal-close]").click();
       await page.reload();
       await openViewOptions(page);
+      await openSourceActions(page);
       await page.locator("[data-removed-open]").click();
       const row = page.locator("[data-removed-list] .removed-item");
       await expect(row).toHaveCount(1);

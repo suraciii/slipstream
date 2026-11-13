@@ -12,6 +12,7 @@ import {
 import {
   waitForGridFrame,
   openSources,
+  openSourceActions,
   openViewOptions,
 } from "./browser-test-support/surfaces.js";
 
@@ -208,22 +209,25 @@ test("enlarged filter summaries and header actions reflow without clipped target
     await expect
       .poll(() =>
         page.evaluate(() => {
-          const header = document
-            .querySelector(".grid-header")!
-            .getBoundingClientRect();
+          // The tools live in the wide header row or the narrow action bar;
+          // either way they reflow inside their own region without clipping.
           const controls = Array.from(
             document.querySelectorAll<HTMLElement>("[data-grid-tools] button"),
           );
           return (
             document.documentElement.scrollWidth <= innerWidth &&
             controls.every((control) => {
+              const host = control.closest<HTMLElement>(
+                ".grid-header-row, .grid-mobile-actions",
+              )!;
+              const hostBox = host.getBoundingClientRect();
               const box = control.getBoundingClientRect();
               const range = document.createRange();
               range.selectNodeContents(control);
               return (
                 box.width >= 44 &&
                 box.height >= 44 &&
-                box.bottom <= header.bottom + 1 &&
+                box.bottom <= hostBox.bottom + 1 &&
                 Array.from(range.getClientRects()).every(
                   (rect) =>
                     rect.left >= box.left - 1 &&
@@ -293,16 +297,16 @@ test("View options and Select mode keep complete labels at every header width", 
 
   for (const width of HEADER_WIDTHS) {
     await page.setViewportSize({ width, height: 844 });
-    // The visible text and the accessible name are the same complete string,
-    // so neither entry is shortened to fit the row.
-    await expect(page.locator("[data-grid-view-options]")).toHaveText(
+    // Each entry keeps its complete label at every width. The View options
+    // entry may add summary tokens beside the label without shortening it.
+    await expect(page.locator("[data-grid-view-options]")).toContainText(
       "View options",
     );
     await expect(page.locator("[data-grid-select-mode]")).toHaveText(
       "Select mode",
     );
     await expect(page.locator("[data-grid-view-options]")).toHaveAccessibleName(
-      "View options",
+      /^View options(, |$)/,
     );
     await expect(page.locator("[data-grid-select-mode]")).toHaveAccessibleName(
       "Select mode",
@@ -409,6 +413,12 @@ test("the Library separator exposes the width value and its bounds", async ({
   for (let step = 0; step < 40; step += 1)
     await page.keyboard.press("ArrowLeft");
   await expect(resizer).toHaveAttribute("aria-valuenow", String(min));
+
+  // The narrow drawer layout has no separator, so it is neither painted nor
+  // a keyboard stop.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(resizer).toBeHidden();
+  await expect(resizer).toHaveAttribute("tabindex", "-1");
 });
 
 test("the Access screen renders inside the application main landmark", async ({
@@ -494,6 +504,11 @@ test("narrow summary counts groups and exposes every committed value through Vie
   await expect(entry.locator(".options-summary-compact")).toHaveText(
     /Filters: 5.*Custom order/,
   );
+  // The entry also names the complete-source decision counts, so review
+  // progress stays readable without opening the surface.
+  await expect(entry.locator(".options-summary-compact")).toContainText(
+    /picked · [\d,]+ rejected · [\d,]+ unflagged/,
+  );
   await expect(entry).toHaveAccessibleName(
     /Picked.*Rating 2–4.*JPEG.*Available Originals.*2026-01-02 12:30:45.*2026-01-04 12:30:59.*latest first/,
   );
@@ -525,4 +540,46 @@ test("narrow summary counts groups and exposes every committed value through Vie
     "Rating 2–4",
   );
   await expect(entry.locator(".options-summary-wide")).toContainText("JPEG");
+});
+
+test("the narrow Grid keeps its browsing controls in the thumb-zone action bar", async ({
+  page,
+}) => {
+  const { running } = await gridFixture(LONG_ALBUM_NAME);
+  await openAlbumGrid(page, running.url, LONG_ALBUM_NAME);
+
+  const bar = page.locator("[data-grid-mobile-actions]");
+  await expect(bar.locator("[data-grid-tools]")).toBeVisible();
+  const box = (await bar.boundingBox())!;
+  const viewport = page.viewportSize()!;
+  // The bar anchors to the bottom edge, inside the thumb reach zone.
+  expect(box.y + box.height).toBeGreaterThanOrEqual(viewport.height - 8);
+  expect(box.y).toBeGreaterThan(viewport.height * 0.6);
+
+  await page.setViewportSize({ width: 1024, height: 844 });
+  await expect(
+    page.locator(".grid-header-row [data-grid-tools]"),
+  ).toBeVisible();
+  await expect(bar).toBeHidden();
+});
+
+test("View options keeps Source actions behind a local return path", async ({
+  page,
+}) => {
+  const { running } = await gridFixture(LONG_ALBUM_NAME);
+  await openAlbumGrid(page, running.url, LONG_ALBUM_NAME);
+  await openViewOptions(page);
+
+  await expect(page.locator("[data-options-main-view]")).toBeVisible();
+  await page.locator("[data-source-actions-open]").click();
+  await expect(page.locator("[data-source-actions-view]")).toBeVisible();
+  await expect(page.locator("[data-options-main-view]")).toBeHidden();
+  await expect(page.locator("[data-options-footer]")).toBeHidden();
+  await expect(page.locator("[data-source-actions-return]")).toBeFocused();
+  // Trash stays reachable from the subview regardless of source or filter.
+  await openSourceActions(page);
+  await expect(page.locator("[data-removed-open]")).toBeVisible();
+  await page.locator("[data-source-actions-return]").click();
+  await expect(page.locator("[data-options-main-view]")).toBeVisible();
+  await expect(page.locator("[data-source-actions-open]")).toBeFocused();
 });

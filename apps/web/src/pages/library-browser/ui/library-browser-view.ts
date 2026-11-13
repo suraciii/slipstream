@@ -472,10 +472,6 @@ export function createLibraryBrowserView(
   const gridTitle = required<HTMLElement>(root, "[data-grid-title]");
   const gridSourcePath = required<HTMLElement>(root, "[data-grid-source-path]");
   const gridStatus = required<HTMLElement>(root, "[data-grid-status]");
-  const gridSelectMode = required<HTMLButtonElement>(
-    root,
-    "[data-grid-select-mode]",
-  );
   const gridTools = required<HTMLElement>(root, "[data-grid-tools]");
   /// Presents the current source in both views. The narrow disclosure's
   /// accessible name is built from the heading beside it plus the status
@@ -816,7 +812,6 @@ export function createLibraryBrowserView(
       gridBatch,
       gridTools,
       gridSelection,
-      gridSelectMode,
       multiDone,
       batchCount,
       batchRetained,
@@ -827,6 +822,7 @@ export function createLibraryBrowserView(
       batchReject,
       batchAlbumAdd,
     },
+    compact: compactSources,
     alive: () => alive,
     send,
     openAlbumChooser: (invoker, count) =>
@@ -1114,7 +1110,7 @@ export function createLibraryBrowserView(
       advance: false,
     }),
   );
-  gridSelectMode.addEventListener("click", () => {
+  batchPresenter.selectMode.addEventListener("click", () => {
     if (!alive) return;
     send({ kind: "grid-select-mode", mode: !batchPresenter.multiMode() });
   });

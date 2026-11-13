@@ -113,6 +113,10 @@ export function createSourceSurfaceController({
     browser.classList.toggle("sources-drawer", modal);
     sourceToggle.hidden = false;
     photoSourceToggle.hidden = !modal;
+    // The narrow layout has no separator, so it is neither painted nor
+    // focusable there. Wide layout keeps the keyboard-resizable separator.
+    sourceResizer.hidden = modal;
+    sourceResizer.tabIndex = modal ? -1 : 0;
     if (!modal) close(false);
     syncExpanded();
   };

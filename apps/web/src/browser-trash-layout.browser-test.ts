@@ -5,7 +5,10 @@ import {
   writePhotos,
   server,
 } from "./browser-test-support/fixtures.js";
-import { openViewOptions } from "./browser-test-support/surfaces.js";
+import {
+  openSourceActions,
+  openViewOptions,
+} from "./browser-test-support/surfaces.js";
 
 setupBrowserSmoke();
 
@@ -98,6 +101,7 @@ for (const viewport of [
       "Ready · 1 Photo",
     );
     await openViewOptions(page);
+    await openSourceActions(page);
     await page.locator("[data-removed-open]").click();
     const panel = page.locator("[data-removed-panel]");
     const first = panel.locator(".removed-item").first();

@@ -175,7 +175,7 @@ export function createGridMultiSelectionOwner(
 
   const refuseBeyondBatchBound = (): void => {
     present.setDecisionStatus(
-      "Selection limit reached. Remove a Photo to extend the range.",
+      "Selection limit reached. Remove a Photo to continue selecting.",
     );
   };
 

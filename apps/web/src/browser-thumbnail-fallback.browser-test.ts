@@ -9,6 +9,7 @@ import {
 import {
   closePhotoTools,
   openPhotoToolsView,
+  openSourceActions,
   openViewOptions,
 } from "./browser-test-support/surfaces.js";
 
@@ -122,6 +123,7 @@ test("Grid and Nearby Photos replace missing and undecodable thumbnails and reco
 
   recovered = true;
   await openViewOptions(page);
+  await openSourceActions(page);
   await page.locator("[data-refresh]").click();
   await expect(cell(0).locator("img")).toBeVisible();
   await expect(cell(0).locator(".thumbnail-placeholder")).toBeHidden();

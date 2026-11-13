@@ -27,6 +27,7 @@ export const APP_SHELL_TEMPLATE = `
         <div class="grid-selection" data-grid-selection hidden><p class="grid-selection-count" data-batch-count></p><button type="button" class="quiet" data-grid-multi-done>Done</button></div>
       </div><p class="grid-summary" data-grid-summary role="status" aria-live="polite"></p></header>
       <div class="grid-viewport" data-grid-viewport tabindex="0" role="group" aria-label="Photo Library Grid"><div class="grid-canvas" data-grid-canvas></div><div class="grid-layer" data-grid-layer></div><div class="grid-empty" data-grid-empty hidden><p data-grid-empty-message role="status"></p><button type="button" data-grid-empty-action hidden>Check Library</button><button type="button" data-grid-empty-clear-filters hidden>Clear filters</button></div></div>
+      <div class="grid-mobile-actions" data-grid-mobile-actions></div>
       <div class="grid-batch" data-grid-batch hidden><p class="grid-batch-retained" data-batch-retained hidden>Selection remains active</p><details class="grid-batch-result" data-grid-batch-result hidden><summary>Result</summary><div class="grid-batch-result-details"><p data-grid-batch-result-text></p><button type="button" class="quiet" data-grid-batch-compensate hidden>Remove added Photos</button></div></details><div class="grid-batch-actions" data-batch-actions role="group" aria-label="Batch actions"><button type="button" data-batch-pick>Pick</button><button type="button" data-batch-reject>Reject</button><button type="button" data-batch-album-add>Add to Album</button></div></div>
     </section>
 ${PHOTO_VIEW_TEMPLATE}
@@ -34,6 +35,7 @@ ${PHOTO_VIEW_TEMPLATE}
       <div class="options-sheet">
         <header class="options-header"><h2 id="view-options-title">View options</h2><button type="button" class="quiet" data-view-options-close>Close</button></header>
         <div class="options-body">
+          <div class="options-main-view" data-options-main-view>
           <p class="options-committed-summary" data-committed-filter-summary hidden></p>
           <p class="options-progress" data-grid-source-progress role="status"></p>
           <p class="options-progress" data-grid-visible-results role="status"></p>
@@ -47,6 +49,7 @@ ${PHOTO_VIEW_TEMPLATE}
             <p class="options-help" id="rating-help">Use the same minimum and maximum for an exact Rating.</p>
             <p class="options-error" id="rating-error" data-rating-error role="alert" hidden></p>
           </fieldset>
+          <button type="button" class="quiet" data-reset-filters>Reset filters</button>
           <details class="options-advanced" data-advanced-filters>
             <summary>Advanced filters</summary>
             <div class="options-advanced-fields">
@@ -69,18 +72,23 @@ ${PHOTO_VIEW_TEMPLATE}
               </fieldset>
             </div>
           </details>
-          <button type="button" class="quiet" data-reset-filters>Reset filters</button></section>
+          </section>
           <section aria-labelledby="options-display-title"><h3 id="options-display-title">Order and display</h3>
           <div class="options-field"><label for="view-sort-select">Source order</label><select id="view-sort-select" data-sort-select></select></div>
           <div class="options-field"><label for="view-size-select">Thumbnail size</label><select id="view-size-select" data-size-select></select></div>
           </section>
           <p class="options-progress" data-draft-discard-notice hidden></p>
           <section class="options-browse-actions" data-browse-actions aria-labelledby="options-browse-title"><h3 id="options-browse-title">Browse actions</h3><button type="button" data-random-photo aria-label="Open a random Photo from the current source and filter">Open a random Photo</button><button type="button" data-album-resume hidden>Resume</button></section>
-          <section class="options-source-actions" data-options-source-actions aria-labelledby="options-source-title"><h3 id="options-source-title">Source actions</h3>
-          <div class="folder-album-controls" data-folder-album-controls hidden><label for="folder-album-select">Add Folder to</label><select id="folder-album-select" data-folder-album-select></select><button type="button" data-add-folder-to-album>Add Folder</button><p data-folder-album-status role="status" aria-live="polite"></p></div>
-          <button type="button" data-refresh>Refresh Current Source</button><button type="button" class="quiet" data-removal-open hidden>Remove rejected Photos</button><button type="button" class="quiet" data-removed-open>Trash</button></section>
+          <div class="options-source-entry"><button type="button" data-source-actions-open>Source actions</button></div>
+          </div>
+          <div class="options-subview" data-source-actions-view hidden>
+            <header class="options-subview-header"><button type="button" class="quiet" data-source-actions-return>View options</button></header>
+            <section class="options-source-actions" data-options-source-actions aria-labelledby="options-source-title"><h3 id="options-source-title">Source actions</h3>
+            <div class="folder-album-controls" data-folder-album-controls hidden><label for="folder-album-select">Add Folder to</label><select id="folder-album-select" data-folder-album-select></select><button type="button" data-add-folder-to-album>Add Folder</button><p data-folder-album-status role="status" aria-live="polite"></p></div>
+            <button type="button" data-refresh>Refresh Current Source</button><button type="button" class="quiet" data-removal-open hidden>Remove rejected Photos</button><button type="button" class="quiet" data-removed-open>Trash</button></section>
+          </div>
         </div>
-        <footer class="options-footer"><button type="button" data-view-options-apply>Apply</button><button type="button" class="quiet" data-view-options-cancel>Cancel</button></footer>
+        <footer class="options-footer" data-options-footer><button type="button" data-view-options-apply>Apply</button><button type="button" class="quiet" data-view-options-cancel>Cancel</button></footer>
       </div>
     </dialog>
     <dialog class="album-dialog" data-album-form-dialog aria-labelledby="album-form-title">
