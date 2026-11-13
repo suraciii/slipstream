@@ -108,6 +108,7 @@ export function createViewOptions({
   activeAlbumId,
   onSizeChange,
   compact,
+  randomHeader,
   syncSecondarySurface,
 }: Readonly<{
   root: ParentNode;
@@ -120,6 +121,7 @@ export function createViewOptions({
   activeAlbumId: () => string | undefined;
   onSizeChange: (size: ViewOptionsThumbnailSize) => void;
   compact: MediaQueryList;
+  randomHeader: MediaQueryList;
   syncSecondarySurface?: () => void;
 }>): ViewOptions {
   const {
@@ -149,11 +151,16 @@ export function createViewOptions({
   const gridTools = required<HTMLElement>(root, "[data-grid-tools]");
   const browseActions = required<HTMLElement>(root, "[data-browse-actions]");
   const syncRandomHost = () => {
-    const host = compact.matches ? browseActions : gridTools;
+    // The normal header keeps the complete Random Photo label only while it
+    // has room beside the current source title. The intermediate wide layout
+    // would otherwise squeeze the title to a single character.
+    const host =
+      compact.matches || randomHeader.matches ? browseActions : gridTools;
     if (randomPhoto.parentElement !== host) host.append(randomPhoto);
   };
   const onCompactChange = () => syncRandomHost();
   compact.addEventListener("change", onCompactChange);
+  randomHeader.addEventListener("change", onCompactChange);
   syncRandomHost();
 
   let alive = true;
@@ -467,6 +474,7 @@ export function createViewOptions({
       alive = false;
       viewOptionsDialog.removeEventListener("close", resetDraft);
       compact.removeEventListener("change", onCompactChange);
+      randomHeader.removeEventListener("change", onCompactChange);
     },
   };
 }

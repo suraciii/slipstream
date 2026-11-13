@@ -141,6 +141,8 @@ Refresh and retry actions MUST state whether they reopen the same destination or
 
 ## Product Boundaries
 
+The Library navigation name filter is not a Library filter. It selects no Photos and MUST NOT create a Destination or Browse Snapshot.
+
 Filters MUST NOT provide:
 
 - Smart Albums or Saved Search;

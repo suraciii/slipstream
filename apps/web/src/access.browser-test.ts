@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 import { spawn, spawnSync } from "node:child_process";
 import { mkdtemp, mkdir, copyFile, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -27,6 +27,9 @@ import {
   openPhotoToolsView,
   closePhotoTools,
 } from "./browser-test-support/surfaces.js";
+
+const libraryNavigation = (page: Page, includeHidden = false) =>
+  page.getByRole("navigation", { name: "Library navigation", includeHidden });
 
 let base: string;
 async function runCli(
@@ -116,9 +119,7 @@ for (const viewport of [
     await expect(page.getByRole("alert")).toContainText(/token/i);
     await page.getByLabel("Access Token", { exact: true }).fill(server.token);
     await page.getByLabel("Access Token", { exact: true }).press("Enter");
-    await expect(
-      page.getByRole("navigation", { name: "Sources", includeHidden: true }),
-    ).toBeAttached();
+    await expect(libraryNavigation(page, true)).toBeAttached();
     expect(new URL(page.url()).origin).toBe(server.url);
     expect(new URL(page.url()).searchParams.get("selection")).toBe("picked");
     expect(page.url()).not.toContain(server.token);
@@ -140,19 +141,15 @@ for (const viewport of [
     );
     const second = await context.newPage();
     await second.goto(server.url);
-    await expect(
-      second.getByRole("navigation", { name: "Sources", includeHidden: true }),
-    ).toBeAttached();
+    await expect(libraryNavigation(second, true)).toBeAttached();
     await page.bringToFront();
     // Revalidation of this same session must leave the mounted fetcher usable.
     await page.evaluate(() =>
       window.dispatchEvent(new PopStateEvent("popstate")),
     );
-    await expect(
-      page.getByRole("navigation", { name: "Sources", includeHidden: true }),
-    ).toBeAttached();
+    await expect(libraryNavigation(page, true)).toBeAttached();
     if (viewport.width < 600)
-      await page.getByRole("button", { name: /^Sources/ }).click();
+      await page.getByRole("button", { name: /^Library/ }).click();
     await page.getByRole("button", { name: "Sign out", exact: true }).click();
     await expect(
       page.getByLabel("Access Token", { exact: true }),
@@ -184,9 +181,7 @@ test("direct HTTP keeps access, cookie lifecycle and CLI authentication", async 
   expect((await context.request.get(`${url}/api/status`)).status()).toBe(401);
   await page.getByLabel("Access Token", { exact: true }).fill(server.token);
   await page.getByLabel("Access Token", { exact: true }).press("Enter");
-  await expect(
-    page.getByRole("navigation", { name: "Sources", includeHidden: true }),
-  ).toBeAttached();
+  await expect(libraryNavigation(page, true)).toBeAttached();
   await expect(page.locator(".private-transport")).toContainText(
     "Unencrypted HTTP",
   );
@@ -200,9 +195,7 @@ test("direct HTTP keeps access, cookie lifecycle and CLI authentication", async 
     await context.request.get(`${url}/api/access/session`)
   ).json();
   await page.reload();
-  await expect(
-    page.getByRole("navigation", { name: "Sources", includeHidden: true }),
-  ).toBeAttached();
+  await expect(libraryNavigation(page, true)).toBeAttached();
   const second: unknown = await (
     await context.request.get(`${url}/api/access/session`)
   ).json();
@@ -627,10 +620,7 @@ test("returning to the library keeps it visible while access is checked", async 
   await page.goto(server.url);
   await page.getByLabel("Access Token", { exact: true }).fill(server.token);
   await page.getByRole("button", { name: "Open library", exact: true }).click();
-  const sources = page.getByRole("navigation", {
-    name: "Sources",
-    includeHidden: true,
-  });
+  const sources = libraryNavigation(page, true);
   await expect(sources).toBeAttached();
 
   let releaseCheck!: () => void;
@@ -681,10 +671,7 @@ test("confirmed session loss on return removes the library", async ({
   await page.goto(server.url);
   await page.getByLabel("Access Token", { exact: true }).fill(server.token);
   await page.getByRole("button", { name: "Open library", exact: true }).click();
-  const sources = page.getByRole("navigation", {
-    name: "Sources",
-    includeHidden: true,
-  });
+  const sources = libraryNavigation(page, true);
   await expect(sources).toBeAttached();
   await page.route("**/api/access/session", async (route) => {
     if (route.request().method() !== "GET") return route.continue();
@@ -707,7 +694,7 @@ test("restored page keeps private content closed until access is verified", asyn
   await page.goto(server.url);
   await page.getByLabel("Access Token", { exact: true }).fill(server.token);
   await page.getByRole("button", { name: "Open library", exact: true }).click();
-  const sources = page.getByRole("navigation", { name: "Sources" });
+  const sources = libraryNavigation(page);
   await expect(sources).toBeVisible();
   let release!: () => void;
   const held = new Promise<void>((resolve) => {
@@ -745,7 +732,7 @@ test("temporary history access failure keeps the current Library usable and reco
   await page.goto(server.url);
   await page.getByLabel("Access Token", { exact: true }).fill(server.token);
   await page.getByRole("button", { name: "Open library", exact: true }).click();
-  const sources = page.getByRole("navigation", { name: "Sources" });
+  const sources = libraryNavigation(page);
   await expect(sources).toBeVisible();
   await expect(page.getByText(/^Ready · 1 Photo$/)).toBeVisible();
   const initialUrl = page.url();
@@ -771,7 +758,7 @@ test("confirmed history rejection removes the Library", async ({ page }) => {
   await page.goto(server.url);
   await page.getByLabel("Access Token", { exact: true }).fill(server.token);
   await page.getByRole("button", { name: "Open library", exact: true }).click();
-  const sources = page.getByRole("navigation", { name: "Sources" });
+  const sources = libraryNavigation(page);
   await expect(sources).toBeVisible();
   await page.route("**/api/access/session", (route) =>
     route.fulfill({ json: { authenticated: false, configured: true } }),
@@ -790,9 +777,7 @@ test("cookie writes reject missing CSRF and revoked session cannot restore priva
   await page.goto(server.url);
   await page.getByLabel("Access Token", { exact: true }).fill(server.token);
   await page.getByRole("button", { name: "Open library", exact: true }).click();
-  await expect(
-    page.getByRole("navigation", { name: "Sources", includeHidden: true }),
-  ).toBeAttached();
+  await expect(libraryNavigation(page, true)).toBeAttached();
   expect(
     (
       await context.request.post(`${server.url}/api/scan`, {
@@ -802,9 +787,7 @@ test("cookie writes reject missing CSRF and revoked session cannot restore priva
   ).toBe(403);
   const second = await context.newPage();
   await second.goto(server.url);
-  await expect(
-    second.getByRole("navigation", { name: "Sources", includeHidden: true }),
-  ).toBeAttached();
+  await expect(libraryNavigation(second, true)).toBeAttached();
   await page.bringToFront();
   const status = (await (
     await context.request.get(`${server.url}/api/access/session`)
@@ -834,9 +817,7 @@ test("known expiry hides private content while disconnected", async ({
   await page.goto(server.url);
   await page.getByLabel("Access Token", { exact: true }).fill(server.token);
   await page.getByRole("button", { name: "Open library", exact: true }).click();
-  await expect(
-    page.getByRole("navigation", { name: "Sources" }),
-  ).toBeAttached();
+  await expect(libraryNavigation(page)).toBeAttached();
   await context.setOffline(true);
   await page.clock.fastForward(7 * 24 * 60 * 60 * 1000 + 1000);
   await expect(page.getByRole("alert")).toContainText("expired");
@@ -851,9 +832,7 @@ test("failed sign out hides Photos without claiming confirmed revocation", async
   await page.goto(server.url);
   await page.getByLabel("Access Token", { exact: true }).fill(server.token);
   await page.getByRole("button", { name: "Open library", exact: true }).click();
-  await expect(
-    page.getByRole("navigation", { name: "Sources" }),
-  ).toBeAttached();
+  await expect(libraryNavigation(page)).toBeAttached();
   await context.setOffline(true);
   await page.getByRole("button", { name: "Sign out", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText(
@@ -925,7 +904,7 @@ test("visible window focus changes do not hide the Library or check access", asy
   await page.goto(server.url);
   await page.getByLabel("Access Token", { exact: true }).fill(server.token);
   await page.getByRole("button", { name: "Open library", exact: true }).click();
-  await expect(page.getByRole("navigation", { name: "Sources" })).toBeVisible();
+  await expect(libraryNavigation(page)).toBeVisible();
   let checks = 0;
   await page.route("**/api/access/session", async (route) => {
     checks++;
@@ -935,7 +914,7 @@ test("visible window focus changes do not hide the Library or check access", asy
     window.dispatchEvent(new Event("blur"));
     window.dispatchEvent(new Event("focus"));
   });
-  await expect(page.getByRole("navigation", { name: "Sources" })).toBeVisible();
+  await expect(libraryNavigation(page)).toBeVisible();
   await expect(page.locator(".access-check-overlay")).toHaveCount(0);
   expect(checks).toBe(0);
 });
@@ -947,7 +926,7 @@ test("image and history restoration share one status check", async ({
   await page.goto(server.url);
   await page.getByLabel("Access Token", { exact: true }).fill(server.token);
   await page.getByRole("button", { name: "Open library", exact: true }).click();
-  await expect(page.getByRole("navigation", { name: "Sources" })).toBeVisible();
+  await expect(libraryNavigation(page)).toBeVisible();
   const image = page.locator('img[src*="/api/private/derivatives/"]').first();
   await expect(image).toBeVisible();
   const status: unknown = await (
@@ -972,9 +951,7 @@ test("image and history restoration share one status check", async ({
     await expect(page.locator(".access-check-overlay")).toBeVisible();
     release();
     await expect(page.locator(".access-check-overlay")).toHaveCount(0);
-    await expect(
-      page.getByRole("navigation", { name: "Sources" }),
-    ).toBeVisible();
+    await expect(libraryNavigation(page)).toBeVisible();
     expect(checks).toBe(1);
   } finally {
     release();

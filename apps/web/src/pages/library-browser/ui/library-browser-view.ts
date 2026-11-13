@@ -64,7 +64,7 @@ import {
 import { createAlbumForm } from "./album-form.js";
 import { createSourceListPresenter } from "./source-list-presenter.js";
 import { createGridBatchPresenter } from "./grid-batch-presenter.js";
-import { resolveKeyIntent } from "./keyboard-policy.js";
+import { createKeyboardHandler } from "./keyboard-handler.js";
 import { addressFor } from "../model/navigation-address.js";
 import type { NavigationGridRestoration } from "../model/browser-navigation.js";
 import { APP_SHELL_TEMPLATE } from "./library-browser-template.js";
@@ -156,7 +156,7 @@ export interface LibraryBrowserView
     sourceRetryVisible: boolean,
     photoRetryVisible: boolean,
   ): void;
-  setSourceTitle(name: string): void;
+  setSourceTitle(name: string, path?: string): void;
   setGridStatus(text: string): void;
   setGridEmpty(model: EmptySourcePresentation): void;
   /// Presents an explained state that is not a source Grid: the Photographer
@@ -181,7 +181,7 @@ export interface LibraryBrowserView
   renderProgress(model: GridProgressViewModel): void;
   setControls(model: ControlsViewModel): void;
   renderMembership(model: MembershipViewModel): void;
-  prepareSourceOpen(name: string): void;
+  prepareSourceOpen(name: string, path?: string): void;
   renderGrid(model: GridViewModel, position?: number): void;
   /// Presents the multi-selection the page model has just emptied: the batch
   /// tray hides and the retained cells drop their markers. A failed source open
@@ -460,11 +460,17 @@ export function createLibraryBrowserView(
     "[data-trash-review-close]",
   );
   const sourceList = required<HTMLElement>(root, "[data-source-list]");
+  const sourceFilter = required<HTMLInputElement>(root, "[data-source-filter]");
+  const sourceFilterEmpty = required<HTMLElement>(
+    root,
+    "[data-source-filter-empty]",
+  );
   const retry = required<HTMLButtonElement>(root, "[data-retry]");
   const signOut = required<HTMLButtonElement>(root, "[data-access-sign-out]");
   const refresh = required<HTMLButtonElement>(root, "[data-refresh]");
   const gridView = required<HTMLElement>(root, "[data-grid-view]");
   const gridTitle = required<HTMLElement>(root, "[data-grid-title]");
+  const gridSourcePath = required<HTMLElement>(root, "[data-grid-source-path]");
   const gridStatus = required<HTMLElement>(root, "[data-grid-status]");
   const gridSelectMode = required<HTMLButtonElement>(
     root,
@@ -475,8 +481,18 @@ export function createLibraryBrowserView(
   /// accessible name is built from the heading beside it plus the status
   /// slot, so a screen reader names both the source and the current result
   /// count from one control while the visible label truncates.
-  const presentSourceTitle = (name: string) => {
-    gridTitle.title = sourceToggle.title = gridTitle.textContent = name;
+  const presentSourceTitle = (name: string, path?: string) => {
+    const location = path?.trim() ?? "";
+    const segments = location.split("/").filter(Boolean);
+    const parentLocation =
+      segments.at(-1) === name ? segments.slice(0, -1) : segments;
+    const parentPath = parentLocation.join(" / ");
+    const complete = parentPath ? `${name} — ${location}` : name;
+    gridTitle.title = sourceToggle.title = complete;
+    gridTitle.textContent = name;
+    gridSourcePath.textContent = parentPath;
+    gridSourcePath.title = location;
+    gridSourcePath.hidden = parentPath === "";
     photoPresenter.setSourceTitle(name);
   };
   const gridSelection = required<HTMLElement>(root, "[data-grid-selection]");
@@ -740,6 +756,7 @@ export function createLibraryBrowserView(
   let emptySourceAction: EmptySourcePresentation["action"] = "check-library";
 
   const compactSources = window.matchMedia("(max-width: 760px)");
+  const randomPhotoHeader = window.matchMedia("(max-width: 999px)");
   const mobileActionHierarchy = window.matchMedia(
     "(max-width: 760px), (max-height: 480px)",
   );
@@ -914,6 +931,7 @@ export function createLibraryBrowserView(
         ?.albums.find((candidate) => candidate.active)?.id,
     onSizeChange: setGridThumbnailSize,
     compact: compactSources,
+    randomHeader: randomPhotoHeader,
     syncSecondarySurface,
   });
   const albumFormController = createAlbumForm({
@@ -928,6 +946,8 @@ export function createLibraryBrowserView(
   });
   const sourcePresenter = createSourceListPresenter({
     sourceList,
+    sourceFilter,
+    sourceFilterEmpty,
     albumResume,
     folderAlbumControls,
     folderAlbumSelect,
@@ -1008,84 +1028,18 @@ export function createLibraryBrowserView(
     gridPresenter.render(model, position);
   };
 
-  // The keyboard policy resolves one keydown to a semantic intent; this
-  // listener only reads the live facts it names and executes the result.
-  const keydown = (event: KeyboardEvent) => {
-    if (!alive) return;
-    const target = event.target as HTMLElement | null;
-    const intent = resolveKeyIntent(
-      {
-        key: event.key,
-        altKey: event.altKey,
-        ctrlKey: event.ctrlKey,
-        metaKey: event.metaKey,
-        shiftKey: event.shiftKey,
-        isComposing: event.isComposing,
-      },
-      {
-        contentEditable: target?.isContentEditable === true,
-        editableControl: Boolean(
-          target?.matches("textarea, select, [contenteditable=true]"),
-        ),
-        textInput:
-          target?.matches("input") === true &&
-          (target as HTMLInputElement).type !== "range",
-        rangeInput: target?.matches("input[type=range]") === true,
-        withinGridView: gridView.contains(target),
-      },
-      {
-        modalBlocking: surfaces.blocking(),
-        gridViewActive: photoView.hidden,
-        gridMultiActive:
-          batchPresenter.multiCount() > 0 || batchPresenter.multiMode(),
-        zoomPresent: Boolean(zoomController),
-        zoomMeasurableImage: zoomController?.hasMeasurableImage() ?? false,
-        currentSelection: photoPresenter.currentSelection,
-      },
-    );
-    if (intent.kind === "ignore") return;
-    if (intent.preventDefault) event.preventDefault();
-    switch (intent.kind) {
-      case "undo":
-        send({ kind: "undo" });
-        return;
-      case "grid-multi-clear":
-        send({ kind: "grid-multi-clear" });
-        return;
-      case "grid-key":
-        gridPresenter.handleKey(event);
-        return;
-      case "zoom":
-        if (intent.action === "in") zoomController?.zoomIn();
-        else if (intent.action === "out") zoomController?.zoomOut();
-        else if (intent.action === "fit") zoomController?.applyFit();
-        else zoomController?.toggleDetail();
-        return;
-      case "navigate":
-        send(
-          intent.direction === "previous"
-            ? { kind: "previous" }
-            : { kind: "next" },
-        );
-        return;
-      case "photo-decision":
-        send({
-          kind: "photo-mutation",
-          field: "selectionState",
-          value: intent.value,
-          advance: intent.advance,
-        });
-        return;
-      case "rate-photo":
-        send({
-          kind: "photo-mutation",
-          field: "rating",
-          value: intent.value,
-          advance: false,
-        });
-        return;
-    }
-  };
+  const keydown = createKeyboardHandler({
+    alive: () => alive,
+    gridView,
+    photoView,
+    surfaces,
+    multiCount: () => batchPresenter.multiCount(),
+    multiMode: () => batchPresenter.multiMode(),
+    zoom: zoomController,
+    currentSelection: () => photoPresenter.currentSelection,
+    handleGridKey: (event) => gridPresenter.handleKey(event),
+    send,
+  });
 
   compactSources.addEventListener("change", onSourceViewportChange);
   mobileActionHierarchy.addEventListener("change", onSourceViewportChange);
@@ -1196,9 +1150,9 @@ export function createLibraryBrowserView(
       retry.hidden = !sourceRetryVisible;
       retryPhoto.hidden = !photoRetryVisible;
     },
-    setSourceTitle(name) {
+    setSourceTitle(name, path) {
       if (!alive) return;
-      presentSourceTitle(name);
+      presentSourceTitle(name, path);
     },
     setGridStatus(text) {
       if (!alive) return;
@@ -1283,7 +1237,7 @@ export function createLibraryBrowserView(
       if (!alive) return;
       membershipPanelController.render(model);
     },
-    prepareSourceOpen(name) {
+    prepareSourceOpen(name, path) {
       if (!alive) return;
       const returnFocus = surfaces.isActive("sources");
       cancelGridRender();
@@ -1298,7 +1252,7 @@ export function createLibraryBrowserView(
       sourceController.close(false);
       sourceController.syncLayout();
       if (returnFocus) gridViewport.focus();
-      presentSourceTitle(name);
+      presentSourceTitle(name, path);
       folderAlbumControls.hidden = true;
       folderAlbumSelect.replaceChildren();
       folderAlbumStatus.textContent = "";

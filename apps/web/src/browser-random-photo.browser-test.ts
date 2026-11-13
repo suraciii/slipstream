@@ -476,7 +476,7 @@ test("an Original Folder names itself and keeps the wide action in the header", 
   );
   await waitForGridFrame(page);
   await expect(randomAction(page)).toHaveAccessibleName(
-    "Open a random Photo from Coast 2024 · Folder",
+    "Open a random Photo from Coast 2024",
   );
   await openViewOptions(page);
   // The wide Grid promotes the random action to the header, so the empty

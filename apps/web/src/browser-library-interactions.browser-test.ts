@@ -210,7 +210,7 @@ for (const width of [1200, 390]) {
     await expect(page.locator(".folder-loading")).toHaveCount(0);
     await expect(expand).toHaveAttribute("aria-disabled", "false");
     await expand.click();
-    await expect(childLink).toHaveCount(0);
+    await expect(childLink).toBeHidden();
     await page.context().setOffline(true);
     try {
       await expand.click();
@@ -392,7 +392,137 @@ test("Library Folder remains collapsible while its retry is pending", async ({
   }
 });
 
-test("long unbroken Folder loading status stays inside narrow Sources", async ({
+test("Library name filter finds Folders and Albums without changing the source", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  const kyoto = join(root, "Kyoto");
+  const studio = join(root, "Studio");
+  await mkdir(kyoto, { recursive: true });
+  await mkdir(studio, { recursive: true });
+  await writePhotos(kyoto, 1);
+  await writePhotos(studio, 1);
+  const running = await server(base, root);
+  await post(running.url, "/api/albums", { name: "Kyoto selects" });
+  await page.goto(running.url);
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "Ready · 2 Photos",
+  );
+  await openSources(page);
+
+  const filter = page.getByRole("searchbox", {
+    name: "Filter folders and albums",
+  });
+  await filter.fill("kyoto");
+  await expect(
+    page.getByRole("link", { name: /^Library Folder 2 Photos$/ }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: /^Kyoto 1 Photo$/ }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: /^Studio 1 Photo$/ }),
+  ).toBeHidden();
+  await expect(
+    page.getByRole("link", { name: /^Kyoto selects 0 Photos$/ }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: /^All Photos 2 Photos$/ }),
+  ).toBeVisible();
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "Ready · 2 Photos",
+  );
+
+  await filter.fill("missing");
+  await expect(
+    page.getByText("No matching folders or albums.", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: /^All Photos 2 Photos$/ }),
+  ).toBeVisible();
+
+  await filter.fill("");
+  await expect(
+    page.getByRole("link", { name: /^Studio 1 Photo$/ }),
+  ).toBeHidden();
+  await expect(
+    page.getByText("No matching folders or albums.", { exact: true }),
+  ).toBeHidden();
+  const rootToggle = page.getByRole("button", {
+    name: "Toggle Library Folder subfolders",
+  });
+  await expect(rootToggle).toHaveAttribute("aria-expanded", "false");
+  await rootToggle.click();
+  await expect(
+    page.getByRole("link", { name: /^Studio 1 Photo$/ }),
+  ).toBeVisible();
+});
+
+test("Folder Arrow keys and the source title expose the nested Location", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  const parent = join(root, "Parent");
+  const child = join(parent, "Child");
+  await mkdir(child, { recursive: true });
+  await writePhotos(child, 1);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 1200, height: 800 });
+  await page.goto(running.url);
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "Ready · 1 Photo",
+  );
+  await openSources(page);
+  await page
+    .getByRole("button", { name: "Toggle Library Folder subfolders" })
+    .click();
+  const parentExpand = page.getByRole("button", {
+    name: "Toggle Parent subfolders",
+  });
+  await parentExpand.click();
+  const parentCard = page.getByRole("link", { name: /^Parent 1 Photo$/ });
+  const childCard = page.getByRole("link", { name: /^Child 1 Photo$/ });
+  await expect(childCard).toBeVisible();
+
+  await parentCard.focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(childCard).toBeFocused();
+  await page.keyboard.press("ArrowLeft");
+  await expect(parentCard).toBeFocused();
+  await page.keyboard.press("ArrowLeft");
+  await expect(parentExpand).toHaveAttribute("aria-expanded", "false");
+  await expect(parentCard).toBeFocused();
+  await page.keyboard.press("ArrowLeft");
+  await expect(
+    page.getByRole("link", { name: /^Library Folder 1 Photo$/ }),
+  ).toBeFocused();
+
+  await parentExpand.click();
+  await parentCard.click();
+  await expect(page.locator("[data-grid-title]")).toHaveText("Parent");
+  await expect(page.locator("[data-grid-title]")).toHaveAttribute(
+    "title",
+    "Parent",
+  );
+  const path = page.locator("[data-grid-source-path]");
+  await expect(path).toBeHidden();
+  await childCard.click();
+  await expect(page.locator("[data-grid-title]")).toHaveText("Child");
+  await expect(page.locator("[data-grid-title]")).toHaveAttribute(
+    "title",
+    "Child — Parent/Child",
+  );
+  await expect(path).toBeVisible();
+  await expect(path).toHaveText("Parent");
+  await expect(path).toHaveAttribute("title", "Parent/Child");
+  await expect(
+    page.getByRole("link", { name: /^All Photos 1 Photo$/ }),
+  ).toBeVisible();
+  await page.getByRole("link", { name: /^All Photos 1 Photo$/ }).click();
+  await expect(path).toBeHidden();
+});
+
+test("long unbroken Folder loading status stays inside narrow Library navigation", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 390, height: 844 });
@@ -446,4 +576,109 @@ test("long unbroken Folder loading status stays inside narrow Sources", async ({
   } finally {
     held.resolve();
   }
+});
+
+test("Library filter reveals retained nested Folders while branches stay collapsed", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  const parent = join(root, "Parent");
+  const child = join(parent, "Child");
+  await mkdir(child, { recursive: true });
+  await writePhotos(child, 1);
+  const running = await server(base, root);
+  await page.goto(running.url);
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "Ready · 1 Photo",
+  );
+  await openSources(page);
+  const rootToggle = page.getByRole("button", {
+    name: "Toggle Library Folder subfolders",
+  });
+  await rootToggle.click();
+  const parentToggle = page.getByRole("button", {
+    name: "Toggle Parent subfolders",
+  });
+  await parentToggle.click();
+  await expect(
+    page.getByRole("link", { name: /^Child 1 Photo$/ }),
+  ).toBeVisible();
+  await parentToggle.click();
+  await rootToggle.click();
+  await expect(
+    page.getByRole("link", { name: /^Parent 1 Photo$/ }),
+  ).toBeHidden();
+
+  const filter = page.getByRole("searchbox", {
+    name: "Filter folders and albums",
+  });
+  await filter.fill("child");
+  await expect(
+    page.getByRole("link", { name: /^Parent 1 Photo$/ }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: /^Child 1 Photo$/ }),
+  ).toBeVisible();
+  await expect(
+    page.locator('[data-focus-key="folder:expand:"]'),
+  ).toHaveAttribute("aria-expanded", "false");
+
+  await filter.fill("");
+  await expect(
+    page.getByRole("link", { name: /^Child 1 Photo$/ }),
+  ).toBeHidden();
+  await rootToggle.click();
+  await expect(
+    page.getByRole("link", { name: /^Parent 1 Photo$/ }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: /^Child 1 Photo$/ }),
+  ).toBeHidden();
+});
+
+test("opening a nested Folder reveals its ancestors in Library navigation", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  const child = join(root, "Parent", "Child");
+  await mkdir(child, { recursive: true });
+  await writePhotos(child, 1);
+  const running = await server(base, root);
+  const address = new URL(
+    "?source=folder&folderPath=Parent%2FChild&selection=all",
+    running.url,
+  ).toString();
+  await page.goto(address);
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "Ready · 1 Photo",
+  );
+  await openSources(page);
+  await expect(
+    page.getByRole("button", { name: "Toggle Library Folder subfolders" }),
+  ).toHaveAttribute("aria-expanded", "true");
+  await expect(
+    page.getByRole("link", { name: /^Parent 1 Photo$/ }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: /^Child 1 Photo$/ }),
+  ).toHaveAttribute("aria-current", "true");
+});
+
+test("an empty Library Folder presents no empty disclosure", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 1);
+  const running = await server(base, root);
+  await page.goto(running.url);
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "Ready · 1 Photo",
+  );
+  await openSources(page);
+  await expect(
+    page.getByRole("button", { name: "Toggle Library Folder subfolders" }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("link", { name: /^Library Folder 1 Photo$/ }),
+  ).toBeVisible();
 });

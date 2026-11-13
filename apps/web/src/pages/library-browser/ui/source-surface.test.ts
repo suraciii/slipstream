@@ -21,7 +21,7 @@ describe("source width bounds", () => {
   });
 
   test("passes a value inside the bounds through unchanged", () => {
-    expect(clampSourceWidth(224)).toBe(224);
+    expect(clampSourceWidth(250)).toBe(250);
     expect(clampSourceWidth(300)).toBe(300);
   });
 
@@ -45,26 +45,26 @@ describe("source width bounds", () => {
 
 describe("source width announcement", () => {
   test("states the applied value and both bounds", () => {
-    expect(sourceWidthAnnouncement(224)).toBe(
-      `Sources width 224 pixels, from ${SOURCE_WIDTH_MINIMUM} to ${SOURCE_WIDTH_MAXIMUM}`,
+    expect(sourceWidthAnnouncement(250)).toBe(
+      `Library width 250 pixels, from ${SOURCE_WIDTH_MINIMUM} to ${SOURCE_WIDTH_MAXIMUM}`,
     );
   });
 
   test("announces the clamped value, never the requested one", () => {
     // The announcement must read the width owner's value, so an out-of-range
-    // request announces what actually moved the Sources width.
+    // request announces what actually moved the Library width.
     expect(sourceWidthAnnouncement(SOURCE_WIDTH_MAXIMUM + 500)).toBe(
-      `Sources width ${SOURCE_WIDTH_MAXIMUM} pixels, from ${SOURCE_WIDTH_MINIMUM} to ${SOURCE_WIDTH_MAXIMUM}`,
+      `Library width ${SOURCE_WIDTH_MAXIMUM} pixels, from ${SOURCE_WIDTH_MINIMUM} to ${SOURCE_WIDTH_MAXIMUM}`,
     );
     expect(sourceWidthAnnouncement(SOURCE_WIDTH_MINIMUM - 500)).toBe(
-      `Sources width ${SOURCE_WIDTH_MINIMUM} pixels, from ${SOURCE_WIDTH_MINIMUM} to ${SOURCE_WIDTH_MAXIMUM}`,
+      `Library width ${SOURCE_WIDTH_MINIMUM} pixels, from ${SOURCE_WIDTH_MINIMUM} to ${SOURCE_WIDTH_MAXIMUM}`,
     );
   });
 
   test("a fractional step announces a whole pixel width", () => {
     // Pointer moves land on sub-pixel widths, so the announcement reads a whole
     // pixel rather than a fraction the separator never paints.
-    expect(sourceWidthAnnouncement(224.4)).toContain("224 pixels");
-    expect(sourceWidthAnnouncement(224.6)).toContain("225 pixels");
+    expect(sourceWidthAnnouncement(250.4)).toContain("250 pixels");
+    expect(sourceWidthAnnouncement(250.6)).toContain("251 pixels");
   });
 });

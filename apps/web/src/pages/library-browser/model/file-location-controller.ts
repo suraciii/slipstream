@@ -75,6 +75,7 @@ export interface FileLocationController {
   claimPublicationNotice(key: string, message: string): void;
   releasePublicationNotice(): void;
   toggle(location: string, expanded: boolean): Promise<void>;
+  reveal(location: string): Promise<void>;
   page(parent: string, direction: -1 | 1): Promise<void>;
   tree(isActive: (location: string) => boolean): FileLocationTree;
   refreshCounts(): Promise<void>;
@@ -272,6 +273,21 @@ export function createFileLocationController(
     }
     await presentExpansion(location, load(location, 0, true));
   };
+  const reveal = async (location: string): Promise<void> => {
+    if (closed || !deps.isAlive() || !location) return;
+    const components = location.split("/");
+    const ancestors = [""];
+    let parent = "";
+    for (const component of components.slice(0, -1)) {
+      parent = parent ? `${parent}/${component}` : component;
+      ancestors.push(parent);
+    }
+    for (const ancestor of ancestors) {
+      if (owner.isExpanded(ancestor)) continue;
+      await toggle(ancestor, false);
+      if (!owner.isExpanded(ancestor)) return;
+    }
+  };
   const page = async (parent: string, direction: -1 | 1): Promise<void> => {
     const retained = owner.window(parent);
     if (!retained) return;
@@ -280,11 +296,10 @@ export function createFileLocationController(
   };
   const tree = (isActive: (location: string) => boolean): FileLocationTree => {
     const node = (child: FolderChild): FileLocationTreeNode => {
-      const retained = owner.isExpanded(child.location)
-        ? owner.window(child.location)
-        : undefined;
+      const retained = owner.window(child.location);
+      const expanded = owner.isExpanded(child.location);
       const pager =
-        retained && retained.total > owner.pageSize
+        expanded && retained && retained.total > owner.pageSize
           ? {
               page: retained.page,
               pages: Math.max(1, Math.ceil(retained.total / owner.pageSize)),
@@ -297,7 +312,7 @@ export function createFileLocationController(
         name: child.name,
         photoCount: child.photoCount,
         hasDescendantFolders: child.hasDescendantFolders,
-        expanded: owner.isExpanded(child.location),
+        expanded,
         loading: expansions.has(child.location),
         enabled: Boolean(owner.publication),
         active: isActive(child.location),
@@ -306,6 +321,7 @@ export function createFileLocationController(
       };
     };
     const root = owner.window("");
+    const rootExpanded = owner.isExpanded("");
     return {
       enabled: Boolean(owner.publication),
       failures: owner.failures().map((f) => ({
@@ -314,10 +330,10 @@ export function createFileLocationController(
         parent: f.parent,
         loading: retries.has(f),
       })),
-      rootExpanded: owner.isExpanded(""),
+      rootExpanded,
       rootLoading: expansions.has(""),
-      rootChildren: owner.isExpanded("") && root ? root.children.map(node) : [],
-      ...(root && root.total > owner.pageSize
+      rootChildren: root?.children.map(node) ?? [],
+      ...(rootExpanded && root && root.total > owner.pageSize
         ? {
             rootPager: {
               page: root.page,
@@ -367,6 +383,7 @@ export function createFileLocationController(
     claimPublicationNotice,
     releasePublicationNotice,
     toggle,
+    reveal,
     page,
     tree,
     refreshCounts,

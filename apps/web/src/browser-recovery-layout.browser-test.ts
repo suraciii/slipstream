@@ -151,7 +151,7 @@ test("the recovery review opens on the unavailable inventory before any mapping 
 
   await page.setViewportSize({ width: 1000, height: 800 });
   await page.goto(running.url);
-  // Sources is persistent at this width; its disclosure is only for compact layouts.
+  // Library navigation is persistent at this width; its disclosure is only for compact layouts.
   await page
     .getByRole("button", { name: "Review unavailable Originals" })
     .click();

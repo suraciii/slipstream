@@ -7,19 +7,21 @@ export const APP_SHELL_TEMPLATE = `
   <section class="browser" data-browser>
     <div class="library-status-entry" data-library-status-entry hidden><button type="button" data-library-status-toggle aria-expanded="false" aria-controls="library-status-notice">Library status</button><div class="library-status-notice" id="library-status-notice" data-library-status-notice role="status" aria-live="polite" hidden></div></div>
     <dialog class="source-dialog" data-source-dialog>
-      <nav class="source-panel" id="source-panel" data-library-screen aria-label="Library sources">
-        <header class="source-header"><h2 id="sources-title">Sources</h2><button type="button" class="quiet source-close" data-source-close>Close</button></header>
+      <nav class="source-panel" id="source-panel" data-library-screen aria-label="Library navigation">
+        <header class="source-header"><h2 id="library-navigation-title">Library</h2><button type="button" class="quiet source-close" data-source-close>Close</button></header>
         <p data-summary-status role="status">Loading Library…</p>
         <p class="recovery-notice" data-recovery-notice hidden role="status"></p>
+        <label class="source-filter"><span>Filter folders and albums</span><input type="search" data-source-filter autocomplete="off" spellcheck="false" /></label>
+        <p class="source-filter-empty" data-source-filter-empty role="status" hidden>No matching folders or albums.</p>
         <div class="source-list" data-source-list></div>
         <footer class="source-footer"><button type="button" data-retry hidden>Retry connection</button><button type="button" class="quiet" data-access-sign-out>Sign out</button></footer>
         <p class="source-width-status" data-source-width-status role="status" aria-live="polite" hidden></p>
       </nav>
     </dialog>
-    <div class="source-resizer" data-source-resizer role="separator" aria-label="Resize sources" aria-orientation="vertical" aria-valuemin="176" aria-valuemax="360" aria-valuenow="240" tabindex="0"></div>
+    <div class="source-resizer" data-source-resizer role="separator" aria-label="Resize Library navigation" aria-orientation="vertical" aria-valuemin="240" aria-valuemax="360" aria-valuenow="280" tabindex="0"></div>
     <section class="grid-view" data-grid-view aria-labelledby="grid-title">
       <header class="grid-header"><div class="grid-header-row">
-        <div class="grid-source"><span class="source-toggle-indicator" aria-hidden="true">▾</span><span class="grid-source-details"><span class="grid-heading"><h1 id="grid-title" data-grid-title>All Photos</h1></span><span class="grid-status-slot"><p id="grid-status" data-grid-status role="status"></p></span></span><button type="button" class="quiet source-toggle" data-source-toggle aria-controls="source-panel" aria-expanded="false" aria-labelledby="source-toggle-label grid-title grid-status"><span id="source-toggle-label" hidden>Sources —</span></button></div>
+        <div class="grid-source"><span class="source-toggle-indicator" aria-hidden="true">▾</span><span class="grid-source-details"><span class="grid-heading"><h1 id="grid-title" data-grid-title>All Photos</h1><span class="grid-source-path" data-grid-source-path hidden></span></span><span class="grid-status-slot"><p id="grid-status" data-grid-status role="status"></p></span></span><button type="button" class="quiet source-toggle" data-source-toggle aria-controls="source-panel" aria-expanded="false" aria-labelledby="source-toggle-label grid-title grid-status"><span id="source-toggle-label" hidden>Library —</span></button></div>
         <p class="grid-connection" data-grid-connection role="status" hidden></p>
         <div class="grid-tools" data-grid-tools><button type="button" class="quiet" data-grid-view-options aria-label="View options">View options<span class="options-flag" data-view-options-flag hidden></span></button><button type="button" class="quiet" data-grid-select-mode aria-pressed="false">Select mode</button></div>
         <div class="grid-selection" data-grid-selection hidden><p class="grid-selection-count" data-batch-count></p><button type="button" class="quiet" data-grid-multi-done>Done</button></div>

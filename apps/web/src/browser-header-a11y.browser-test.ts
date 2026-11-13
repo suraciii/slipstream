@@ -12,6 +12,7 @@ import {
 import {
   waitForGridFrame,
   openSources,
+  openViewOptions,
 } from "./browser-test-support/surfaces.js";
 
 setupBrowserSmoke();
@@ -135,6 +136,62 @@ test("no Grid header control is clipped at 320, 360, 390, 420, or 760", async ({
   }
 });
 
+test("the tight wide header keeps the source title and moves Random Photo", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  const folderName = "2026-05-28 Kyoto";
+  await mkdir(join(root, folderName));
+  await writeFile(join(root, folderName, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(running.url);
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "Ready · 1 Photo",
+  );
+  await waitForGridFrame(page);
+  await openSources(page);
+  await page
+    .getByRole("button", { name: "Toggle Library Folder subfolders" })
+    .click();
+  await page.getByRole("link", { name: /^2026-05-28 Kyoto 1 Photo$/ }).click();
+  await expect(page.locator("[data-grid-title]")).toHaveText(folderName);
+  await page.evaluate(() => document.fonts.ready);
+
+  const title = page.locator("[data-grid-title]");
+  for (const width of [761, 800, 899, 900, 999] as const) {
+    await page.setViewportSize({ width, height: 844 });
+    await expect(
+      page.locator("[data-grid-tools] [data-random-photo]"),
+    ).toHaveCount(0);
+    expect(
+      await title.evaluate(
+        (element) => element.scrollWidth > element.clientWidth + 1,
+      ),
+      `the source title truncates at ${width}px`,
+    ).toBe(false);
+    await openViewOptions(page);
+    await expect(
+      page.getByText("Browse actions", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.locator("[data-browse-actions] [data-random-photo]"),
+    ).toBeVisible();
+    await page.keyboard.press("Escape");
+  }
+
+  await page.setViewportSize({ width: 1000, height: 844 });
+  await expect(
+    page.locator("[data-grid-tools] [data-random-photo]"),
+  ).toBeVisible();
+  expect(
+    await title.evaluate(
+      (element) => element.scrollWidth > element.clientWidth + 1,
+    ),
+    "the source title truncates at 1000px",
+  ).toBe(false);
+});
+
 test("enlarged filter summaries and header actions reflow without clipped targets", async ({
   page,
 }) => {
@@ -209,7 +266,7 @@ test("only a long source name truncates and stays available to assistive technol
   // accessible name is built from the heading and the count it contains, so
   // the truncated paint never becomes the announced name.
   await expect(page.locator("[data-source-toggle]")).toHaveAccessibleName(
-    `Sources — ${LONG_ALBUM_NAME} Ready · 2 Photos`,
+    `Library — ${LONG_ALBUM_NAME} Ready · 2 Photos`,
   );
   // The narrow disclosure covers the row, so pointer hover lands on it and
   // exposes the complete name there.
@@ -291,10 +348,10 @@ test("a wide Grid presents the source title as a heading, not a disclosure", asy
   await openAlbumGrid(page, running.url, LONG_ALBUM_NAME);
 
   await page.setViewportSize({ width: 1440, height: 900 });
-  // Sources are already persistent beside the Grid, so the header carries no
-  // second, ineffectual disclosure and no extra keyboard stop.
+  // Library navigation is already persistent beside the Grid, so the header
+  // carries no second, ineffectual disclosure and no extra keyboard stop.
   await expect(page.locator("[data-source-toggle]")).toBeHidden();
-  await expect(page.getByRole("button", { name: /^Sources —/ })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /^Library —/ })).toHaveCount(0);
   // The title itself remains a navigable heading outside any button.
   const heading = page.getByRole("heading", { level: 1 });
   await expect(heading).toBeVisible();
@@ -308,7 +365,7 @@ test("a wide Grid presents the source title as a heading, not a disclosure", asy
   await expect(heading).toHaveAttribute("title", LONG_ALBUM_NAME);
 });
 
-test("the Sources separator exposes the width value and its bounds", async ({
+test("the Library separator exposes the width value and its bounds", async ({
   page,
 }) => {
   const { running } = await gridFixture(LONG_ALBUM_NAME);
@@ -323,7 +380,9 @@ test("the Sources separator exposes the width value and its bounds", async ({
 
   const min = Number(await resizer.getAttribute("aria-valuemin"));
   const max = Number(await resizer.getAttribute("aria-valuemax"));
-  expect(min).toBeLessThan(max);
+  expect(min).toBe(240);
+  expect(max).toBe(360);
+  expect(Number(await resizer.getAttribute("aria-valuenow"))).toBe(280);
 
   // A keyboard resize moves the announced value inside the bounds and leaves
   // the applied width reading the same number.
@@ -334,7 +393,7 @@ test("the Sources separator exposes the width value and its bounds", async ({
   expect(after).toBeGreaterThan(before);
   expect(after).toBeLessThanOrEqual(max);
   await expect(page.locator("[data-source-width-status]")).toHaveText(
-    `Sources width ${after} pixels, from ${min} to ${max}`,
+    `Library width ${after} pixels, from ${min} to ${max}`,
   );
   const applied = await page.evaluate(() =>
     getComputedStyle(document.querySelector("[data-browser]")!)
@@ -343,10 +402,13 @@ test("the Sources separator exposes the width value and its bounds", async ({
   );
   expect(applied).toBe(`${after}px`);
 
-  // The separator reaches its upper bound and stays there.
+  // The separator reaches both bounds and stays there.
   for (let step = 0; step < 40; step += 1)
     await page.keyboard.press("ArrowRight");
   await expect(resizer).toHaveAttribute("aria-valuenow", String(max));
+  for (let step = 0; step < 40; step += 1)
+    await page.keyboard.press("ArrowLeft");
+  await expect(resizer).toHaveAttribute("aria-valuenow", String(min));
 });
 
 test("the Access screen renders inside the application main landmark", async ({
