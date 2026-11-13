@@ -102,6 +102,12 @@ export function createAlbumForm({
         listeners: AbortController;
       }
     | undefined;
+  let openAlbumMenu:
+    | Readonly<{
+        close: (restoreFocus: boolean) => void;
+        trigger: HTMLButtonElement;
+      }>
+    | undefined;
 
   surfaces.register("album-form", {
     dialog: albumFormDialog,
@@ -112,10 +118,10 @@ export function createAlbumForm({
   });
 
   const albumActionFocusKey = (
-    kind: AlbumFormReference["kind"],
+    kind: AlbumFormReference["kind"] | "resume",
     albumId = "",
   ): string =>
-    kind === "create" ? "album:create" : `album:${kind}:${albumId}`;
+    kind === "create" ? "album:create" : `album:actions:${albumId}`;
 
   const albumFormTitle = (form: AlbumFormState): string =>
     form.kind === "create"
@@ -605,41 +611,168 @@ export function createAlbumForm({
   ): HTMLElement => {
     const tools = document.createElement("div");
     tools.className = "album-tools";
-    const rename = document.createElement("button");
-    rename.type = "button";
-    rename.className = "album-tool";
-    rename.textContent = "Rename";
-    rename.dataset.focusKey = albumActionFocusKey("rename", album.id);
-    rename.setAttribute("aria-label", `Rename ${album.name}`);
-    rename.addEventListener("click", () =>
-      openAlbumForm("rename", album.id, album.name),
+    const trigger = document.createElement("button");
+    trigger.type = "button";
+    trigger.className = "album-menu-trigger";
+    const triggerIcon = document.createElementNS(
+      "http://www.w3.org/2000/svg",
+      "svg",
     );
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "album-tool";
-    remove.textContent = "Delete";
-    remove.dataset.focusKey = albumActionFocusKey("delete", album.id);
-    remove.setAttribute("aria-label", `Delete ${album.name}`);
-    remove.addEventListener("click", () =>
-      openAlbumForm("delete", album.id, album.name),
-    );
-    tools.append(rename, remove);
-    // Resume resolves the saved position under the existing saved-position
-    // rules and opens Photo View, so its destination is not an address: it
-    // stays an explicit button beside the Album's Grid destination, reachable
-    // from any source. View options carries the same action for the open
-    // Album; both emit the one album-resume intent.
-    if (album.hasSavedPosition) {
-      const resume = document.createElement("button");
-      resume.type = "button";
-      resume.className = "album-tool album-resume";
-      resume.textContent = "Resume";
-      resume.setAttribute("aria-label", `Resume ${album.name}`);
-      resume.addEventListener("click", () =>
-        send({ kind: "album-resume", albumId: album.id }),
+    triggerIcon.setAttribute("viewBox", "0 0 16 16");
+    triggerIcon.setAttribute("aria-hidden", "true");
+    triggerIcon.setAttribute("focusable", "false");
+    triggerIcon.classList.add("album-menu-icon");
+    for (const cx of ["3", "8", "13"]) {
+      const dot = document.createElementNS(
+        "http://www.w3.org/2000/svg",
+        "circle",
       );
-      tools.append(resume);
+      dot.setAttribute("cx", cx);
+      dot.setAttribute("cy", "8");
+      dot.setAttribute("r", "1.35");
+      dot.setAttribute("fill", "currentColor");
+      triggerIcon.append(dot);
     }
+    trigger.append(triggerIcon);
+    trigger.title = "Album actions";
+    trigger.dataset.focusKey = albumActionFocusKey("rename", album.id);
+    trigger.setAttribute("aria-label", `Actions for ${album.name}`);
+    trigger.setAttribute("aria-haspopup", "menu");
+    trigger.setAttribute("aria-expanded", "false");
+    const menu = document.createElement("div");
+    menu.className = "album-actions-menu";
+    menu.id = `album-actions-${album.id}`;
+    menu.setAttribute("role", "menu");
+    menu.setAttribute("aria-label", `${album.name} actions`);
+    menu.hidden = true;
+    trigger.setAttribute("aria-controls", menu.id);
+    const title = document.createElement("p");
+    title.className = "album-actions-title";
+    title.setAttribute("aria-hidden", "true");
+    title.textContent = album.name;
+    menu.append(title);
+    const addItem = (
+      label: string,
+      ariaLabel: string,
+      focusKey: string,
+      activate: () => void,
+    ) => {
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = "album-actions-item";
+      item.setAttribute("role", "menuitem");
+      item.textContent = label;
+      item.dataset.focusKey = focusKey;
+      item.setAttribute("aria-label", ariaLabel);
+      item.addEventListener("click", () => {
+        closeMenu(false);
+        activate();
+      });
+      menu.append(item);
+      return item;
+    };
+    const closeMenu = (restoreFocus: boolean) => {
+      if (menu.hidden) return;
+      menu.hidden = true;
+      trigger.setAttribute("aria-expanded", "false");
+      document.removeEventListener("pointerdown", onOutside, true);
+      window.removeEventListener("resize", onDismiss);
+      window.removeEventListener("scroll", onDismiss, true);
+      menu.removeEventListener("keydown", onMenuKeyDown);
+      menu.removeEventListener("focusout", onMenuFocusOut);
+      if (openAlbumMenu?.trigger === trigger) openAlbumMenu = undefined;
+      if (restoreFocus && trigger.isConnected) trigger.focus();
+    };
+    const onDismiss = () => closeMenu(menu.contains(document.activeElement));
+    const onOutside = (event: Event) => {
+      if (event.target instanceof Node && !tools.contains(event.target))
+        closeMenu(false);
+    };
+    const menuItems = () =>
+      Array.from(menu.querySelectorAll<HTMLButtonElement>("[role=menuitem]"));
+    const onMenuKeyDown = (event: KeyboardEvent) => {
+      const items = menuItems();
+      const index = items.indexOf(document.activeElement as HTMLButtonElement);
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeMenu(true);
+      } else if (event.key === "Tab") {
+        closeMenu(false);
+      } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        const direction = event.key === "ArrowDown" ? 1 : -1;
+        const next =
+          items[(index + direction + items.length) % items.length] ?? items[0];
+        next?.focus();
+      } else if (event.key === "Home" || event.key === "End") {
+        event.preventDefault();
+        (event.key === "Home" ? items[0] : items.at(-1))?.focus();
+      }
+    };
+    const onMenuFocusOut = (event: FocusEvent) => {
+      if (
+        event.relatedTarget instanceof Node &&
+        tools.contains(event.relatedTarget)
+      )
+        return;
+      closeMenu(false);
+    };
+    const openMenu = () => {
+      if (!menu.hidden) {
+        closeMenu(true);
+        return;
+      }
+      openAlbumMenu?.close(false);
+      menu.hidden = false;
+      const rect = trigger.getBoundingClientRect();
+      const width = menu.offsetWidth;
+      const height = menu.offsetHeight;
+      const left = Math.max(
+        8,
+        Math.min(window.innerWidth - width - 8, rect.right - width),
+      );
+      const below = rect.bottom + 6;
+      const top =
+        below + height <= window.innerHeight - 8
+          ? below
+          : Math.max(8, rect.top - height - 6);
+      menu.style.left = `${left}px`;
+      menu.style.top = `${top}px`;
+      trigger.setAttribute("aria-expanded", "true");
+      openAlbumMenu = { close: closeMenu, trigger };
+      document.addEventListener("pointerdown", onOutside, true);
+      window.addEventListener("resize", onDismiss);
+      window.addEventListener("scroll", onDismiss, true);
+      menu.addEventListener("keydown", onMenuKeyDown);
+      menu.addEventListener("focusout", onMenuFocusOut);
+      menuItems()[0]?.focus();
+    };
+    trigger.addEventListener("click", openMenu);
+    trigger.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowDown") return;
+      event.preventDefault();
+      openMenu();
+    });
+    addItem(
+      "Rename",
+      `Rename ${album.name}`,
+      albumActionFocusKey("rename", album.id),
+      () => openAlbumForm("rename", album.id, album.name),
+    );
+    addItem(
+      "Delete",
+      `Delete ${album.name}`,
+      albumActionFocusKey("delete", album.id),
+      () => openAlbumForm("delete", album.id, album.name),
+    );
+    if (album.hasSavedPosition)
+      addItem(
+        "Resume",
+        `Resume ${album.name}`,
+        albumActionFocusKey("resume", album.id),
+        () => send({ kind: "album-resume", albumId: album.id }),
+      );
+    tools.append(trigger, menu);
     return tools;
   };
 
@@ -723,6 +856,7 @@ export function createAlbumForm({
       }
     },
     dispose() {
+      openAlbumMenu?.close(false);
       abandonContext();
       alive = false;
     },

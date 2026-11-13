@@ -235,7 +235,7 @@ function mountPrivateLibraryBrowser(
       );
       if (open) {
         sourceGrid.updateAlbum(open);
-        view.setSourceTitle(sourceGrid.name);
+        view.setSourceTitle(sourceGrid.name, sourceGrid.folder?.location);
       }
     }
     recoveryReview.presentRecoveryNotice(
@@ -734,8 +734,7 @@ function mountPrivateLibraryBrowser(
       fileLocationFailures: tree.failures,
       rootExpanded: tree.rootExpanded,
       rootLoading: tree.rootLoading,
-      rootActive:
-        sourceGrid.kind === "folder" && sourceGrid.folder?.location === "",
+      rootActive: sourceGrid.folder?.location === "",
       rootChildren: tree.rootChildren,
       ...(tree.rootPager ? { rootPager: tree.rootPager } : {}),
       albums: application.albums.map((album) => ({
@@ -926,6 +925,7 @@ function mountPrivateLibraryBrowser(
     const destinationCurrent = () =>
       applicationAlive && navigationSession.isCurrent(destinationEstablishment);
     if (!destinationCurrent()) return SOURCE_SUPERSEDED;
+    if ("folder" in requested) void folders.reveal(requested.folder.location);
     pageBusy = true;
     updateControls();
     cancelScheduledGridRender();
@@ -957,7 +957,7 @@ function mountPrivateLibraryBrowser(
     );
     recoveryGate.succeedTransition(photoTransition);
     syncConnection();
-    view.prepareSourceOpen(sourceGrid.name);
+    view.prepareSourceOpen(sourceGrid.name, sourceGrid.folder?.location);
     // The multi-selection names Photos of the source that was open: a new
     // source starts empty, and its tray presents nothing until the
     // Photographer marks Photos again.

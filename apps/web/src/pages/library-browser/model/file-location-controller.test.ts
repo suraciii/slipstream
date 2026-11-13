@@ -922,7 +922,7 @@ test("a Folder can collapse during retry without its response reopening it", asy
     expect(h.controller.tree(() => false).rootChildren[0]).toMatchObject({
       expanded: false,
       loading: false,
-      children: [],
+      children: [{ location: "child/leaf" }],
     });
     expect(h.controller.owner.failures()).toEqual([first]);
     expect(h.gate.decisionReady).toBe(false);

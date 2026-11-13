@@ -86,7 +86,7 @@ test("uses singular and plural Photo counts in Grid status and source cards", as
   ).toBeVisible();
 });
 
-test("narrow Grid discloses Sources as one named modal surface and restores focus", async ({
+test("narrow Grid discloses Library as one named modal surface and restores focus", async ({
   page,
 }) => {
   const { base, root } = await fixture();
@@ -112,9 +112,9 @@ test("narrow Grid discloses Sources as one named modal surface and restores focu
   await expect(
     page.locator(".grid-source .source-toggle-indicator"),
   ).toBeVisible();
-  // The disclosure names Sources, the current source and its status.
+  // The disclosure names Library, the current source and its status.
   await expect(sources).toHaveAccessibleName(
-    "Sources — All Photos Ready · 1 Photo",
+    "Library — All Photos Ready · 1 Photo",
   );
   await expect(panel).toBeHidden();
   await expect(dialog).toBeHidden();
@@ -136,6 +136,9 @@ test("narrow Grid discloses Sources as one named modal surface and restores focu
   await expect(dialog).toBeVisible();
   // The surface overlays the Grid instead of shrinking it.
   expect(await gridHeight()).toBe(closedGridHeight);
+  await expect(
+    page.getByRole("heading", { name: "Library", exact: true }),
+  ).toBeVisible();
   await expect(
     page.getByRole("link", { name: /^All Photos(?: |$)/ }),
   ).toBeVisible();

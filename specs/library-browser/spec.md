@@ -10,7 +10,7 @@ A bare application address MUST open directly to the `All Photos` Grid rather th
 
 Addressed entry follows [Library Browser Experience](experience/spec.md#destinations-and-browser-history).
 
-Source navigation MUST show:
+Library navigation MUST be visibly titled `Library` and MUST show:
 
 - the Photo Library as the `All Photos` source;
 - the read-only Library Folder root and its Original Folders under a `Folders` section;
@@ -18,6 +18,8 @@ Source navigation MUST show:
 - the Photo count for each displayed source;
 - current Library loading or scan status; and
 - whether an Album has a saved position.
+
+`Folders` and `Albums` MUST be named navigation groups. A Folder's descendants MUST stay nested under that Folder.
 
 The `Folders` section presents the File Locations source defined by [Physical File Locations and Virtual Albums](../photo-library/design.md).
 
@@ -31,9 +33,25 @@ Both layouts MUST preserve the `Folders` and `Albums` distinction.
 
 A Folder and Album with the same name MUST remain distinguishable by section and source labeling.
 
+A Folder row MUST show its display name without a Folder suffix. Section and nesting MUST distinguish it from an Album.
+
+Library navigation MUST provide a case-insensitive Folder and Album name filter.
+
+The filter MUST match display names only and MUST NOT change the source, Grid, committed filter, order, selection, or Library facts.
+
+The filter MUST search the retained Folder rows, including collapsed branches already loaded into Library navigation. A matching descendant MUST keep its ancestor Folders visible and reveal its retained path while the query is active. Clearing the query MUST restore the prior disclosure state.
+
+`All Photos` MUST remain visible.
+
+No match MUST state that no retained Folders or Albums match. Clearing the query MUST restore all retained rows.
+
 Changing source MUST NOT require entering a separate workflow.
 
 Expanding a Folder MUST show loading immediately when its children are not retained. Repeated expansion while that request is pending MUST join the same work.
+
+Opening a Folder source MUST reveal its ancestor Folder rows without opening the Folder itself.
+
+A focused Folder row MUST support Left and Right Arrow: collapse, expand, move to its parent, or move to its first visible child while no name filter is active.
 
 A retained child window from the current File Location publication MUST reopen immediately, preserving its page without another request. Collapsed windows MAY remain in the bounded navigation cache; publication reset MUST discard them.
 
@@ -47,26 +65,31 @@ Folder Retry MUST retain keyboard focus while pending and expose progress even w
 
 Successful Retry MUST move focus to an appropriate visible Folder control when the retry control disappears.
 
-An expanded Folder MUST remain collapsible while its request is pending. Loading feedback MUST fit the Sources surface even for long unbroken Folder names, while retaining the complete accessible name.
+An expanded Folder MUST remain collapsible while its request is pending. Loading feedback MUST fit the Library navigation surface even for long unbroken Folder names, while retaining the complete accessible name.
 
-On a wide viewport, the Photographer MUST be able to resize source navigation within a bounded width range.
+On a wide viewport, the Photographer MUST be able to resize Library navigation from 240 to 360 CSS pixels; the default MUST be 280.
 
 The separator control MUST support pointer drag and focused Left and Right Arrow keys.
 
 The separator MUST expose an accessible name, its current width, and its minimum and maximum bounds programmatically.
 
+A keyboard or completed pointer resize MUST announce the resulting width. The confirmation MUST be transient.
 
-A keyboard resize MUST announce the resulting width.
-
-A narrow viewport MUST NOT offer the separator and MUST keep the source navigation behind the Sources disclosure.
+A narrow viewport MUST NOT offer the separator and MUST keep Library navigation behind the Library disclosure.
 
 The current source MUST be visually and programmatically identifiable.
+
+A nested Folder Grid title MUST present its relative parent Location. The complete relative Location MUST remain available to assistive technology and on pointer hover.
+
+A top-level Folder, `All Photos`, and Album Grid title MUST NOT present a Location.
 
 Source state MUST NOT depend on color alone.
 
 A source name that is visually truncated MUST expose its complete name on hover.
 
 An Original Folder with no descendant Folders MUST NOT present an expand control; affected rows MUST keep their alignment without it.
+
+The Library Folder root MUST NOT present an expand control when it has no child Folders.
 
 Opening Slipstream MUST NOT require the browser to download every Photo fact, every Album member, or the complete Original Folder tree.
 
@@ -514,7 +537,7 @@ An empty Album MUST remain openable and manageable. Its Grid MUST identify the e
 
 The empty Grid MUST explain how to add Photos through Photo View membership or Grid multi-selection. **Browse All Photos** neither enrolls Photos nor creates an implicit collection mode.
 
-Rename and delete remain available through source navigation.
+Rename and delete remain available from each Album's actions menu in Library navigation.
 
 ## Saved Position
 
@@ -522,13 +545,13 @@ Slipstream MUST remember the last Photo shown in Photo View for each Album.
 
 Grid scrolling alone does not change durable saved position.
 
-Opening the Album's Grid MUST expose Resume when a saved position exists.
+An Album with a saved position MUST expose Resume in its actions menu and, while open, in View options.
 
 Resume MUST return to the saved Photo when it remains a member and its Original is available.
 
 An explicit Photo address takes precedence over that saved position.
 
-Source navigation and Resume history follow [Library Browser Experience](experience/spec.md#destinations-and-browser-history).
+Library navigation and Resume history follow [Library Browser Experience](experience/spec.md#destinations-and-browser-history).
 
 If the saved Photo remains an Album member but its Original is unavailable, Slipstream MUST move to the next member with an available Original by membership position and wrap once.
 
@@ -544,11 +567,15 @@ Their addressed Photo and browser-local Grid restoration follow [Returning to a 
 
 ## Album Management
 
-The Photographer MUST be able to create an Album from source navigation.
+Each Album row MUST expose Rename and Delete through one actions disclosure.
+
+The menu MUST also expose Resume when that Album has a saved position.
+
+The Photographer MUST be able to create an Album from Library navigation.
 
 Album names follow the [Album naming boundary](../photo-library/design.md#album-mutations): they MUST be nonempty, at most 120 characters, and unique under SQLite's ASCII-only NOCASE collation. Scripts without letter case, such as Chinese, are unaffected.
 
-Creation from Sources opens the new empty Album's usable Grid with rename and delete controls. Contextual creation follows the return behavior below instead of navigating to that Grid.
+Creation from Library navigation opens the new empty Album's usable Grid with rename and delete controls. Contextual creation follows the return behavior below instead of navigating to that Grid.
 
 Photo membership management and the Grid Add to Album chooser MUST also offer **New Album**, including when no Albums exist. They reuse the same creation form and name validation.
 

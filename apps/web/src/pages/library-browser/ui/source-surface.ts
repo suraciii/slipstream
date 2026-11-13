@@ -7,12 +7,12 @@ export interface SourceSurfaceController {
   dispose(): void;
 }
 
-/// The one width owner of the Sources navigation. A wide Grid resizes it
+/// The one width owner of the Library navigation. A wide Grid resizes it
 /// through the separator within these bounds; a narrow Grid has no separator
-/// and keeps Sources behind its disclosure.
-export const SOURCE_WIDTH_MINIMUM = 176;
+/// and keeps the Library behind its disclosure.
+export const SOURCE_WIDTH_MINIMUM = 240;
 export const SOURCE_WIDTH_MAXIMUM = 360;
-export const SOURCE_WIDTH_DEFAULT = 240;
+export const SOURCE_WIDTH_DEFAULT = 280;
 /// One pointer or keyboard step of the resize, in CSS pixels.
 export const SOURCE_WIDTH_STEP = 16;
 
@@ -24,7 +24,7 @@ export function clampSourceWidth(width: number): number {
 
 export function sourceWidthAnnouncement(width: number): string {
   const applied = clampSourceWidth(width);
-  return `Sources width ${applied} pixels, from ${SOURCE_WIDTH_MINIMUM} to ${SOURCE_WIDTH_MAXIMUM}`;
+  return `Library width ${applied} pixels, from ${SOURCE_WIDTH_MINIMUM} to ${SOURCE_WIDTH_MAXIMUM}`;
 }
 
 export function createSourceSurfaceController({
@@ -62,14 +62,22 @@ export function createSourceSurfaceController({
   let alive = true;
   let sourceWidth = SOURCE_WIDTH_DEFAULT;
   let resizing = false;
+  let widthAnnouncementTimer: number | undefined;
   const listeners = new AbortController();
 
   /// Resize feedback is a transient fact: it fills the region on each step and
   /// leaves no history entry of its own, so a later fact replaces it instead of
   /// appending.
   const announce = (message: string): void => {
+    if (widthAnnouncementTimer !== undefined)
+      window.clearTimeout(widthAnnouncementTimer);
     sourceWidthStatus.hidden = false;
     sourceWidthStatus.textContent = message;
+    widthAnnouncementTimer = window.setTimeout(() => {
+      widthAnnouncementTimer = undefined;
+      sourceWidthStatus.hidden = true;
+      sourceWidthStatus.textContent = "";
+    }, 4000);
   };
 
   const setSourceWidth = (width: number): void => {
@@ -82,7 +90,7 @@ export function createSourceSurfaceController({
     sourceResizer.setAttribute("aria-valuemax", String(SOURCE_WIDTH_MAXIMUM));
     sourceResizer.setAttribute(
       "aria-valuetext",
-      `Sources width ${sourceWidth} pixels, from ${SOURCE_WIDTH_MINIMUM} to ${SOURCE_WIDTH_MAXIMUM}`,
+      `Library width ${sourceWidth} pixels, from ${SOURCE_WIDTH_MINIMUM} to ${SOURCE_WIDTH_MAXIMUM}`,
     );
   };
 
@@ -149,14 +157,15 @@ export function createSourceSurfaceController({
     },
     { signal: listeners.signal },
   );
-  const stopResize = (): void => {
+  const stopResize = (announceWidth: boolean): void => {
     resizing = false;
     sourceResizer.classList.remove("active");
+    if (announceWidth) announce(sourceWidthAnnouncement(sourceWidth));
   };
-  sourceResizer.addEventListener("pointerup", stopResize, {
+  sourceResizer.addEventListener("pointerup", () => stopResize(true), {
     signal: listeners.signal,
   });
-  sourceResizer.addEventListener("pointercancel", stopResize, {
+  sourceResizer.addEventListener("pointercancel", () => stopResize(false), {
     signal: listeners.signal,
   });
   sourceResizer.addEventListener(
@@ -164,10 +173,13 @@ export function createSourceSurfaceController({
     (event) => {
       if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
       event.preventDefault();
-      setSourceWidth(sourceWidth + (event.key === "ArrowRight" ? 16 : -16));
+      setSourceWidth(
+        sourceWidth +
+          (event.key === "ArrowRight" ? SOURCE_WIDTH_STEP : -SOURCE_WIDTH_STEP),
+      );
       // A keyboard resize must announce its resulting width. The separator
       // itself exposes that value, so the announcement reads the same owner
-      // value that just moved the Sources width.
+      // value that just moved the Library width.
       announce(sourceWidthAnnouncement(sourceWidth));
     },
     { signal: listeners.signal },
@@ -194,6 +206,8 @@ export function createSourceSurfaceController({
     close,
     dispose() {
       alive = false;
+      if (widthAnnouncementTimer !== undefined)
+        window.clearTimeout(widthAnnouncementTimer);
       listeners.abort();
     },
   };

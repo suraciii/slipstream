@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -30,6 +30,13 @@ import {
 
 setupBrowserSmoke();
 
+async function openAlbumActions(page: Page, name: string) {
+  await page.getByRole("button", { name: `Actions for ${name}` }).click();
+  await expect(
+    page.getByRole("menu", { name: `${name} actions` }),
+  ).toBeVisible();
+}
+
 test("album management creates, renames, and deletes Albums with confirmation", async ({
   page,
 }) => {
@@ -47,7 +54,15 @@ test("album management creates, renames, and deletes Albums with confirmation", 
   await page.getByLabel("Album name").fill("Trip");
   await page.getByRole("button", { name: "Create Album" }).click();
   await expect(page.getByRole("link", { name: /Trip 0 Photos/ })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Rename Trip" })).toBeVisible();
+  const actions = page.getByRole("button", { name: "Actions for Trip" });
+  await expect(actions).toBeVisible();
+  await actions.focus();
+  await page.keyboard.press("Enter");
+  await expect(
+    page.getByRole("menuitem", { name: "Rename Trip" }),
+  ).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(actions).toBeFocused();
 
   await page.getByRole("button", { name: "New Album" }).click();
   await page.getByLabel("Album name").fill("trip");
@@ -59,7 +74,8 @@ test("album management creates, renames, and deletes Albums with confirmation", 
   await page.getByRole("button", { name: "Cancel", exact: true }).click();
   await post(running.url, "/api/albums", { name: "Other" });
   // Rename keeps membership and identity semantics on the card.
-  await page.getByRole("button", { name: "Rename Trip" }).click();
+  await openAlbumActions(page, "Trip");
+  await page.getByRole("menuitem", { name: "Rename Trip" }).click();
   await page.getByLabel("Album name").fill("Other");
   await page.getByRole("button", { name: "Save Name" }).click();
   await expect(
@@ -74,7 +90,8 @@ test("album management creates, renames, and deletes Albums with confirmation", 
   await expect(page.getByRole("link", { name: /Trip 0 Photos/ })).toBeHidden();
 
   // Deleting requires confirmation and states the safety contract.
-  await page.getByRole("button", { name: "Delete Journey" }).click();
+  await openAlbumActions(page, "Journey");
+  await page.getByRole("menuitem", { name: "Delete Journey" }).click();
   await expect(
     page.getByText("Delete “Journey”?", { exact: true }),
   ).toBeVisible();
@@ -85,7 +102,8 @@ test("album management creates, renames, and deletes Albums with confirmation", 
   await expect(
     page.getByRole("link", { name: /Journey 0 Photos/ }),
   ).toBeVisible();
-  await page.getByRole("button", { name: "Delete Journey" }).click();
+  await openAlbumActions(page, "Journey");
+  await page.getByRole("menuitem", { name: "Delete Journey" }).click();
   await page.getByRole("button", { name: "Delete Album" }).click();
   await expect(
     page.getByRole("link", { name: /Journey 0 Photos/ }),
@@ -95,6 +113,14 @@ test("album management creates, renames, and deletes Albums with confirmation", 
     page.getByRole("link", { name: /All Photos 1 Photo/ }),
   ).toBeVisible();
   await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
+
+  // The actions disclosure stays visible and touch-sized in the narrow drawer.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await openSources(page);
+  await openAlbumActions(page, "Other");
+  await expect(
+    page.getByRole("menuitem", { name: "Rename Other" }),
+  ).toBeVisible();
 });
 
 test("the current photo joins and leaves albums from the photo view", async ({

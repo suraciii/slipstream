@@ -13,7 +13,7 @@ export const PHOTO_VIEW_TEMPLATE = `
       </div>
     </div>
     <div class="photo-header-actions">
-      <button type="button" class="quiet photo-source-toggle" data-photo-source-toggle aria-controls="source-panel" aria-expanded="false" hidden>Sources</button>
+      <button type="button" class="quiet photo-source-toggle" data-photo-source-toggle aria-controls="source-panel" aria-expanded="false" hidden>Library</button>
       <p class="photo-connection" data-photo-connection role="status" hidden></p>
       <button type="button" class="quiet" data-retry-photo hidden>Retry</button>
     </div>

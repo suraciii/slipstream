@@ -12,17 +12,27 @@ This contract owns responsive composition, disclosure, and browser navigation.
 
 The interface MUST use one neutral dark appearance; shared presentation rules follow the [Product Design Language](../../design-language/spec.md#visual-language).
 
-The Library Browser has Grid and Photo views. Sources, View options, Rating, and Photo tools are supporting surfaces, not new pages or sources.
+The Library Browser has Grid and Photo views. Library navigation, View options, Rating, and Photo tools are supporting surfaces, not new pages or sources.
 
 A narrow layout applies at widths up to 760 CSS pixels. Photo View also uses compact controls at heights up to 480 CSS pixels. Layout MUST follow available space, not user-agent device identification.
 
-A wide Grid MUST keep resizable source navigation beside Photos. A narrow Grid MUST expose Sources through its current-source title and disclosure indicator, with an accessible name identifying both Sources and the current source.
+A wide Grid MUST keep resizable Library navigation beside Photos. A narrow Grid MUST expose Library through its current-source title and disclosure indicator, with an accessible name identifying both Library and the current source.
 
-Opening Sources MUST preserve the Grid or Photo context. Narrow screens MUST NOT add a dedicated brand or connected-status row.
+The Library navigation heading MUST read `Library`; the Photo tools entry that opens it MUST read `Browse Library`.
 
-Source navigation MUST retain separate All Photos, Folders, and Albums sections, their counts, and Library status. The read-only root MUST be visibly named Library Folder; selecting a source closes Sources.
+Opening Library MUST preserve the Grid or Photo context. Narrow screens MUST NOT add a dedicated brand or connected-status row.
+
+Library navigation MUST retain separate All Photos, Folders, and Albums sections, their counts, and Library status. The read-only root MUST be visibly named Library Folder. In the narrow disclosure, selecting a source closes Library.
+
+Library navigation MUST place one name filter at the top of its source list. The filter MUST NOT add a header control, open a surface, or filter Photos. Matching retained Folder branches MUST be visible while the query is active; clearing the query MUST restore the prior disclosure state.
 
 Long source names MUST truncate without widening the screen while remaining available to assistive technology and on pointer hover. This also applies to valid Album names in Grid and Photo views.
+
+A nested Folder Grid title MUST show its relative parent Location below the Folder name. A complete relative Location MUST remain available on hover and to assistive technology; a top-level Folder and other sources MUST show no Location.
+
+On a wide Grid, the Library navigation separator MUST default to 280 CSS pixels and resize between 240 and 360. Its resize confirmation MUST disappear after it is announced.
+
+On a narrow Grid, Library navigation's name filter MUST keep a 44-pixel touch target. It MUST send no request.
 
 Source rows MUST read as navigation rather than promotional cards.
 
@@ -70,7 +80,9 @@ Complete source progress remains available in View options under the server-auth
 
 A consequential Library Check completion or failure MUST remain discoverable under Status and Recovery when View options is closed.
 
-On wide Grid, **Open a random Photo** MUST appear in the normal header's secondary action group without another row. On narrow Grid it MUST appear under a named Browse actions group in View options, without a permanent header row.
+On a wide Grid from 1000 CSS pixels, **Open a random Photo** MUST appear in the normal header's secondary action group without another row. From 761 through 999, it MUST appear under Browse actions in View options to protect the source title. On a narrow Grid it MUST also appear under Browse actions in View options.
+
+From 761 through 899, the Grid header MUST use its two-row budget: source identity above, complete tool labels below.
 
 Its accessible name MUST identify that it opens a random Photo from the current source and filter. [Random Photo](../spec.md#random-photo) owns selection, readiness, and navigation behavior.
 
@@ -154,7 +166,7 @@ More opens these supporting action groups:
 
 - **Review:** Clear flag with its existing availability rule, and Rating using the same choice surface as the primary Rating entry;
 - **Photo:** Details with capture facts and Preview Source, Album membership, Edit, Preview Zoom, and Nearby Photos;
-- **Library:** Sources, View options, and Review unavailable Originals; and
+- **Library:** Browse Library, View options, and Review unavailable Originals; and
 - **Shortcuts and gestures:** a named disclosure for the combined Preview
   detail-limit explanation and gesture guidance.
 
@@ -172,7 +184,7 @@ Details and membership MAY load on request. Their loading or failure MUST remain
 
 ## Supporting Surfaces
 
-Sources, View options, Rating, Photo tools, Album forms, and recovery review MUST have an explicit name and Close or Cancel action. A compact surface opens from the bottom and scrolls internally as needed; a wide surface MAY be a centered dialog or appropriate source drawer.
+Library navigation, View options, Rating, Photo tools, Album forms, and recovery review MUST have an explicit name and Close or Cancel action. A compact surface opens from the bottom and scrolls internally as needed; a wide surface MAY be a centered dialog or appropriate source drawer.
 
 At most one modal surface MAY be active. Moving from Photo tools to Details, Albums, Zoom, or Nearby Photos replaces its content and provides a local return to Photo tools, not a browser history entry.
 
@@ -194,13 +206,15 @@ Temporary panels MUST NOT add browser history entries. Android system Back MAY i
 
 History traversal MUST close temporary surfaces and render its destination. Forward MUST NOT reopen an old tools panel.
 
-Album creation remains available in Sources and in contextual membership panels and batch choosers under [Album Management](../spec.md#album-management). Every Album MUST have a visible, keyboard-accessible rename and delete entry on touch screens, independent of hover.
+Album creation remains available in Library and in contextual membership panels and batch choosers under [Album Management](../spec.md#album-management). Every Album MUST have a visible actions disclosure with Rename and Delete, plus Resume when available, independent of hover.
+
+The actions menu MUST focus its first item on open and support Up, Down, Home, End, and Escape. Escape MUST return focus to the disclosure; Tab, outside activation, scroll, or resize MUST close the menu.
 
 Membership management retains per-Album checkboxes including removal. Original Folder Add Folder remains an explicit confirmable action distinct from adding selected Photos to an Album; recovery retains proposal and explicit Apply.
 
 Album creation and rename failures MUST remain in the active form with the submitted name retained. Delete confirmation MUST name the Album and explain that Photos and Original Files remain unchanged.
 
-An unknown membership read MUST NOT present editable unchecked boxes as confirmed absence; Retry MUST remain available. Folder expansion and paging MUST retain keyboard focus on the corresponding control after the source list changes.
+An unknown membership read MUST NOT present editable unchecked boxes as confirmed absence; Retry MUST remain available. Folder expansion, Left and Right Arrow navigation, and paging MUST retain keyboard focus on the corresponding control after the navigation list changes.
 
 ## Destinations and Browser History
 

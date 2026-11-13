@@ -549,9 +549,13 @@ The Photo owner owns Photo commitment and any normal Album saved-position settle
 
 No random-selection state is durable.
 
+### Library Navigation Filter
+
+The Library navigation name filter is browser-local. It searches retained Folder windows and Album names. It MUST NOT create a Browse Snapshot, issue a source query, or change a Destination.
+
 ### Grid Loading
 
-The Sources width and its separator MUST read the same width owner, so their values cannot diverge.
+The Library navigation width and its separator MUST read the same width owner, so their values cannot diverge.
 
 The source/Grid owner owns one range admission path.
 

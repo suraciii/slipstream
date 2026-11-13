@@ -986,7 +986,7 @@ export function createSourceGridOwner(
       return source.kind === "album"
         ? source.album.name
         : source.kind === "folder"
-          ? `${source.folder.name} · Folder`
+          ? source.folder.name
           : "All Photos";
     },
     get folder() {
