@@ -836,8 +836,7 @@ export function createLibraryBrowserView(
   /// Opens the Rating view inside the single Photo tools sheet. The Rating
   /// Wheel remains the touch accelerator on the Preview.
   const openRatingChoices = () => {
-    if (!alive || photoView.hidden) return;
-    photoToolsController.open("rating");
+    photoToolsController.open("rating", dockRating);
   };
   const closeRatingChoices = (restoreFocus = true) => {
     if (!alive) return;
@@ -866,6 +865,7 @@ export function createLibraryBrowserView(
     openDetails: openPhotoDetails,
     openViewOptions: () => viewOptionsController.open(),
     openRecovery: () => send({ kind: "recovery-entry" }),
+    releaseDockEntry: () => photoPresenter.releaseDockDisclosure(),
   });
   const editorController = createPhotoEditorSurfaceController({
     root,

@@ -18,6 +18,7 @@ import {
   applyViewOptions,
   openAdvancedFilters,
   openExactTime,
+  openRatingFields,
   openSources,
   openSourceActions,
   openViewOptions,
@@ -140,8 +141,8 @@ test("a selected high-rated view keeps its exact filtered count", async ({
   // Selection State and Rating combine with AND, and the Rating bound is
   // inclusive, so a picked Photo with Rating 4 or more matches.
   await openViewOptions(page);
-  await openAdvancedFilters(page);
-  await page.locator("[data-filter-select]").selectOption("picked");
+  await openRatingFields(page);
+  await page.locator('[data-segment="picked"]').click();
   await page.locator("[data-rating-min-select]").selectOption("4");
   await applyViewOptions(page);
 
@@ -181,7 +182,7 @@ test("a selected high-rated view keeps its exact filtered count", async ({
 
   // Rating 0 means No Rating, so a maximum of 0 matches only the unrated Photo.
   await openViewOptions(page);
-  await openAdvancedFilters(page);
+  await openRatingFields(page);
   await page.locator("[data-rating-min-select]").selectOption("");
   await page.locator("[data-rating-max-select]").selectOption("0");
   await applyViewOptions(page);
@@ -193,8 +194,8 @@ test("a selected high-rated view keeps its exact filtered count", async ({
 
   // Clearing returns to the source default filter without changing source.
   await openViewOptions(page);
-  await openAdvancedFilters(page);
-  await page.locator("[data-filter-select]").selectOption("all");
+  await openRatingFields(page);
+  await page.locator('[data-segment="all"]').click();
   await page.locator("[data-rating-max-select]").selectOption("");
   await applyViewOptions(page);
   await expect(page.locator(".photo-cell")).toHaveCount(6);
@@ -208,6 +209,7 @@ test("Match minimum pairs an exact Rating bound", async ({ page }) => {
   await expect(page.getByText(/^Ready · 1 Photo$/)).toBeVisible();
 
   await openViewOptions(page);
+  await openRatingFields(page);
   await page.locator("[data-rating-min-select]").selectOption("3");
   const match = page.locator("[data-rating-match]");
   await expect(match).toBeEnabled();
@@ -604,6 +606,7 @@ test("Refresh, Retry, and Snapshot expiry retain the committed filter", async ({
   await page.goto(running.url);
   await expect(page.getByText(/^Ready · 6 Photos$/)).toBeVisible();
   await openViewOptions(page);
+  await openRatingFields(page);
   await openExactTime(page);
   await page.locator("[data-rating-min-select]").selectOption("4");
   await page.locator("[data-kind-select]").selectOption("jpeg");
@@ -654,7 +657,7 @@ test("Refresh, Retry, and Snapshot expiry retain the committed filter", async ({
   };
   await refresh();
   await expect.poll(() => opens.length).toBe(1);
-  await expect(page.locator("[data-filter-select]")).toBeEnabled();
+  await expect(page.locator('[data-segment="all"]')).toBeEnabled();
   await assertFiltered();
   failOpen = true;
   await refresh();
@@ -666,7 +669,7 @@ test("Refresh, Retry, and Snapshot expiry retain the committed filter", async ({
   expireWindow = true;
   await refresh();
   await expect.poll(() => opens.length).toBe(5);
-  await expect(page.locator("[data-filter-select]")).toBeEnabled();
+  await expect(page.locator('[data-segment="all"]')).toBeEnabled();
   await assertFiltered();
   expect(opens[3]).toMatchObject(expected);
 });
@@ -682,7 +685,7 @@ test("Reset is staged, Cancel discards it, and Apply preserves order and size", 
   await expect(page.getByText(/^Ready · 6 Photos$/)).toBeVisible();
   await openViewOptions(page);
   await openAdvancedFilters(page);
-  await page.locator("[data-filter-select]").selectOption("unflagged");
+  await page.locator('[data-segment="unflagged"]').click();
   await page.locator("[data-kind-select]").selectOption("jpeg");
   await applyViewOptions(page);
   await expect(page).toHaveURL(/selection=unflagged&kind=jpeg/);
@@ -698,14 +701,20 @@ test("Reset is staged, Cancel discards it, and Apply preserves order and size", 
   await page.locator("[data-sort-select]").selectOption("capture-time-desc");
   await page.locator("[data-size-select]").selectOption("large");
   await page.locator("[data-reset-filters]").click();
-  await expect(page.locator("[data-filter-select]")).toHaveValue("all");
+  await expect(page.locator('[data-segment="all"]')).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
   await expect(page.locator("[data-kind-select]")).toHaveValue("");
   expect(page.url()).toBe(original);
   expect(opens).toHaveLength(0);
   await page.locator("[data-view-options-cancel]").click();
   await openViewOptions(page);
   await openAdvancedFilters(page);
-  await expect(page.locator("[data-filter-select]")).toHaveValue("unflagged");
+  await expect(page.locator('[data-segment="unflagged"]')).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
   await expect(page.locator("[data-kind-select]")).toHaveValue("jpeg");
   await page.locator("[data-sort-select]").selectOption("capture-time-desc");
   await page.locator("[data-size-select]").selectOption("large");
@@ -735,6 +744,7 @@ test("immediate Refresh discards dirty choices and reopens the committed filter"
   await expect(page.getByText(/^Ready · 6 Photos$/)).toBeVisible();
   await openViewOptions(page);
   await openAdvancedFilters(page);
+  await openRatingFields(page);
   await page.locator("[data-rating-min-select]").selectOption("4");
   await applyViewOptions(page);
   await expect(page.locator(".photo-cell")).toHaveCount(3);
@@ -746,7 +756,8 @@ test("immediate Refresh discards dirty choices and reopens the committed filter"
   });
   await openViewOptions(page);
   await openAdvancedFilters(page);
-  await page.locator("[data-filter-select]").selectOption("unflagged");
+  await openRatingFields(page);
+  await page.locator('[data-segment="unflagged"]').click();
   await page.locator("[data-rating-min-select]").selectOption("3");
   await page.locator("[data-sort-select]").selectOption("capture-time-desc");
   await expect(page.locator("[data-draft-discard-notice]")).toBeVisible();
@@ -757,7 +768,11 @@ test("immediate Refresh discards dirty choices and reopens the committed filter"
   await expect(page.locator(".photo-cell")).toHaveCount(3);
   await openViewOptions(page);
   await openAdvancedFilters(page);
-  await expect(page.locator("[data-filter-select]")).toHaveValue("all");
+  await openRatingFields(page);
+  await expect(page.locator('[data-segment="all"]')).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
   await expect(page.locator("[data-rating-min-select]")).toHaveValue("4");
   await expect(page.locator("[data-sort-select]")).toHaveValue(
     "source-default",

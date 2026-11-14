@@ -20,6 +20,7 @@ import {
   expectConnection,
   openSources,
   openPhotoTools,
+  openDockSecondary,
   contrastRatio,
 } from "./browser-test-support/surfaces.js";
 
@@ -237,8 +238,9 @@ test("an idle browser reports a lost connection from the status probe", async ({
   await page.keyboard.press("p");
   await expect(page.locator("[data-selection]")).toHaveText("Unflagged");
   await expect(page.locator("[data-position]")).toHaveText("1 / 2");
-  await openPhotoTools(page);
+  await openDockSecondary(page);
   await expect(page.locator("[data-dock-undo]")).toBeDisabled();
+  await openPhotoTools(page);
 
   // A usable status answer confirms the connection again.
   await page.unroute("**/api/status");

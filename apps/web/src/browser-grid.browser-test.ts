@@ -218,7 +218,7 @@ test("Selection filters keep source counts, URLs, and Photo traversal stable", a
 
   // Cancel is draft-only: it changes neither the URL nor the Browse Snapshot.
   await openViewOptions(page);
-  await page.locator("[data-filter-select]").selectOption("picked");
+  await page.locator('[data-segment="picked"]').click();
   await page.locator("[data-view-options-cancel]").click();
   await expect(page.locator("[data-view-options]")).toBeHidden();
   expect(opens).toEqual([]);
@@ -226,7 +226,7 @@ test("Selection filters keep source counts, URLs, and Photo traversal stable", a
 
   // Apply evaluates one filtered Snapshot and carries its source-wide counts.
   await openViewOptions(page);
-  await page.locator("[data-filter-select]").selectOption("picked");
+  await page.locator('[data-segment="picked"]').click();
   await applyViewOptions(page);
   await expect.poll(() => opens.length).toBe(1);
   await expect(page).toHaveURL(/selection=picked/);

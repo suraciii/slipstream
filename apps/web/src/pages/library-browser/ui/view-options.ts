@@ -1,5 +1,6 @@
 import type { ModalSurfaces } from "./modal-surface.js";
 import { required } from "./presentation-helpers.js";
+import { formatPhotoCount } from "./photo-count.js";
 import type {
   GridFilterViewModel,
   GridProgressViewModel,
@@ -48,7 +49,10 @@ const SORT_OPTIONS: Record<
   ],
 };
 
-const FILTER_OPTIONS: ReadonlyArray<ViewOption<ViewSelectionFilter>> = [
+/// The Selection State segments. The committed filter is one value, so exactly
+/// one segment carries `aria-pressed="true"`: `all` means no Selection State
+/// condition, and each state segment is that single value.
+const SELECTION_SEGMENTS: ReadonlyArray<ViewOption<ViewSelectionFilter>> = [
   { value: "all", label: "All" },
   { value: "unflagged", label: "Unflagged" },
   { value: "picked", label: "Picked" },
@@ -75,7 +79,7 @@ export type ViewOptionsElements = Readonly<{
   optionsProgress: HTMLElement;
   optionsVisibleResults: HTMLElement;
   committedFilters: HTMLElement;
-  filterSelect: HTMLSelectElement;
+  selectionSegments: HTMLElement;
   sizeSelect: HTMLSelectElement;
   filters: ViewOptionsFilterElements;
 }>;
@@ -149,7 +153,7 @@ export function createViewOptions({
     optionsProgress,
     optionsVisibleResults,
     committedFilters,
-    filterSelect,
+    selectionSegments,
     sizeSelect,
     filters: filterControls,
   } = elements;
@@ -157,7 +161,22 @@ export function createViewOptions({
   // Original availability, and the Capture Time range. They commit together
   // with order and Selection State on one Apply.
   const filters = createViewOptionsFilters(filterControls, advancedFilters);
+  const segmentButtons = Array.from(
+    selectionSegments.querySelectorAll<HTMLButtonElement>("[data-segment]"),
+  );
+  /// Selection State is one committed value, so the segment set marks exactly
+  /// one pressed segment and the rest unpressed.
+  const presentSelectionSegments = (value: ViewSelectionFilter): void => {
+    for (const button of segmentButtons) {
+      const segment = button.dataset.segment as ViewSelectionFilter | undefined;
+      button.setAttribute(
+        "aria-pressed",
+        String(segment === undefined ? false : segment === value),
+      );
+    }
+  };
   const randomPhoto = required<HTMLButtonElement>(root, "[data-random-photo]");
+  const removalOpen = required<HTMLButtonElement>(root, "[data-removal-open]");
   const gridTools = required<HTMLElement>(root, "[data-grid-tools]");
   const browseActions = required<HTMLElement>(root, "[data-browse-actions]");
   const syncRandomHost = () => {
@@ -182,7 +201,6 @@ export function createViewOptions({
   let committedSize: ViewOptionsThumbnailSize = "medium";
   let draftSize: ViewOptionsThumbnailSize = committedSize;
   let renderedSortKind: ViewSourceKind | undefined;
-  let filterRendered = false;
   let renderedProgressText = "";
   let renderedProgressSummary = "";
   const wideSummary = document.createElement("span");
@@ -210,7 +228,7 @@ export function createViewOptions({
     draftSize = committedSize;
     sizeSelect.value = committedSize;
     sortSelect.value = committedOrder;
-    filterSelect.value = committedFilter;
+    presentSelectionSegments(committedFilter);
     filters.reset(committedConditions);
     if (advancedFilters) advancedFilters.open = filters.advancedActive();
     syncDraftNotice();
@@ -241,7 +259,7 @@ export function createViewOptions({
     const filterParts: string[] = [];
     if (committedFilter !== "all")
       filterParts.push(
-        FILTER_OPTIONS.find((option) => option.value === committedFilter)
+        SELECTION_SEGMENTS.find((option) => option.value === committedFilter)
           ?.label ?? "",
       );
     filterParts.push(...filters.committedLabels());
@@ -283,6 +301,35 @@ export function createViewOptions({
     );
   };
   presentViewOptionsFlag();
+
+  /// Source actions name their consequence before activation: the removal
+  /// review entry names the Rejected count of the current source and the
+  /// source itself, so the Photographer sees what would leave before opening
+  /// the review. The count comes from the server's complete-source facts, the
+  /// same numbers Source progress reports, never from loaded Grid windows.
+  /// A zero count disables the entry instead of hiding it, so the capability
+  /// stays discoverable and its scope stays stated.
+  let renderedRemovalCount = 0;
+  let renderedRemovalSource = "";
+  const presentRemovalAction = (model: {
+    rejected: number;
+    sourceName: string;
+  }): void => {
+    if (
+      model.rejected === renderedRemovalCount &&
+      model.sourceName === renderedRemovalSource
+    )
+      return;
+    renderedRemovalCount = model.rejected;
+    renderedRemovalSource = model.sourceName;
+    // The label states the count with the same Photo/Photos wording the rest
+    // of the surface uses, so the entry names the reviewed result exactly.
+    removalOpen.textContent =
+      model.rejected === 0
+        ? "Remove rejected Photos"
+        : `Remove ${formatPhotoCount(model.rejected)} reviewed as Rejected from ${model.sourceName}`;
+    removalOpen.disabled = model.rejected === 0;
+  };
 
   const showOptionsView = (
     view: "main" | "source-actions",
@@ -372,7 +419,7 @@ export function createViewOptions({
   viewOptionsApply.addEventListener("click", () => applyViewOptions());
   resetFilters.addEventListener("click", () => {
     draftFilter = "all";
-    filterSelect.value = "all";
+    presentSelectionSegments("all");
     filters.resetDraft();
     syncDraftNotice();
   });
@@ -395,11 +442,19 @@ export function createViewOptions({
     draftOrder = sortSelect.value as ViewSourceOrder;
     syncDraftNotice();
   });
-  filterSelect.addEventListener("change", () => {
-    if (!alive) return;
-    draftFilter = filterSelect.value as ViewSelectionFilter;
-    syncDraftNotice();
-  });
+  // One Selection State is committed at a time, so a segment press replaces
+  // the draft value and re-marks exactly one pressed segment.
+  for (const button of segmentButtons) {
+    button.addEventListener("click", () => {
+      if (!alive) return;
+      const value = button.dataset.segment as ViewSelectionFilter;
+      if (SELECTION_SEGMENTS.some((option) => option.value === value)) {
+        draftFilter = value;
+        presentSelectionSegments(value);
+        syncDraftNotice();
+      }
+    });
+  }
   sizeSelect.addEventListener("change", () => {
     if (!alive) return;
     draftSize = sizeSelect.value as ViewOptionsThumbnailSize;
@@ -444,26 +499,22 @@ export function createViewOptions({
     },
     renderFilter(model) {
       if (!alive) return;
-      if (!filterRendered) {
-        filterRendered = true;
-        filterSelect.replaceChildren(
-          ...FILTER_OPTIONS.map((option) => {
-            const element = document.createElement("option");
-            element.value = option.value;
-            element.textContent = option.label;
-            return element;
-          }),
-        );
-      }
       committedFilter = model.value;
       committedConditions = model.conditions;
       if (viewOptionsDialog.open) {
+        // A background render updates the committed facts but never the
+        // staged choices: the Photographer's unapplied Selection State and
+        // conditions survive until Apply, Cancel, or an immediate source
+        // action discards the draft.
         filters.setCommitted(model.conditions);
       } else {
-        filterSelect.value = model.value;
         filters.reset(model.conditions);
+        draftFilter = model.value;
+        presentSelectionSegments(committedFilter);
       }
-      filterSelect.disabled = !model.enabled;
+      for (const button of segmentButtons) {
+        button.disabled = !model.enabled;
+      }
       if (viewOptionsDialog.open) syncDraftNotice();
       presentViewOptionsFlag();
     },
@@ -483,6 +534,7 @@ export function createViewOptions({
       const sourceText = progressSummary
         ? `Source progress: ${progressSummary}`
         : "";
+      presentRemovalAction(model);
       if (
         visibleText === renderedProgressText &&
         progressSummary === renderedProgressSummary
@@ -502,7 +554,7 @@ export function createViewOptions({
         ? "Opening random Photo…"
         : "Open a random Photo";
       randomPhoto.setAttribute("aria-busy", String(model.pending));
-      const filterLabel = FILTER_OPTIONS.find(
+      const filterLabel = SELECTION_SEGMENTS.find(
         (option) => option.value === model.filter,
       )?.label;
       const filterSuffix =

@@ -11,10 +11,108 @@ export type PhotoToolsView =
 export interface PhotoToolsController {
   view(): PhotoToolsView;
   isNearbyOpen(): boolean;
-  open(view?: PhotoToolsView): void;
+  open(view?: PhotoToolsView, invoker?: HTMLElement): void;
   returnToTools(): void;
   close(restoreFocus?: boolean): void;
   dispose(): void;
+}
+
+/// The Photo review dock's secondary-action disclosure: one `⋯` toggle that
+/// opens the Undo and More pair, Escape that closes it and returns focus to
+/// the toggle, and a pointer press outside the dock that closes it. The
+/// disclosure is the dock's own state; a wide layout shows the same two
+/// buttons inline through CSS, so this controller never hides or duplicates
+/// them.
+export interface DockDisclosure {
+  isOpen(): boolean;
+  close(restoreFocus?: boolean): void;
+  /// Collapses the disclosure when open and reports the toggle that revealed
+  /// the entries, so a surface opened from them can return focus to it.
+  release(): HTMLElement | undefined;
+  dispose(): void;
+}
+
+export function createDockDisclosure(dock: HTMLElement): DockDisclosure {
+  const toggle = dock.querySelector<HTMLButtonElement>("[data-dock-overflow]");
+  const secondary = dock.querySelector<HTMLElement>("[data-dock-secondary]");
+  if (!toggle || !secondary)
+    throw new Error("Photo dock disclosure controls are missing.");
+  let open = false;
+  const listeners = new AbortController();
+
+  const apply = (): void => {
+    if (open) secondary.setAttribute("data-open", "");
+    else secondary.removeAttribute("data-open");
+    toggle.setAttribute("aria-expanded", String(open));
+  };
+
+  const close = (restoreFocus = true): void => {
+    if (!open) return;
+    open = false;
+    apply();
+    if (restoreFocus) toggle.focus();
+  };
+
+  const release = (): HTMLElement | undefined => {
+    if (!open) return undefined;
+    close(false);
+    return toggle;
+  };
+
+  toggle.addEventListener(
+    "click",
+    () => {
+      open = !open;
+      apply();
+      if (open) toggle.focus();
+    },
+    { signal: listeners.signal },
+  );
+  dock.addEventListener(
+    "keydown",
+    (event) => {
+      if (event.key !== "Escape" || !open) return;
+      event.stopPropagation();
+      close();
+    },
+    { signal: listeners.signal },
+  );
+  document.addEventListener(
+    "pointerdown",
+    (event) => {
+      if (!open) return;
+      // A press inside the dock belongs to the disclosure itself, so only a
+      // press elsewhere dismisses it — without restoring focus, because the
+      // press already moved the Photographer somewhere else.
+      const target = event.target;
+      if (target === dock || target === toggle) return;
+      if (
+        target !== null &&
+        typeof target === "object" &&
+        dock.contains(target as Node)
+      )
+        return;
+      // A press inside an open modal belongs to a surface the dock entry
+      // opened; the disclosure stays open so closing that surface can return
+      // focus to the entry that started it.
+      const owner = target as {
+        closest?: (selector: string) => unknown;
+      } | null;
+      if (owner?.closest?.("dialog[open]")) return;
+      close(false);
+    },
+    { signal: listeners.signal },
+  );
+
+  apply();
+  return {
+    isOpen: () => open,
+    close,
+    release,
+    dispose() {
+      listeners.abort();
+    },
+  };
 }
 
 export function createPhotoToolsController({
@@ -30,6 +128,7 @@ export function createPhotoToolsController({
   openDetails,
   openViewOptions,
   openRecovery,
+  releaseDockEntry,
 }: Readonly<{
   elements: Readonly<{
     photoToolsDialog: HTMLDialogElement;
@@ -49,6 +148,7 @@ export function createPhotoToolsController({
   openDetails?: (photoId: string) => void;
   openViewOptions: () => void;
   openRecovery: () => void;
+  releaseDockEntry?: () => HTMLElement | undefined;
 }>): PhotoToolsController {
   const {
     photoToolsDialog,
@@ -140,7 +240,10 @@ export function createPhotoToolsController({
     { signal: listeners.signal },
   );
 
-  const open = (view: PhotoToolsView = "tools"): void => {
+  const open = (
+    view: PhotoToolsView = "tools",
+    invoker?: HTMLElement,
+  ): void => {
     if (!alive || !isPhotoVisible()) return;
     resetGestures();
     currentView = view;
@@ -152,9 +255,11 @@ export function createPhotoToolsController({
     if (!surfaces.isActive("photo-tools"))
       surfaces.open(
         "photo-tools",
-        document.activeElement instanceof HTMLElement
-          ? document.activeElement
-          : undefined,
+        invoker ??
+          releaseDockEntry?.() ??
+          (document.activeElement instanceof HTMLElement
+            ? document.activeElement
+            : undefined),
       );
     syncFilmstripHost();
     syncSecondarySurface();

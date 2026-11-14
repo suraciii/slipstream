@@ -39,14 +39,23 @@ ${PHOTO_VIEW_TEMPLATE}
           <p class="options-committed-summary" data-committed-filter-summary hidden></p>
           <p class="options-progress" data-grid-source-progress role="status"></p>
           <p class="options-progress" data-grid-visible-results role="status"></p>
+          <section aria-labelledby="options-selection-title"><h3 id="options-selection-title">Selection</h3>
+          <div class="options-field"><div role="group" aria-label="Selection State" data-selection-segments><button type="button" data-segment="all" aria-pressed="true">All</button><button type="button" data-segment="unflagged" aria-pressed="false">Unflagged</button><button type="button" data-segment="picked" aria-pressed="false">Picked</button><button type="button" data-segment="rejected" aria-pressed="false">Rejected</button></div></div>
+          </section>
+          <section aria-labelledby="options-display-title"><h3 id="options-display-title">Order and display</h3>
+          <div class="options-field"><label for="view-sort-select">Source order</label><select id="view-sort-select" data-sort-select></select></div>
+          <div class="options-field"><label for="view-size-select">Thumbnail size</label><select id="view-size-select" data-size-select></select></div>
+          </section>
           <section aria-labelledby="options-filter-title"><h3 id="options-filter-title">Filter</h3>
-          <div class="options-field"><label for="view-filter-select">Selection State</label><select id="view-filter-select" data-filter-select></select></div>
           <fieldset class="options-filter-group" data-rating-group>
-            <legend>Rating</legend>
-            <div class="options-field"><label for="view-rating-min-select">Minimum</label><select id="view-rating-min-select" data-rating-min-select aria-describedby="rating-help"></select></div>
-            <div class="options-field"><label for="view-rating-max-select">Maximum</label><select id="view-rating-max-select" data-rating-max-select aria-describedby="rating-help rating-error"></select></div>
-            <button type="button" class="quiet options-inline-action" data-rating-match disabled>Match minimum</button>
-            <p class="options-help" id="rating-help">Use the same minimum and maximum for an exact Rating.</p>
+            <legend class="visually-hidden">Rating</legend>
+            <button type="button" class="options-disclosure" data-rating-collapse aria-expanded="false" aria-controls="rating-fields">Rating</button>
+            <div id="rating-fields" data-rating-fields hidden>
+              <div class="options-field"><label for="view-rating-min-select">Minimum</label><select id="view-rating-min-select" data-rating-min-select aria-describedby="rating-help"></select></div>
+              <div class="options-field"><label for="view-rating-max-select">Maximum</label><select id="view-rating-max-select" data-rating-max-select aria-describedby="rating-help rating-error"></select></div>
+              <button type="button" class="quiet options-inline-action" data-rating-match disabled>Match minimum</button>
+              <p class="options-help" id="rating-help">Minimum and maximum are inclusive, so the view matches every Rating from Minimum through Maximum. Match minimum sets both bounds to the Minimum for one exact Rating.</p>
+            </div>
             <p class="options-error" id="rating-error" data-rating-error role="alert" hidden></p>
           </fieldset>
           <button type="button" class="quiet" data-reset-filters>Reset filters</button>
@@ -72,11 +81,6 @@ ${PHOTO_VIEW_TEMPLATE}
               </fieldset>
             </div>
           </details>
-          </section>
-          <section aria-labelledby="options-display-title"><h3 id="options-display-title">Order and display</h3>
-          <div class="options-field"><label for="view-sort-select">Source order</label><select id="view-sort-select" data-sort-select></select></div>
-          <div class="options-field"><label for="view-size-select">Thumbnail size</label><select id="view-size-select" data-size-select></select></div>
-          </section>
           <p class="options-progress" data-draft-discard-notice hidden></p>
           <section class="options-browse-actions" data-browse-actions aria-labelledby="options-browse-title"><h3 id="options-browse-title">Browse actions</h3><button type="button" data-random-photo aria-label="Open a random Photo from the current source and filter">Open a random Photo</button><button type="button" data-album-resume hidden>Resume</button></section>
           <div class="options-source-entry"><button type="button" data-source-actions-open>Source actions</button></div>
@@ -85,7 +89,7 @@ ${PHOTO_VIEW_TEMPLATE}
             <header class="options-subview-header"><button type="button" class="quiet" data-source-actions-return>View options</button></header>
             <section class="options-source-actions" data-options-source-actions aria-labelledby="options-source-title"><h3 id="options-source-title">Source actions</h3>
             <div class="folder-album-controls" data-folder-album-controls hidden><label for="folder-album-select">Add Folder to</label><select id="folder-album-select" data-folder-album-select></select><button type="button" data-add-folder-to-album>Add Folder</button><p data-folder-album-status role="status" aria-live="polite"></p></div>
-            <button type="button" data-refresh>Refresh Current Source</button><button type="button" class="quiet" data-removal-open hidden>Remove rejected Photos</button><button type="button" class="quiet" data-removed-open>Trash</button></section>
+            <button type="button" data-refresh>Refresh Current Source</button><button type="button" class="quiet destructive-label" data-removal-open hidden>Remove rejected Photos</button><button type="button" class="quiet destructive-label" data-removed-open>Trash</button></section>
           </div>
         </div>
         <footer class="options-footer" data-options-footer><button type="button" data-view-options-apply>Apply</button><button type="button" class="quiet" data-view-options-cancel>Cancel</button></footer>

@@ -23,6 +23,7 @@ import {
   closePhotoSurfaces,
   openSources,
   openPhotoToolsView,
+  openDockSecondary,
   openSourceActions,
   returnToPhotoTools,
   closePhotoTools,
@@ -53,9 +54,7 @@ test("starts from a Album, shows facts, accessible controls, and resumes persist
   await expect(
     page.getByRole("button", { name: "Back to Grid", exact: true }),
   ).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: "More", exact: true }),
-  ).toBeVisible();
+  await expect(page.locator("[data-dock-more]")).toBeAttached();
   await openPhotoToolsView(page, "details");
   await expect(page.locator("[data-source]")).toHaveText(/JPEG · \d+ × \d+/);
   await expect(page.locator("[data-preview]")).toHaveAccessibleDescription(
@@ -152,8 +151,11 @@ test("Photo View gestures navigate and decide while More owns one review sheet",
     "aria-label",
     "No Rating; open Rating choices",
   );
-  for (const name of ["Reject", "Pick", "Undo", "More"])
+  for (const name of ["Reject", "Pick"])
     await expect(page.getByRole("button", { name, exact: true })).toBeVisible();
+  // Undo and More sit behind the dock's secondary disclosure at phone widths.
+  for (const selector of ["[data-dock-undo]", "[data-dock-more]"])
+    await expect(page.locator(selector)).toBeAttached();
   await expect(
     page.getByRole("button", { name: "Back to Grid" }),
   ).toBeVisible();
@@ -175,6 +177,7 @@ test("Photo View gestures navigate and decide while More owns one review sheet",
     .getByRole("button", { name: "Previous", exact: true })
     .click();
   await expect(page.locator("[data-position]")).toHaveText("1 / 3");
+  await openDockSecondary(page);
   await page.getByRole("button", { name: "More", exact: true }).click();
   const tools = page.locator("[data-photo-tools]");
   await expect(
@@ -189,17 +192,19 @@ test("Photo View gestures navigate and decide while More owns one review sheet",
   await expect(
     tools.getByRole("button", { name: "View options", exact: true }),
   ).toBeVisible();
+  // Recovery entry stays hidden while no unavailable Original is reported.
   await expect(
     tools.getByRole("button", {
       name: "Review unavailable Originals",
       exact: true,
     }),
-  ).toBeVisible();
+  ).toBeHidden();
   await page.locator("[data-photo-tools-close]").click();
   await page.locator("[data-dock-next]").click();
   await expect(page.locator("[data-position]")).toHaveText("2 / 3");
   await page.locator("[data-dock-previous]").click();
   await expect(page.locator("[data-position]")).toHaveText("1 / 3");
+  await openDockSecondary(page);
   await page.getByRole("button", { name: "More", exact: true }).click();
   await page.getByRole("button", { name: "Rating", exact: true }).click();
   await expect(
@@ -214,6 +219,7 @@ test("Photo View gestures navigate and decide while More owns one review sheet",
   ).toHaveAttribute("aria-pressed", "false");
   await returnToPhotoTools(page);
   await closePhotoTools(page);
+  await openDockSecondary(page);
   await page.getByRole("button", { name: "More", exact: true }).click();
   await tools
     .getByRole("button", { name: "View options", exact: true })

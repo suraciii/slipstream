@@ -12,6 +12,7 @@ import {
 import {
   waitForGridFrame,
   openSources,
+  openRatingFields,
   openSourceActions,
   openViewOptions,
 } from "./browser-test-support/surfaces.js";
@@ -243,7 +244,23 @@ test("enlarged filter summaries and header actions reflow without clipped target
       .toBe(true);
     await page.locator("[data-grid-view-options]").focus();
     await page.keyboard.press("Enter");
-    await expect(page.locator("[data-filter-select]")).toHaveValue("picked");
+    await expect(page.locator('[data-segment="picked"]')).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    // Decision state leads the surface: Selection, then Order and display,
+    // then Filter, as laid out rather than as written in the markup.
+    const sectionTops = await page
+      .locator(
+        "#options-selection-title, #options-display-title, #options-filter-title",
+      )
+      .evaluateAll((headings) =>
+        headings.map((heading) => heading.getBoundingClientRect().top),
+      );
+    expect(sectionTops).toHaveLength(3);
+    expect(sectionTops[0]!).toBeLessThan(sectionTops[1]!);
+    expect(sectionTops[1]!).toBeLessThan(sectionTops[2]!);
+    await openRatingFields(page);
     await expect(page.locator("[data-rating-min-select]")).toHaveValue("4");
     await page.keyboard.press("Escape");
     await expect(page.locator("[data-grid-view-options]")).toBeFocused();
@@ -523,7 +540,11 @@ test("narrow summary counts groups and exposes every committed value through Vie
   await expect(committedSummary).toContainText("Picked");
   await expect(committedSummary).toContainText("Rating 2–4");
   await expect(committedSummary).toContainText("JPEG only");
-  await expect(page.locator("[data-filter-select]")).toHaveValue("picked");
+  await expect(page.locator('[data-segment="picked"]')).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await openRatingFields(page);
   await expect(page.locator("[data-rating-min-select]")).toHaveValue("2");
   await expect(page.locator("[data-rating-max-select]")).toHaveValue("4");
   await expect(page.locator("[data-kind-select]")).toHaveValue("jpeg");

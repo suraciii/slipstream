@@ -242,7 +242,7 @@ test("a filtered source is named in its accessible name and follows the committe
   // The committed filter names itself in the accessible name, so the
   // Photographer can tell which sequence the action samples.
   await openViewOptions(page);
-  await page.locator("[data-filter-select]").selectOption("picked");
+  await page.locator('[data-segment="picked"]').click();
   await applyViewOptions(page);
   await expect(page.locator("[data-grid-status]")).toHaveText("0 Photos");
   await expect(page.locator("[data-grid-empty-message]")).toHaveText(
@@ -256,7 +256,7 @@ test("a filtered source is named in its accessible name and follows the committe
   // Deciding one Photo makes the filtered Snapshot non-empty again, so the
   // action follows the committed filter rather than the source's original size.
   await openViewOptions(page);
-  await page.locator("[data-filter-select]").selectOption("all");
+  await page.locator('[data-segment="all"]').click();
   await applyViewOptions(page);
   await expect(page.locator("[data-grid-status]")).toHaveText(
     "Ready · 4 Photos",
@@ -270,7 +270,7 @@ test("a filtered source is named in its accessible name and follows the committe
     "Ready · 4 Photos",
   );
   await openViewOptions(page);
-  await page.locator("[data-filter-select]").selectOption("picked");
+  await page.locator('[data-segment="picked"]').click();
   await applyViewOptions(page);
   await expect(page.locator("[data-grid-status]")).toHaveText(
     "Ready · 1 Photo",

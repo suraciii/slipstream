@@ -46,7 +46,7 @@ test("rejected Photos leave the Library, return from Undo, and are restored from
     "Source progress: 0 picked · 2 rejected · 1 unflagged",
   );
   await openViewOptions(page);
-  await page.locator("[data-filter-select]").selectOption("rejected");
+  await page.locator('[data-segment="rejected"]').click();
   await applyViewOptions(page);
   await expect(page.locator("[data-grid-status]")).toHaveText(
     "Ready · 2 Photos",
@@ -238,7 +238,7 @@ test("Trash cleanup reviews records and recovers a lost mixed outcome", async ({
     ).toHaveText("×");
   }
   await openViewOptions(page);
-  await page.locator("[data-filter-select]").selectOption("rejected");
+  await page.locator('[data-segment="rejected"]').click();
   await applyViewOptions(page);
   await expect(page.locator("[data-grid-status]")).toHaveText(
     "Ready · 2 Photos",
@@ -404,7 +404,7 @@ test("Trash cleanup displays a named retained-work blocker", async ({
     page.locator('[data-photo-index="0"] .cell-state.rejected'),
   ).toHaveText("×");
   await openViewOptions(page);
-  await page.locator("[data-filter-select]").selectOption("rejected");
+  await page.locator('[data-segment="rejected"]').click();
   await applyViewOptions(page);
   await openViewOptions(page);
   await openSourceActions(page);
@@ -514,7 +514,7 @@ test("captured Trash selection follows a retained cursor and excludes a row", as
     await expect(cell(index).locator(".cell-state.rejected")).toHaveText("×");
   }
   await openViewOptions(page);
-  await page.locator("[data-filter-select]").selectOption("rejected");
+  await page.locator('[data-segment="rejected"]').click();
   await applyViewOptions(page);
   await expect(page.locator("[data-grid-status]")).toHaveText(
     "Ready · 3 Photos",

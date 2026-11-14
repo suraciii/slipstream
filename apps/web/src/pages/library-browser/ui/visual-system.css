@@ -1210,7 +1210,7 @@
   min-width: 0;
   overflow: hidden;
   color: var(--fg-3);
-  font: 10px/1.35 var(--font-mono);
+  font: 12px/1.35 var(--font-mono);
   font-weight: 400;
   letter-spacing: 0.02em;
   text-align: left;
@@ -2288,7 +2288,7 @@
     margin: 0;
     overflow: hidden;
     color: var(--fg-3);
-    font: 500 11px/1.2 var(--font-ui);
+    font: 500 12px/1.2 var(--font-ui);
     letter-spacing: 0;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -2473,13 +2473,6 @@
     display: block;
     height: 32px;
     content: "";
-  }
-
-  /* The travel below the dock belongs to the review floor, not to the
-     capture-facts row: without capture facts the spacer keeps the view
-     scrollable by the same margin. */
-  .photo-view:not(:has(> .photo-facts-line:not([hidden])))::after {
-    height: 64px;
   }
 
   .photo-review-controls {

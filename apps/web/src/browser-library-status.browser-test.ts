@@ -6,6 +6,7 @@ import {
   writePhotos,
 } from "./browser-test-support/fixtures.js";
 import {
+  openDockSecondary,
   openGrid,
   startReview,
   waitForLoadedReviewImage,
@@ -68,10 +69,16 @@ test("Library status clears the Photo View dock at every supported size", async 
       "[data-dock-reject]",
       "[data-dock-rating]",
       "[data-dock-pick]",
-      "[data-dock-undo]",
-      "[data-dock-more]",
       "[data-photo-navigation] button",
     ])
+      await expectPointerReachable(page, selector);
+    // Undo and More sit behind the dock disclosure at phone widths; open it so
+    // the secondary pair is reachable as direct targets too, and prove the
+    // disclosure control itself is reachable there.
+    if (viewport.width <= 420)
+      await expectPointerReachable(page, "[data-dock-overflow]");
+    await openDockSecondary(page);
+    for (const selector of ["[data-dock-undo]", "[data-dock-more]"])
       await expectPointerReachable(page, selector);
   }
 });

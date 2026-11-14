@@ -65,7 +65,7 @@ export function viewOptionsElements(root: ParentNode): ViewOptionsElements {
       root,
       "[data-committed-filter-summary]",
     ),
-    filterSelect: required<HTMLSelectElement>(root, "[data-filter-select]"),
+    selectionSegments: required<HTMLElement>(root, "[data-selection-segments]"),
     sizeSelect: required<HTMLSelectElement>(root, "[data-size-select]"),
     filters: {
       ratingMinimum: required<HTMLSelectElement>(
@@ -77,6 +77,11 @@ export function viewOptionsElements(root: ParentNode): ViewOptionsElements {
         "[data-rating-max-select]",
       ),
       ratingMatch: required<HTMLButtonElement>(root, "[data-rating-match]"),
+      ratingCollapse: required<HTMLButtonElement>(
+        root,
+        "[data-rating-collapse]",
+      ),
+      ratingFields: required<HTMLElement>(root, "[data-rating-fields]"),
       ratingError: required<HTMLElement>(root, "[data-rating-error]"),
       kindSelect: required<HTMLSelectElement>(root, "[data-kind-select]"),
       availableSelect: required<HTMLSelectElement>(

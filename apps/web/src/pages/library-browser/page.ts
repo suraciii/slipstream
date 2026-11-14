@@ -241,7 +241,7 @@ function mountPrivateLibraryBrowser(
     recoveryReview.presentRecoveryNotice(
       presentation.overview.scan.lastRecovery,
     );
-    renderMembershipControls();
+    photoDetails.renderMembership();
     refreshMembershipFacts();
     renderSources();
   };
@@ -601,7 +601,6 @@ function mountPrivateLibraryBrowser(
       conditions: sourceGrid.conditions,
     });
   };
-
   // Counts cover the complete source, not just loaded or filtered windows.
   const renderProgress = () => {
     if (!applicationAlive) return;
@@ -610,6 +609,7 @@ function mountPrivateLibraryBrowser(
       visible: sourceGrid.token !== "" || sourceGrid.total > 0,
       visibleTotal: sourceGrid.total,
       sourceTotal: counts.picked + counts.rejected + counts.unflagged,
+      sourceName: sourceGrid.name,
       picked: counts.picked,
       rejected: counts.rejected,
       unflagged: counts.unflagged,
@@ -1378,7 +1378,6 @@ function mountPrivateLibraryBrowser(
     renderMembership: (model) => view.renderMembership(model),
     renderMetadata: (metadata) => view.renderPhotoMetadata(metadata),
   });
-  const renderMembershipControls = (): void => photoDetails.renderMembership();
   const loadPhotoAlbums = photoDetails.loadAlbums;
   const refreshMembershipFacts = photoDetails.refreshAlbums;
   const toggleMembership = (albumId: string, member: boolean): void => {
@@ -1389,13 +1388,14 @@ function mountPrivateLibraryBrowser(
 
   const renderPhotoShell = (authority = photoOwner.authority): boolean => {
     const photo = currentPhoto();
-    renderMembershipControls();
+    photoDetails.renderMembership();
     const image = view.renderPhotoShell({
       sourceName: sourceGrid.name,
       index: photoOwner.currentIndex,
       total: sourceGrid.total,
       photoId: photo?.id,
       available: photo?.available,
+      originalAvailable: photo?.original.available,
       originalFilename: photo?.originalFilename,
       selectionState: photo?.selectionState,
       rating: photo?.rating,

@@ -558,7 +558,7 @@ for (const firstTransport of ["https", "http"] as const) {
           .click();
       }
       await openViewOptions(page);
-      await page.locator("[data-filter-select]").selectOption("rejected");
+      await page.locator('[data-segment="rejected"]').click();
       await applyViewOptions(page);
       await expect(page.locator("[data-grid-status]")).toHaveText(
         "Ready · 1 Photo",

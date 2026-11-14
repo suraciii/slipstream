@@ -24,6 +24,7 @@ export const PHOTO_VIEW_TEMPLATE = `
     <span data-photo-facts-shutter-speed><span class="photo-facts-label">Shutter Speed: </span><span data-photo-facts-value>—</span></span>
     <span data-photo-facts-iso><span class="photo-facts-label">ISO: </span><span data-photo-facts-value>—</span></span>
     <span data-photo-facts-focal-length><span class="photo-facts-label">Focal Length: </span><span data-photo-facts-value>—</span></span>
+    <p class="photo-facts-empty" data-photo-facts-empty hidden>No capture facts</p>
   </div>
   <section class="preview" data-preview aria-label="Photo Preview" aria-describedby="preview-detail-evidence">
     <div class="preview-ambient" data-preview-ambient aria-hidden="true" hidden></div>
@@ -46,8 +47,11 @@ export const PHOTO_VIEW_TEMPLATE = `
       <button type="button" class="reject-button" data-dock-reject>Reject</button>
       <button type="button" class="rating-dock-button" data-dock-rating disabled aria-controls="rating-choices" aria-expanded="false"><span class="rating-dock-stars" data-dock-stars aria-hidden="true">☆☆☆☆☆</span><span class="rating-dock-label" data-dock-rating-label>No Rating</span></button>
       <button type="button" class="pick-button" data-dock-pick>Pick</button>
-      <button type="button" class="quiet" data-dock-undo disabled>Undo</button>
-      <button type="button" class="quiet" data-dock-more aria-controls="photo-tools-panel" aria-expanded="false">More</button>
+      <button type="button" class="quiet dock-overflow" data-dock-overflow aria-expanded="false" aria-controls="dock-secondary"><span aria-hidden="true">⋯</span><span class="visually-hidden">More actions</span></button>
+      <div class="dock-secondary" data-dock-secondary id="dock-secondary">
+        <button type="button" class="quiet" data-dock-undo disabled>Undo</button>
+        <button type="button" class="quiet" data-dock-more aria-controls="photo-tools-panel" aria-expanded="false">More</button>
+      </div>
     </div>
     <p class="status" data-status role="status" aria-live="polite" hidden></p>
   </footer>

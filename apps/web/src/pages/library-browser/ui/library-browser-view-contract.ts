@@ -67,11 +67,13 @@ export type GridFilterViewModel = Readonly<{
 
 /// Decision progress for the open source: the per-state counts the server
 /// reports for the complete source, plus the number of Photos in the currently
-/// visible filtered sequence.
+/// visible filtered sequence. The source name rides along because Source
+/// actions state their scope against the current source.
 export type GridProgressViewModel = Readonly<{
   visible: boolean;
   visibleTotal: number;
   sourceTotal: number;
+  sourceName: string;
   picked: number;
   rejected: number;
   unflagged: number;
