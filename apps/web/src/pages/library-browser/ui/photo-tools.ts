@@ -26,6 +26,9 @@ export interface PhotoToolsController {
 export interface DockDisclosure {
   isOpen(): boolean;
   close(restoreFocus?: boolean): void;
+  /// Collapses the disclosure when open and reports the toggle that revealed
+  /// the entries, so a surface opened from them can return focus to it.
+  release(): HTMLElement | undefined;
   dispose(): void;
 }
 
@@ -48,6 +51,12 @@ export function createDockDisclosure(dock: HTMLElement): DockDisclosure {
     open = false;
     apply();
     if (restoreFocus) toggle.focus();
+  };
+
+  const release = (): HTMLElement | undefined => {
+    if (!open) return undefined;
+    close(false);
+    return toggle;
   };
 
   toggle.addEventListener(
@@ -99,6 +108,7 @@ export function createDockDisclosure(dock: HTMLElement): DockDisclosure {
   return {
     isOpen: () => open,
     close,
+    release,
     dispose() {
       listeners.abort();
     },
@@ -118,6 +128,7 @@ export function createPhotoToolsController({
   openDetails,
   openViewOptions,
   openRecovery,
+  releaseDockEntry,
 }: Readonly<{
   elements: Readonly<{
     photoToolsDialog: HTMLDialogElement;
@@ -137,6 +148,7 @@ export function createPhotoToolsController({
   openDetails?: (photoId: string) => void;
   openViewOptions: () => void;
   openRecovery: () => void;
+  releaseDockEntry?: () => HTMLElement | undefined;
 }>): PhotoToolsController {
   const {
     photoToolsDialog,
@@ -244,6 +256,7 @@ export function createPhotoToolsController({
       surfaces.open(
         "photo-tools",
         invoker ??
+          releaseDockEntry?.() ??
           (document.activeElement instanceof HTMLElement
             ? document.activeElement
             : undefined),

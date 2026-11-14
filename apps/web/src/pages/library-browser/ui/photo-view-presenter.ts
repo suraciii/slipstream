@@ -94,8 +94,9 @@ export interface PhotoViewPresenter extends PhotoViewPresentation {
   resetForPhotoEntry(): void;
   /// The dock's secondary disclosure: opening a surface from its More entry
   /// collapses it so the menu never lingers over the review controls. Reports
-  /// whether it was open, so the caller can move focus back to the entry.
-  closeDockDisclosure(restoreFocus?: boolean): boolean;
+  /// the toggle that revealed the entries, so the surface can return focus
+  /// to it.
+  releaseDockDisclosure(): HTMLElement | undefined;
   dispose(): void;
 }
 
@@ -473,10 +474,8 @@ export function createPhotoViewPresenter({
       zoom.resetForImage();
       photoSurface = {};
     },
-    closeDockDisclosure(restoreFocus = false) {
-      const wasOpen = dockDisclosure.isOpen();
-      dockDisclosure.close(restoreFocus);
-      return wasOpen;
+    releaseDockDisclosure() {
+      return dockDisclosure.release();
     },
     reviewImageMatches(url) {
       if (!alive) return false;

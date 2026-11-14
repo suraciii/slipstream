@@ -588,7 +588,6 @@ export function createLibraryBrowserView(
   const dockUndo = required<HTMLButtonElement>(root, "[data-dock-undo]");
   const dockNext = required<HTMLButtonElement>(root, "[data-dock-next]");
   const dockMore = required<HTMLButtonElement>(root, "[data-dock-more]");
-  const dockOverflow = required<HTMLElement>(root, "[data-dock-overflow]");
   const photoToolsDialog = required<HTMLDialogElement>(
     root,
     "[data-photo-tools]",
@@ -837,7 +836,6 @@ export function createLibraryBrowserView(
   /// Opens the Rating view inside the single Photo tools sheet. The Rating
   /// Wheel remains the touch accelerator on the Preview.
   const openRatingChoices = () => {
-    if (!alive || photoView.hidden) return;
     photoToolsController.open("rating", dockRating);
   };
   const closeRatingChoices = (restoreFocus = true) => {
@@ -867,6 +865,7 @@ export function createLibraryBrowserView(
     openDetails: openPhotoDetails,
     openViewOptions: () => viewOptionsController.open(),
     openRecovery: () => send({ kind: "recovery-entry" }),
+    releaseDockEntry: () => photoPresenter.releaseDockDisclosure(),
   });
   const editorController = createPhotoEditorSurfaceController({
     root,
@@ -1081,10 +1080,7 @@ export function createLibraryBrowserView(
   dockPrevious.addEventListener("click", () => send({ kind: "previous" }));
   dockNext.addEventListener("click", () => send({ kind: "next" }));
   dockRating.addEventListener("click", () => openRatingChoices());
-  dockMore.addEventListener("click", () => {
-    const revealed = photoPresenter.closeDockDisclosure();
-    photoToolsController.open("tools", revealed ? dockOverflow : dockMore);
-  });
+  dockMore.addEventListener("click", () => photoToolsController.open());
   for (const button of photoToolsReturnButtons)
     button.addEventListener("click", () =>
       photoToolsController.returnToTools(),
