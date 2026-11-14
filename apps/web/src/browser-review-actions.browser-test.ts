@@ -10,6 +10,7 @@ import {
 } from "./browser-test-support/fixtures.js";
 import {
   closePhotoTools,
+  openDockSecondary,
   openPhotoToolsView,
   startReview,
   waitForLoadedReviewImage,
@@ -163,23 +164,28 @@ test("Library status opens in Photo View without disturbing the review or Grid a
   await expect(toggle).toHaveAttribute("aria-expanded", "false");
   await expect(notice).toBeHidden();
   // The entry and its notice must not cover the review dock's primary actions.
+  // This wide layout shows Undo and More inline, so the narrow disclosure
+  // control stays hidden rather than becoming an empty target.
+  await expect(page.locator("[data-dock-overflow]")).toBeHidden();
   for (const selector of [
     "[data-dock-reject]",
     "[data-dock-rating]",
     "[data-dock-pick]",
-    "[data-dock-undo]",
-    "[data-dock-more]",
+    "[data-photo-navigation] button",
   ]) {
     await expect
       .poll(() =>
-        page.locator(selector).evaluate((button) => {
-          const rect = button.getBoundingClientRect();
-          const hit = document.elementFromPoint(
-            rect.left + rect.width / 2,
-            rect.top + rect.height / 2,
-          );
-          return hit === button || button.contains(hit);
-        }),
+        page
+          .locator(selector)
+          .first()
+          .evaluate((button) => {
+            const rect = button.getBoundingClientRect();
+            const hit = document.elementFromPoint(
+              rect.left + rect.width / 2,
+              rect.top + rect.height / 2,
+            );
+            return hit === button || button.contains(hit);
+          }),
       )
       .toBe(true);
   }
@@ -187,6 +193,7 @@ test("Library status opens in Photo View without disturbing the review or Grid a
   await expect(toggle).toHaveAttribute("aria-expanded", "true");
   await expect(notice).toBeVisible();
   await expect(notice).toContainText("Library check failed");
+  await openDockSecondary(page);
   for (const selector of [
     "[data-dock-reject]",
     "[data-dock-rating]",
@@ -196,14 +203,17 @@ test("Library status opens in Photo View without disturbing the review or Grid a
   ]) {
     await expect
       .poll(() =>
-        page.locator(selector).evaluate((button) => {
-          const rect = button.getBoundingClientRect();
-          const hit = document.elementFromPoint(
-            rect.left + rect.width / 2,
-            rect.top + rect.height / 2,
-          );
-          return hit === button || button.contains(hit);
-        }),
+        page
+          .locator(selector)
+          .first()
+          .evaluate((button) => {
+            const rect = button.getBoundingClientRect();
+            const hit = document.elementFromPoint(
+              rect.left + rect.width / 2,
+              rect.top + rect.height / 2,
+            );
+            return hit === button || button.contains(hit);
+          }),
       )
       .toBe(true);
   }
@@ -259,6 +269,7 @@ test("review strip and Photo tools share persisted decisions and Undo", async ({
   await page.locator("[data-dock-pick]").click();
   await picked;
   await expect(page.locator("[data-selection]")).toHaveText("Picked");
+  await openDockSecondary(page);
   await page.locator("[data-dock-undo]").click();
   await openPhotoToolsView(page, "tools");
   await expect(page.locator("[data-photo-tools-clear]")).toBeVisible();
@@ -335,6 +346,7 @@ test("unavailable Original keeps its Photo review and visible recovery action", 
   await expect(status).toContainText("Original File is unavailable");
   await expect(status).toBeVisible();
   await expect(page.locator("[data-preview-ambient]")).toBeHidden();
+  await openDockSecondary(page);
   await page.locator("[data-dock-more]").click();
   const recoveryEntry = page
     .locator("[data-photo-tools-entries]")
@@ -347,6 +359,9 @@ test("unavailable Original keeps its Photo review and visible recovery action", 
   await expect(page.locator("[data-photo-tools]")).toBeVisible();
   await expect(recoveryEntry).toBeFocused();
   await closePhotoTools(page);
+  // More collapsed the dock disclosure when it opened the sheet, so closing
+  // the sheet leaves the dock in its resting state.
+  await expect(page.locator("[data-dock-secondary]")).toBeHidden();
   await status
     .getByRole("button", { name: "Review unavailable Originals" })
     .click();
@@ -382,6 +397,7 @@ test("review controls preserve Preview space and reachable targets across rotati
           (await page.locator("[data-preview]").boundingBox())?.height ?? 0,
       )
       .toBeGreaterThanOrEqual(minimum);
+    await openDockSecondary(page);
     for (const selector of [
       "[data-dock-pick]",
       "[data-dock-reject]",
@@ -407,6 +423,7 @@ test("review controls preserve Preview space and reachable targets across rotati
   await page.locator("html").evaluate((root) => {
     root.style.fontSize = "200%";
   });
+  await openDockSecondary(page);
   for (const selector of [
     "[data-selection]",
     "[data-dock-pick]",
@@ -541,17 +558,24 @@ test("gesture candidates name their effect only while active and tools retain lo
     /Preview detail is limited/,
   );
   const url = page.url();
+  await openDockSecondary(page);
   await page.locator("[data-dock-more]").click();
   const tools = page.locator("[data-photo-tools-view=tools]");
   await expect(
-    tools.getByRole("region", { name: "Review", exact: true }),
+    tools.getByRole("group", { name: "Review", exact: true }),
   ).toBeVisible();
   await expect(
-    tools.getByRole("region", { name: "Photo", exact: true }),
+    tools.getByRole("group", { name: "Photo", exact: true }),
   ).toBeVisible();
   await expect(
-    tools.getByRole("region", { name: "Library", exact: true }),
+    tools.getByRole("group", { name: "Library", exact: true }),
   ).toBeVisible();
+  // The review loop leads the list, as laid out rather than as written.
+  const tierTop = async (name: string) =>
+    (await tools.getByRole("group", { name, exact: true }).boundingBox())?.y ??
+    Number.POSITIVE_INFINITY;
+  expect(await tierTop("Review")).toBeLessThan(await tierTop("Photo"));
+  expect(await tierTop("Photo")).toBeLessThan(await tierTop("Library"));
   await expect(
     tools.getByRole("heading", { name: "Shortcuts and gestures" }),
   ).toBeVisible();
@@ -569,7 +593,9 @@ test("gesture candidates name their effect only while active and tools retain lo
   await expect(tools).toBeVisible();
   expect(page.url()).toBe(url);
   await page.keyboard.press("Escape");
-  await expect(page.locator("[data-dock-more]")).toBeFocused();
+  // The surface was opened from the disclosed More entry, so its disclosure
+  // is collapsed and focus returns to the control that revealed the entry.
+  await expect(page.locator("[data-dock-overflow]")).toBeFocused();
 });
 
 test("gesture feedback explains navigation boundaries without navigating", async ({

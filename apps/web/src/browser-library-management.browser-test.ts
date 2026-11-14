@@ -29,14 +29,17 @@ test("Trash distinguishes loading, failure and empty after a real removal and Un
   // A management round trip discards unapplied choices. Apply must commit
   // the choices shown after returning, never a hidden draft from before Trash.
   await openViewOptions(page);
-  await page.locator("[data-filter-select]").selectOption("rejected");
+  await page.locator('[data-segment="rejected"]').click();
   await openSourceActions(page);
   await page.locator("[data-removed-open]").click();
   await expect(page.locator("[data-removed-status]")).toHaveText(
     "Trash is empty.",
   );
   await page.locator("[data-removed-close]").click();
-  await expect(page.locator("[data-filter-select]")).toHaveValue("all");
+  await expect(page.locator('[data-segment="all"]')).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
   await applyViewOptions(page);
   await expect(page.locator("[data-grid-status]")).toHaveText(
     "Ready · 1 Photo",
@@ -48,7 +51,7 @@ test("Trash distinguishes loading, failure and empty after a real removal and Un
   await page.keyboard.press("x");
   await expect(cell.locator(".cell-state.rejected")).toBeVisible();
   await openViewOptions(page);
-  await page.locator("[data-filter-select]").selectOption("rejected");
+  await page.locator('[data-segment="rejected"]').click();
   await applyViewOptions(page);
   await expect(page.locator("[data-view-options-flag]")).toContainText(
     "Rejected",

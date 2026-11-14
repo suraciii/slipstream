@@ -47,12 +47,13 @@ The Photo Grid fills the remaining area; routine progress MUST NOT add a toolbar
 
 Refresh is a recovery action and MUST NOT occupy a permanently prominent primary slot.
 
-View options MUST separate staged choices from immediate actions:
+View options MUST separate staged choices from immediate actions and lead with the decision state:
 
-- **Filter:** Selection State first, then Rating, Original kind, Original availability, and Capture Time, with Reset filters. Advanced conditions MAY use a named disclosure; active advanced conditions MUST be exposed on open.
+- **Selection:** one Selection State segment set with All, Unflagged, Picked, and Rejected. Exactly one segment is committed at a time; All stands for no Selection State condition.
 - **Order and display:** source order and Small, Medium, or Large thumbnail size.
+- **Filter:** Rating, Original kind, Original availability, and Capture Time, with Reset filters. Rating bounds sit behind one disclosure that states the active matching semantics. Advanced conditions MAY use a named disclosure; active advanced conditions MUST be exposed on open.
 - **Browse actions:** Open a random Photo and Album Resume when available.
-- **Source actions:** Add Folder for an Original Folder, Refresh Current Source, the current Rejected result's removal review, and the Library-wide Trash entry.
+- **Source actions:** Add Folder for an Original Folder, Refresh Current Source, the current Rejected result's removal review, and the Library-wide Trash entry. The removal review entry MUST name the current source and its Rejected count before activation.
 
 Trash MUST remain reachable regardless of source or filter. Removal review retains its current-source and reviewed-result scope; neither adds a permanent narrow header row.
 
@@ -136,17 +137,17 @@ Closing a chooser or result disclosure MUST NOT cancel admitted work, erase unce
 
 ## Photo View
 
-Photo View MUST contain a compact source-return and filename row, Preview, and primary action region. The capture-facts line sits below the row when any capture fact is available. Position, Selection State, and Rating MUST be understandable without opening Photo tools.
+Photo View MUST contain a compact source-return and filename row, Preview, and primary action region. The capture-facts line sits below the row and presents the available capture facts or one quiet `No capture facts` state. Position, Selection State, and Rating MUST be understandable without opening Photo tools.
 
 At every supported width, the current source MUST remain visibly painted above the filename. A long source name MAY truncate, but its complete value MUST remain available to assistive technology and on pointer hover.
 
-The capture-facts line MUST present Capture Time, Aperture, Shutter Speed, ISO, and Focal Length together when available. A missing or unreadable field MUST NOT appear in the line, and the line MUST be absent when no capture fact is available.
+The capture-facts line MUST present Capture Time, Aperture, Shutter Speed, ISO, and Focal Length together when available. A missing or unreadable field MUST NOT appear in the line, and when no capture fact is available the line MUST present one quiet `No capture facts` state instead of fact slots.
 
 Routine Original availability and Preview Source MUST NOT occupy this line; Original unavailable remains visible through the owning status and recovery path, while Preview Source and detail evidence remain disclosed through Photo tools and the Preview description.
 
 Photo tools Details MUST list only available capture facts and present one explicit empty state when the capture set has none.
 
-The primary region MUST present one Reject action, one Rating entry with its explicit current value including zero, one Pick action, one Undo action, and More.
+The primary region MUST present one Reject action, one Rating entry with its explicit current value including zero, one Pick action, one Undo action, and More. At phone widths up to 420 CSS pixels, Undo and More MUST sit behind one `More actions` disclosure while Reject, Rating, and Pick remain direct targets.
 
 Previous and Next MUST remain visible in one separate navigation group with position and total. They MUST NOT share an activation target with Pick or Reject. Portrait layouts MAY place navigation immediately above the main actions; short landscape MUST consolidate without shrinking touch targets.
 
@@ -160,7 +161,7 @@ The Photographer MUST be able to review and navigate without a supporting surfac
 
 Selection State MUST be presented with Photo identity in the context row, not in a forced separate row. Short landscape MUST move content rather than reduce a 44 by 44 CSS pixel target.
 
-Undo MUST remain visible. When no undoable change exists it MAY be disabled, but MUST expose that state without implying a reversal.
+Undo MUST remain reachable from the primary region: direct at wide widths and through the `More actions` disclosure at phone widths. When no undoable change exists it MAY be disabled, but MUST expose that state without implying a reversal.
 
 [Touch Gestures](../spec.md#touch-gestures) owns the Fit swipe mapping, zoom priority, and decision and navigation effects. Manual Zoom gives one-finger panning priority over all four swipe actions.
 
@@ -170,9 +171,9 @@ The Preview MUST show transient direction feedback during a swipe. Feedback MUST
 
 More opens these supporting action groups:
 
-- **Review:** Clear flag with its existing availability rule, and Rating using the same choice surface as the primary Rating entry;
-- **Photo:** Details with capture facts and Preview Source, Album membership, Edit, Preview Zoom, and Nearby Photos;
-- **Library:** Browse Library, View options, and Review unavailable Originals; and
+- **Review:** Clear flag with its existing availability rule, Rating using the same choice surface as the primary Rating entry, and Details with capture facts and Preview Source. This group leads the list;
+- **Photo:** Album membership, Edit, Preview Zoom, and Nearby Photos;
+- **Library:** Browse Library, View options, and Review unavailable Originals when the current Photo reports an unavailable Original; and
 - **Shortcuts and gestures:** a named disclosure for the combined Preview
   detail-limit explanation, Selection State semantics, and gesture guidance.
 

@@ -6,6 +6,7 @@ import {
   writePhotos,
 } from "./browser-test-support/fixtures.js";
 import {
+  openDockSecondary,
   openPhotoToolsView,
   startReview,
   waitForLoadedReviewImage,
@@ -139,7 +140,12 @@ test("Photo View clears capture facts on navigation and omits missing values", a
     "[data-photo-facts-focal-length]",
   ])
     await expect(facts.locator(selector)).toBeHidden();
-  await expect(facts).toBeHidden();
+  // An empty capture set keeps the facts row and states the absence once,
+  // rather than leaving an unexplained gap.
+  await expect(facts).toBeVisible();
+  await expect(page.locator("[data-photo-facts-empty]")).toHaveText(
+    "No capture facts",
+  );
 
   // Details groups a completely missing capture set into one clear state
   // instead of repeating five dash rows.
@@ -254,6 +260,7 @@ test("enlarged text keeps complete capture facts and review actions reachable", 
   await page
     .locator("[data-quick-action-dock]")
     .evaluate((element) => element.scrollIntoView({ block: "end" }));
+  await openDockSecondary(page);
   for (const action of [
     "[data-dock-reject]",
     "[data-dock-rating]",

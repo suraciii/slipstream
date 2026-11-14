@@ -174,9 +174,11 @@ The review dock has three zones:
 2. Reject, Rating, and Pick.
 3. Undo and More.
 
-Pick MUST be the only filled decision control and use a pill with sage soft fill. Rating MUST retain a visible label at the routine text scale, inline with gold stars on desktop or stacked on narrow surfaces.
+Pick MUST be the only filled decision control and use a pill with sage soft fill. At phone widths the pair MAY present as soft-filled decisions, sage Pick and rose Reject, so the two read together. Rating MUST retain a visible label at the routine text scale, inline with gold stars on desktop or stacked on narrow surfaces.
 
-Undo MUST remain visible and be disabled only when unavailable. It uses the muted color when disabled. The dock MUST retain actions required by the [Photo View contract](../library-browser/experience/spec.md#photo-view); secondary actions MAY use its defined disclosure.
+Undo MUST remain reachable from the primary region and be disabled only when unavailable. It uses the muted color when disabled. The dock MUST retain actions required by the [Photo View contract](../library-browser/experience/spec.md#photo-view); secondary actions MAY use its defined disclosure.
+
+A surface opened from a disclosed entry collapses that disclosure. Closing the surface returns focus to the entry that opened it, or to the disclosure control once the entry is collapsed.
 
 ### Selection Mode
 

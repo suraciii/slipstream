@@ -1,6 +1,7 @@
 import { formatCaptureTime } from "./capture-time.js";
 import type { ViewSelectionState } from "./library-browser-view.js";
 import { isPhotoSequenceEnd } from "./photo-navigation-controls.js";
+import { createDockDisclosure } from "./photo-tools.js";
 import { paragraph, required, selectionLabel } from "./presentation-helpers.js";
 
 export type ViewPreviewSource = "jpeg-original" | "raw-embedded-jpeg";
@@ -26,6 +27,7 @@ export type PhotoShellViewModel = PhotoFactsViewModel &
     sourceName: string;
     photoId?: string | undefined;
     available?: boolean | undefined;
+    originalAvailable?: boolean | undefined;
     previewSource?: ViewPreviewSource | undefined;
     limitedDetail?: boolean | undefined;
     previewUrl?: string | undefined;
@@ -90,6 +92,10 @@ export interface PhotoViewPresenter extends PhotoViewPresentation {
   clearPreview(): void;
   resetSourceIdentity(): void;
   resetForPhotoEntry(): void;
+  /// The dock's secondary disclosure: opening a surface from its More entry
+  /// collapses it so the menu never lingers over the review controls. Reports
+  /// whether it was open, so the caller can move focus back to the entry.
+  closeDockDisclosure(restoreFocus?: boolean): boolean;
   dispose(): void;
 }
 
@@ -113,6 +119,10 @@ export function createPhotoViewPresenter({
   const stage = required<HTMLElement>(root, "[data-stage]");
   const ambient = required<HTMLElement>(root, "[data-preview-ambient]");
   const factsLine = required<HTMLElement>(root, "[data-photo-facts-line]");
+  const factsEmpty = required<HTMLElement>(root, "[data-photo-facts-empty]");
+  const recoveryEntry = root.querySelector<HTMLElement>(
+    '[data-photo-tools-entry="recovery"]',
+  );
   const factsCapture = required<HTMLElement>(
     root,
     "[data-photo-facts-capture] [data-photo-facts-value]",
@@ -184,6 +194,16 @@ export function createPhotoViewPresenter({
   let dimensions: Readonly<{ width: number; height: number }> | undefined;
   let enlarged = false;
   let canReviewRecovery = false;
+  const dockDisclosure = createDockDisclosure(
+    required<HTMLElement>(root, "[data-quick-action-dock]"),
+  );
+
+  /// The Library group's recovery entry leads to the unavailable-Originals
+  /// review. It stays hidden until the presented Photo or its Original is
+  /// unavailable, so the review it opens never presents an empty listing.
+  const applyRecoveryEntry = (): void => {
+    if (recoveryEntry) recoveryEntry.hidden = !canReviewRecovery;
+  };
 
   const renderPhotoFacts = (model: PhotoFactsViewModel) => {
     if (!alive) return;
@@ -231,7 +251,12 @@ export function createPhotoViewPresenter({
     ] as const;
     for (const [item, value] of factItems)
       if (item) item.hidden = value === undefined;
-    factsLine.hidden = factItems.every(([, value]) => value === undefined);
+    // The capture-facts line keeps its row when the set is empty and states
+    // the absence once, so the quiet `No capture facts` state replaces the
+    // fact slots instead of leaving an unexplained gap.
+    const hasFact = factItems.some(([, value]) => value !== undefined);
+    factsLine.hidden = false;
+    factsEmpty.hidden = hasFact;
     // Details is a reading surface: show the facts that exist and one clear
     // empty state instead of five rows of dashes.
     const rows = [
@@ -361,7 +386,11 @@ export function createPhotoViewPresenter({
   const renderPhotoShell = (model: PhotoShellViewModel) => {
     if (!alive) return undefined;
     resetGestures();
-    canReviewRecovery = Boolean(model.photoId && model.available === false);
+    canReviewRecovery = Boolean(
+      model.photoId &&
+        (model.available === false || model.originalAvailable === false),
+    );
+    applyRecoveryEntry();
     title.textContent = model.sourceName;
     title.title = model.sourceName;
     currentPhotoId = model.photoId;
@@ -444,6 +473,11 @@ export function createPhotoViewPresenter({
       zoom.resetForImage();
       photoSurface = {};
     },
+    closeDockDisclosure(restoreFocus = false) {
+      const wasOpen = dockDisclosure.isOpen();
+      dockDisclosure.close(restoreFocus);
+      return wasOpen;
+    },
     reviewImageMatches(url) {
       if (!alive) return false;
       const image = stage.querySelector<HTMLImageElement>("img");
@@ -460,6 +494,7 @@ export function createPhotoViewPresenter({
     },
     dispose() {
       alive = false;
+      dockDisclosure.dispose();
     },
   };
 }

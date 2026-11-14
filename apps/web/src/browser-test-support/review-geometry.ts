@@ -19,6 +19,9 @@ export const primaryReviewControls = [
 
 /// Asserts every primary control finishes above the safe viewport of a layout
 /// of the given size, with no control pushed out by a row it did not ask for.
+/// At phone widths the Undo and More entries sit behind the dock's secondary
+/// disclosure, so the disclosure opens first and the entries are measured as
+/// the direct targets they are once revealed.
 export async function expectControlsAboveSafeViewport(
   page: Page,
   viewportHeight: number,
@@ -26,6 +29,9 @@ export async function expectControlsAboveSafeViewport(
   expect(page.viewportSize()?.height, "review viewport height").toBe(
     viewportHeight,
   );
+  const secondary = page.locator("[data-dock-secondary]");
+  const openedSecondary = await secondary.isHidden();
+  if (openedSecondary) await page.locator("[data-dock-overflow]").click();
   for (const selector of primaryReviewControls) {
     const control = page.locator(selector);
     await expect(control).toBeVisible();
@@ -39,6 +45,9 @@ export async function expectControlsAboveSafeViewport(
       `${selector} ends below the safe viewport`,
     ).toBeLessThanOrEqual(viewportHeight);
   }
+  // The disclosure is a measurement aid here, not the tested state: return
+  // the review to the dock so later steps see the shipped layout.
+  if (openedSecondary) await page.keyboard.press("Escape");
   expect(
     await page
       .locator("[data-selection]")

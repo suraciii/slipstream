@@ -17,6 +17,8 @@ export type ViewOptionsFilterElements = Readonly<{
   ratingMinimum: HTMLSelectElement;
   ratingMaximum: HTMLSelectElement;
   ratingMatch: HTMLButtonElement;
+  ratingCollapse: HTMLButtonElement;
+  ratingFields: HTMLElement;
   ratingError: HTMLElement;
   kindSelect: HTMLSelectElement;
   availableSelect: HTMLSelectElement;
@@ -134,6 +136,8 @@ export function createViewOptionsFilters(
     ratingMinimum,
     ratingMaximum,
     ratingMatch,
+    ratingCollapse,
+    ratingFields,
     ratingError,
     kindSelect,
     availableSelect,
@@ -152,6 +156,30 @@ export function createViewOptionsFilters(
   capturedBefore.placeholder = CAPTURE_TIME_PLACEHOLDER;
 
   let committed: ViewFilterConditions = {};
+
+  /// The Rating bounds sit behind one disclosure, so the closed row names the
+  /// active bound instead of hiding a committed value. The label reuses the
+  /// committed summary's own vocabulary, so one Rating reads the same whether
+  /// it is collapsed here or listed in the applied-filter summary.
+  const ratingBoundLabel = (): string => {
+    const minimum = committed.ratingMinimum;
+    const maximum = committed.ratingMaximum;
+    if (minimum !== undefined && maximum !== undefined)
+      return minimum === maximum
+        ? `Rating ${minimum}`
+        : `Rating ${minimum}–${maximum}`;
+    if (minimum !== undefined) return `Rating ${minimum} and up`;
+    if (maximum !== undefined) return `Rating ${maximum} and below`;
+    return "Rating";
+  };
+  const presentRatingCollapse = () => {
+    ratingCollapse.setAttribute("aria-expanded", String(!ratingFields.hidden));
+    ratingCollapse.textContent = ratingBoundLabel();
+  };
+  ratingCollapse.addEventListener("click", () => {
+    ratingFields.hidden = !ratingFields.hidden;
+    presentRatingCollapse();
+  });
 
   const clearRatingError = () => {
     for (const control of [ratingMinimum, ratingMaximum]) {
@@ -312,6 +340,14 @@ export function createViewOptionsFilters(
     clearValidity();
     syncRatingOptions();
     syncRatingValidity();
+    // A committed Rating bound opens its disclosure, so View options never
+    // hides an active condition behind a collapsed row.
+    if (
+      committed.ratingMinimum !== undefined ||
+      committed.ratingMaximum !== undefined
+    )
+      ratingFields.hidden = false;
+    presentRatingCollapse();
   };
 
   writeControls(committed);
@@ -428,6 +464,7 @@ export function createViewOptionsFilters(
   return {
     setCommitted(next) {
       committed = next;
+      presentRatingCollapse();
     },
     reset(next) {
       committed = next;

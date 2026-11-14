@@ -305,13 +305,30 @@ export async function openSources(page: Page) {
 
 /// Opens the Photo tools surface from the primary action region and waits for
 /// its list. Photo tools is one native modal: at most one supporting surface is
-/// active, and closing it returns focus to the More entry that opened it.
+/// active, and closing it returns focus to the More entry that opened it. At
+/// phone widths the More entry sits behind the dock's own disclosure, so the
+/// disclosure opens first.
 export async function openPhotoTools(page: Page) {
   const surface = page.locator("[data-photo-tools]");
   if (await surface.isVisible()) return;
-  await page.locator("[data-dock-more]").click();
+  const toggle = page.locator("[data-dock-overflow]");
+  const more = page.locator("[data-dock-more]");
+  if (await more.isHidden()) await toggle.click();
+  await more.click();
   await expect(surface).toBeVisible();
   await expect(page.locator("[data-photo-tools-view='tools']")).toBeVisible();
+}
+
+/// Opens the Photo dock's secondary-action disclosure, so its Undo and More
+/// entries become direct targets. A wide layout shows them inline and hides
+/// the disclosure control, so this is a no-op there.
+export async function openDockSecondary(page: Page) {
+  const toggle = page.locator("[data-dock-overflow]");
+  if (await toggle.isHidden()) return;
+  const secondary = page.locator("[data-dock-secondary]");
+  if ((await secondary.getAttribute("data-open")) !== null) return;
+  await toggle.click();
+  await expect(secondary).toBeVisible();
 }
 
 /// Moves Photo tools to one of its subviews, which replaces the list content
@@ -344,6 +361,16 @@ export async function openAdvancedFilters(page: Page) {
   if ((await details.getAttribute("open")) === null)
     await details.locator(":scope > summary").click();
   await expect(details).toHaveAttribute("open", "");
+}
+
+/** Opens the Rating bounds disclosure when a test needs the Minimum,
+ * Maximum, or Match minimum controls. */
+export async function openRatingFields(page: Page) {
+  const collapse = page.locator("[data-rating-collapse]");
+  await expect(collapse).toBeVisible();
+  if ((await collapse.getAttribute("aria-expanded")) === "false")
+    await collapse.click();
+  await expect(page.locator("[data-rating-fields]")).toBeVisible();
 }
 
 /// Opens the second-precision Capture Time controls inside Advanced filters.

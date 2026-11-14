@@ -588,6 +588,7 @@ export function createLibraryBrowserView(
   const dockUndo = required<HTMLButtonElement>(root, "[data-dock-undo]");
   const dockNext = required<HTMLButtonElement>(root, "[data-dock-next]");
   const dockMore = required<HTMLButtonElement>(root, "[data-dock-more]");
+  const dockOverflow = required<HTMLElement>(root, "[data-dock-overflow]");
   const photoToolsDialog = required<HTMLDialogElement>(
     root,
     "[data-photo-tools]",
@@ -837,7 +838,7 @@ export function createLibraryBrowserView(
   /// Wheel remains the touch accelerator on the Preview.
   const openRatingChoices = () => {
     if (!alive || photoView.hidden) return;
-    photoToolsController.open("rating");
+    photoToolsController.open("rating", dockRating);
   };
   const closeRatingChoices = (restoreFocus = true) => {
     if (!alive) return;
@@ -1080,7 +1081,10 @@ export function createLibraryBrowserView(
   dockPrevious.addEventListener("click", () => send({ kind: "previous" }));
   dockNext.addEventListener("click", () => send({ kind: "next" }));
   dockRating.addEventListener("click", () => openRatingChoices());
-  dockMore.addEventListener("click", () => photoToolsController.open());
+  dockMore.addEventListener("click", () => {
+    const revealed = photoPresenter.closeDockDisclosure();
+    photoToolsController.open("tools", revealed ? dockOverflow : dockMore);
+  });
   for (const button of photoToolsReturnButtons)
     button.addEventListener("click", () =>
       photoToolsController.returnToTools(),
