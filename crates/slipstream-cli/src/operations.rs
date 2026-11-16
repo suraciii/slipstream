@@ -917,3 +917,48 @@ pub(crate) fn list_expiry_valid<T>(list: &ListData<T>, page_limit: usize) -> boo
         && list.next_cursor.is_some() == list.expires_at.is_some()
         && list.expires_at.as_deref().is_none_or(valid_utc_time)
 }
+
+/// The page bound a list request is held to: a continuation is bound by the
+/// global maximum, a fresh request by its own limit or the default when the
+/// request states none.
+pub(crate) fn list_page_limit(
+    cursor: bool,
+    limit: Option<u8>,
+    default: usize,
+    maximum: usize,
+) -> usize {
+    if cursor {
+        maximum
+    } else {
+        limit.map_or(default, usize::from)
+    }
+}
+
+/// Validates one list page against its bound and shapes the shared
+/// `{items,total,nextCursor,evaluatedAt,expiresAt}` envelope. A page whose
+/// continuation is present but empty is not a confirmed page.
+pub(crate) fn list_page<T>(
+    operation: Operation,
+    data: ListData<T>,
+    page_limit: usize,
+    map: impl FnMut(T) -> Result<Value, ()>,
+) -> Result<Value, CommandFailure> {
+    if !list_expiry_valid(&data, page_limit)
+        || data.next_cursor.as_deref().is_some_and(str::is_empty)
+    {
+        return Err(CommandFailure::transport(operation));
+    }
+    let items = data
+        .items
+        .into_iter()
+        .map(map)
+        .collect::<Result<Vec<_>, ()>>()
+        .map_err(|_| CommandFailure::transport(operation))?;
+    Ok(json!({
+        "items": items,
+        "total": data.total,
+        "nextCursor": data.next_cursor,
+        "evaluatedAt": data.evaluated_at,
+        "expiresAt": data.expires_at,
+    }))
+}

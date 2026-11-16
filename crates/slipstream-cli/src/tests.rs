@@ -1,5 +1,6 @@
 use super::*;
 use clap::Parser;
+mod list_page;
 mod restore;
 #[test]
 fn metadata_read_retains_unavailable_evidence_and_reason() {
@@ -291,27 +292,6 @@ fn parser_validates_exact_values_and_local_times() {
         ])
         .is_err()
     );
-}
-
-#[test]
-fn list_validation_enforces_requested_and_global_page_bounds() {
-    let list = ListData {
-        items: vec![(); 2],
-        total: 2,
-        next_cursor: None,
-        evaluated_at: "2026-01-01T00:00:00Z".to_owned(),
-        expires_at: None,
-    };
-    assert!(!list_expiry_valid(&list, 1));
-    assert!(list_expiry_valid(&list, 2));
-    let continuation = ListData {
-        items: vec![(); MAXIMUM_LIST_PAGE + 1],
-        total: (MAXIMUM_LIST_PAGE + 1) as u64,
-        next_cursor: Some("cursor".to_owned()),
-        evaluated_at: "2026-01-01T00:00:00Z".to_owned(),
-        expires_at: Some("2026-01-01T00:15:00Z".to_owned()),
-    };
-    assert!(!list_expiry_valid(&continuation, MAXIMUM_LIST_PAGE));
 }
 
 #[test]
