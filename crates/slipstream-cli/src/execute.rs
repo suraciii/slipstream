@@ -341,32 +341,16 @@ pub(crate) async fn execute(
                 }
                 let data: ListData<AlbumListItem> =
                     client.json(operation, Method::GET, url, None).await?;
-                let page_limit = if args.cursor.is_some() {
-                    MAXIMUM_LIST_PAGE
-                } else {
-                    usize::from(args.limit.unwrap_or(DEFAULT_LIST_PAGE as u8))
-                };
-                if !list_expiry_valid(&data, page_limit)
-                    || data.next_cursor.as_deref().is_some_and(str::is_empty)
-                {
-                    return Err(CommandFailure::transport(operation));
-                }
-                let items = data
-                    .items
-                    .into_iter()
-                    .map(|item| match item {
-                        AlbumListItem::Missing(missing) => missing_value(missing),
-                        AlbumListItem::Present(album) => album_value(album, &client.origin),
-                    })
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|_| CommandFailure::transport(operation))?;
-                Ok(json!({
-                    "items": items,
-                    "total": data.total,
-                    "nextCursor": data.next_cursor,
-                    "evaluatedAt": data.evaluated_at,
-                    "expiresAt": data.expires_at,
-                }))
+                let page_limit = list_page_limit(
+                    args.cursor.is_some(),
+                    args.limit,
+                    DEFAULT_LIST_PAGE,
+                    MAXIMUM_LIST_PAGE,
+                );
+                list_page(operation, data, page_limit, |item| match item {
+                    AlbumListItem::Missing(missing) => missing_value(missing),
+                    AlbumListItem::Present(album) => album_value(album, &client.origin),
+                })
             }
             Command::Albums {
                 command: AlbumCommand::Get { album_id },
@@ -525,32 +509,16 @@ pub(crate) async fn execute(
                         )
                         .await?
                 };
-                let page_limit = if args.cursor.is_some() {
-                    MAXIMUM_LIST_PAGE
-                } else {
-                    usize::from(args.limit.unwrap_or(DEFAULT_LIST_PAGE as u8))
-                };
-                if !list_expiry_valid(&data, page_limit)
-                    || data.next_cursor.as_deref().is_some_and(str::is_empty)
-                {
-                    return Err(CommandFailure::transport(operation));
-                }
-                let items = data
-                    .items
-                    .into_iter()
-                    .map(|item| match item {
-                        PhotoListItem::Missing(missing) => missing_value(missing),
-                        PhotoListItem::Present(photo) => photo_value(photo, &client.origin),
-                    })
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|_| CommandFailure::transport(operation))?;
-                Ok(json!({
-                    "items": items,
-                    "total": data.total,
-                    "nextCursor": data.next_cursor,
-                    "evaluatedAt": data.evaluated_at,
-                    "expiresAt": data.expires_at,
-                }))
+                let page_limit = list_page_limit(
+                    args.cursor.is_some(),
+                    args.limit,
+                    DEFAULT_LIST_PAGE,
+                    MAXIMUM_LIST_PAGE,
+                );
+                list_page(operation, data, page_limit, |item| match item {
+                    PhotoListItem::Missing(missing) => missing_value(missing),
+                    PhotoListItem::Present(photo) => photo_value(photo, &client.origin),
+                })
             }
             Command::Photos {
                 command: PhotoCommand::Get { photo_id },
@@ -863,29 +831,15 @@ pub(crate) async fn execute(
                         )
                         .await?
                 };
-                let page_limit = if args.cursor.is_some() {
-                    limits.recovery_page_maximum
-                } else {
-                    args.limit.map_or(limits.recovery_page_maximum, usize::from)
-                };
-                if !list_expiry_valid(&data, page_limit)
-                    || data.next_cursor.as_deref().is_some_and(str::is_empty)
-                {
-                    return Err(CommandFailure::transport(operation));
-                }
-                let items = data
-                    .items
-                    .into_iter()
-                    .map(|item| recovery_item_value(item, &client.origin))
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|_| CommandFailure::transport(operation))?;
-                Ok(json!({
-                    "items": items,
-                    "total": data.total,
-                    "nextCursor": data.next_cursor,
-                    "evaluatedAt": data.evaluated_at,
-                    "expiresAt": data.expires_at,
-                }))
+                let page_limit = list_page_limit(
+                    args.cursor.is_some(),
+                    args.limit,
+                    limits.recovery_page_maximum,
+                    limits.recovery_page_maximum,
+                );
+                list_page(operation, data, page_limit, |item| {
+                    recovery_item_value(item, &client.origin)
+                })
             }
             Command::Recovery {
                 command: RecoveryCommand::Propose(args),
@@ -939,33 +893,17 @@ pub(crate) async fn execute(
                         )
                         .await?
                 };
-                let page_limit = if args.cursor.is_some() {
-                    limits.recovery_page_maximum
-                } else {
-                    args.limit.map_or(limits.recovery_page_maximum, usize::from)
-                };
-                if !list_expiry_valid(&data, page_limit)
-                    || data.next_cursor.as_deref().is_some_and(str::is_empty)
-                {
-                    return Err(CommandFailure::transport(operation));
-                }
+                let page_limit = list_page_limit(
+                    args.cursor.is_some(),
+                    args.limit,
+                    limits.recovery_page_maximum,
+                    limits.recovery_page_maximum,
+                );
                 let single_form = args.original_id.is_some();
                 if single_form && (data.total != 1 || data.next_cursor.is_some()) {
                     return Err(CommandFailure::transport(operation));
                 }
-                let items = data
-                    .items
-                    .into_iter()
-                    .map(recovery_mapping_value)
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|_| CommandFailure::transport(operation))?;
-                Ok(json!({
-                    "items": items,
-                    "total": data.total,
-                    "nextCursor": data.next_cursor,
-                    "evaluatedAt": data.evaluated_at,
-                    "expiresAt": data.expires_at,
-                }))
+                list_page(operation, data, page_limit, recovery_mapping_value)
             }
             Command::Recovery {
                 command: RecoveryCommand::Apply(_args),

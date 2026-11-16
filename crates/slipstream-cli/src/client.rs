@@ -418,36 +418,7 @@ pub(crate) fn validated_route_failure(
         // An expired continuation discloses the route's cursor kind and the
         // reason its retained query is gone; an empty details object is not a
         // confirmed refusal the caller can act on.
-        if code == "cursor_expired"
-            && !(["cursorKind", "reason"]
-                .iter()
-                .all(|key| details.contains_key(*key))
-                && details
-                    .get("cursorKind")
-                    .and_then(Value::as_str)
-                    .is_some_and(|kind| {
-                        matches!(
-                            kind,
-                            "folder"
-                                | "album"
-                                | "photo"
-                                | "trash"
-                                | "unavailable"
-                                | "mappings"
-                                | "workspace"
-                                | "darktable"
-                        )
-                    })
-                && details
-                    .get("reason")
-                    .and_then(Value::as_str)
-                    .is_some_and(|reason| {
-                        matches!(
-                            reason,
-                            "publication_replaced" | "process_restarted" | "idle_or_evicted"
-                        )
-                    }))
-        {
+        if code == "cursor_expired" && !cursor_expiry_details_valid(details) {
             return None;
         }
         if code == "artifact_referenced" && !details.get("blockers").is_some_and(Value::is_array) {
@@ -557,28 +528,7 @@ pub(crate) fn validated_route_failure(
                 && details.get("limit").and_then(Value::as_u64).is_some()
                 && details.get("actual").and_then(Value::as_u64).is_some()
         }
-        "cursor_expired" => {
-            required_keys(&["cursorKind", "reason"])
-                && string("cursorKind").is_some_and(|value| {
-                    matches!(
-                        value,
-                        "folder"
-                            | "album"
-                            | "photo"
-                            | "trash"
-                            | "unavailable"
-                            | "mappings"
-                            | "workspace"
-                            | "darktable"
-                    )
-                })
-                && string("reason").is_some_and(|value| {
-                    matches!(
-                        value,
-                        "publication_replaced" | "process_restarted" | "idle_or_evicted"
-                    )
-                })
-        }
+        "cursor_expired" => cursor_expiry_details_valid(details),
         "incompatible_server" => {
             required_keys(&["requestedContractVersion", "supportedContractVersions"])
                 && details
@@ -796,6 +746,40 @@ pub(crate) fn validated_route_failure(
         _ => 6,
     };
     Some(CommandFailure::from_payload(exit_code, error))
+}
+
+/// A confirmed `cursor_expired` refusal discloses the route's cursor kind
+/// and the reason its retained query is gone. Both route families share
+/// one closed vocabulary, so their disclosure contracts cannot drift apart.
+fn cursor_expiry_details_valid(details: &serde_json::Map<String, Value>) -> bool {
+    ["cursorKind", "reason"]
+        .iter()
+        .all(|key| details.contains_key(*key))
+        && details
+            .get("cursorKind")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| {
+                matches!(
+                    kind,
+                    "folder"
+                        | "album"
+                        | "photo"
+                        | "trash"
+                        | "unavailable"
+                        | "mappings"
+                        | "workspace"
+                        | "darktable"
+                )
+            })
+        && details
+            .get("reason")
+            .and_then(Value::as_str)
+            .is_some_and(|reason| {
+                matches!(
+                    reason,
+                    "publication_replaced" | "process_restarted" | "idle_or_evicted"
+                )
+            })
 }
 
 /// The retained composable recipe a `recipe_conflict` or `source_changed`
