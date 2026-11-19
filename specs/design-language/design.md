@@ -134,4 +134,4 @@ A Grid MAY change cell count or density while preserving cell identity, facts, a
 
 A CLI or Agent result MUST name the operation, scope, settled outcome, and next action without requiring browser presentation state. [Accessibility Language](spec.md#accessibility-language) owns shared visible and assistive behavior.
 
-Photo Development revision restore MUST NOT be presented as session Undo or Redo, and session Undo and Redo MUST NOT be described as history restore. [Autosave and Reversible Editing](../photo-development/spec.md#autosave-and-reversible-editing) owns their distinct state and write semantics.
+Photo Development revision restore MUST NOT be presented as Library Browser Undo or Redo. [Tool History](../photo-development/spec.md#tool-history) owns the revision-restore contract.

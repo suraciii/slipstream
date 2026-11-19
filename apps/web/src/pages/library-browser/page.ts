@@ -13,7 +13,7 @@ import type {
   SelectionFilter,
   SelectionState,
 } from "./api/contracts.js";
-import { routeEditorIntent } from "./model/editor-intent-router.js";
+import { routeWorkspaceIntent } from "./model/workspace-intent-router.js";
 import { createPhotoDetailsOwner } from "./model/photo-details-owner.js";
 import { createMetadataPanel } from "./ui/external-metadata-panel.js";
 import { createRecoveryReviewOwner } from "./model/recovery-review-owner.js";
@@ -89,7 +89,7 @@ import {
 } from "./ui/library-browser-view.js";
 import { formatPhotoCount } from "./ui/photo-count.js";
 import { mountLibraryBrowserAccess } from "./ui/library-browser-access.js";
-import { createPageEditorController } from "./ui/editor-controller-composition.js";
+import { createPageWorkspaceController } from "./ui/workspace-controller-composition.js";
 import { photoNavigationControls } from "./ui/photo-navigation-controls.js";
 import type { BrowserFetch } from "./api/browser-fetch.js";
 
@@ -206,14 +206,17 @@ function mountPrivateLibraryBrowser(
     total: sourceGrid.total,
     index: 0,
   });
-  const editor = createPageEditorController(
+  const workspace = createPageWorkspaceController(
     fetcher,
     view,
     () => applicationAlive,
     photoOwner,
-    () => application.scanState ?? "unknown",
   );
-  const { refresh: refreshEditor, leave: leaveEditor } = editor;
+  const {
+    refresh: refreshWorkspace,
+    leave: leaveWorkspace,
+    dispose: disposeWorkspace,
+  } = workspace;
   const savedPositions = createSavedPositionOwner(fetcher, {
     isSourceCurrent: (authority, albumId) =>
       sourceGrid.isCurrent(authority) &&
@@ -260,14 +263,13 @@ function mountPrivateLibraryBrowser(
       return;
     }
     if (coordination.kind === "publication-advanced") {
-      // A completed scan published new Library source facts. The open
-      // Photo's Edit surface re-reads its bounded edit facts now, so a
-      // source whose read was pending while the Library recovered becomes
-      // editable without a reload or a reopened Photo. The read joins one
-      // already under way, and an Edit surface that is not presented stays
-      // untouched: opening it later reads the facts fresh anyway.
+      // A completed scan published new Library source facts. An open
+      // Workspace view re-reads its file facts now, so a source that became
+      // available while the Library recovered is visible without reopening
+      // Photo View. A closed Workspace stays untouched: opening it later reads
+      // the facts fresh anyway.
       const photoId = photoOwner.current?.id;
-      if (photoId && view.editorVisible()) void refreshEditor(photoId);
+      if (photoId && view.workspaceVisible()) refreshWorkspace(photoId);
       return;
     }
     if (coordination.kind === "reset-file-locations") {
@@ -306,15 +308,6 @@ function mountPrivateLibraryBrowser(
             undefined,
             fileLocations.publication,
           );
-        if (
-          established &&
-          destination.photoId &&
-          new URLSearchParams(window.location.search).get("edit") === "1"
-        ) {
-          root
-            .querySelector<HTMLButtonElement>('[data-photo-tools-entry="edit"]')
-            ?.click();
-        }
         return;
       }
       const remembered =
@@ -1423,8 +1416,6 @@ function mountPrivateLibraryBrowser(
     view,
     photoOwner,
     sourceGrid,
-    currentPhotoId: () => currentPhoto()?.id,
-    editorReferenceChanged: (photoId) => editor.referenceChanged(photoId),
     failPhotoRecovery,
     renderReviewImage,
     updateControls,
@@ -1448,7 +1439,7 @@ function mountPrivateLibraryBrowser(
   const leavePhotoView = () => {
     metadataPanel.show(undefined);
     photoDetails.clearMetadata();
-    leaveEditor();
+    leaveWorkspace();
     const authority = photoOwner.leave();
     const photoTransition = recoveryGate.beginTransition(
       "photo",
@@ -1927,7 +1918,7 @@ function mountPrivateLibraryBrowser(
 
   function handleViewIntent(intent: LibraryBrowserIntent): void {
     if (!applicationAlive) return;
-    if (routeEditorIntent(editor, intent)) return;
+    if (routeWorkspaceIntent(workspace, intent)) return;
     switch (intent.kind) {
       case "summary-action": {
         const outcome = applicationPresentation.activateAction(
@@ -2319,7 +2310,8 @@ function mountPrivateLibraryBrowser(
   return () => {
     if (!applicationAlive) return;
     applicationAlive = false;
-    leaveEditor();
+    leaveWorkspace();
+    disposeWorkspace();
     photoDetails.dispose();
     metadataPanel.dispose();
     removedListing.dispose();

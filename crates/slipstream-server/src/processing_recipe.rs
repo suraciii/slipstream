@@ -393,7 +393,7 @@ fn outcome_response(
             Json(json!({
                 "photoId": recipe.photo_id,
                 "requestId": request_id,
-                "webUrl": format!("/photos/{}/edit",recipe.photo_id),
+                "webUrl": format!("/?photoId={}",recipe.photo_id),
                 "outcome": "saved",
                 "recipe": recipe_json(&recipe),
                 "recipeVersion": recipe.revision,
@@ -406,7 +406,7 @@ fn outcome_response(
             Json(json!({
                 "photoId": recipe.photo_id,
                 "requestId": request_id,
-                "webUrl": format!("/photos/{}/edit",recipe.photo_id),
+                "webUrl": format!("/?photoId={}",recipe.photo_id),
                 "outcome": "replayed",
                 "recipe": recipe_json(&recipe),
                 "recipeVersion": recipe.revision,
@@ -419,7 +419,7 @@ fn outcome_response(
             Json(json!({
                 "photoId": recipe.photo_id,
                 "requestId": request_id,
-                "webUrl": format!("/photos/{}/edit",recipe.photo_id),
+                "webUrl": format!("/?photoId={}",recipe.photo_id),
                 "outcome": "unchanged",
                 "recipe": recipe_json(&recipe),
                 "recipeVersion": recipe.revision,
@@ -492,7 +492,7 @@ pub(crate) async fn get_composable_edit_recipe(
     Json(RecipeResponse {
         photo_id: photo_id.clone(),
         source_revision: read.current_source_revision.clone().unwrap_or_default(),
-        web_url: format!("/photos/{photo_id}/edit"),
+        web_url: format!("/?photoId={photo_id}"),
         recipe: read.recipe.as_ref().map(recipe_json),
     })
     .into_response()

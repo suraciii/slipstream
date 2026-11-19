@@ -42,6 +42,7 @@ mod input;
 mod operations;
 mod photo_restore;
 mod protocol;
+mod skills;
 mod state;
 #[cfg(test)]
 mod tests;
@@ -55,7 +56,8 @@ pub use commands::{
     OutputFormat, ParseErrorPreferences, PhotoCommand, PhotoDecisionArgs, PhotoListArgs,
     PhotoMetadataSaveArgs, PhotoRemovalArgs, PhotoRestoreArgs, PreviewSize, ProcessingCommand,
     RecoveryApplyArgs, RecoveryCommand, RecoveryProposeArgs, RecoveryUnavailableArgs, SelectionArg,
-    SetSelectionArg, TrashCleanupArgs, TrashCommand, TrashListArgs, parse_error_preferences,
+    SetSelectionArg, SkillsCommand, TrashCleanupArgs, TrashCommand, TrashListArgs,
+    parse_error_preferences,
 };
 pub use darktable::DarktableArgs;
 pub(crate) use execute::*;

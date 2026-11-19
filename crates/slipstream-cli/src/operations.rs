@@ -1,6 +1,7 @@
 use super::*;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Operation {
+    Skills,
     AuthLogin,
     AuthStatus,
     AuthUse,
@@ -57,6 +58,7 @@ pub(crate) enum Operation {
 impl Operation {
     pub(crate) fn wire(self) -> &'static str {
         match self {
+            Self::Skills => "skills",
             Self::Status => "status",
             Self::AuthLogin => "auth-login",
             Self::AuthStatus => "auth-status",
@@ -113,6 +115,7 @@ impl Operation {
 
 pub(crate) fn command_operation(command: &Command) -> Operation {
     match command {
+        Command::Skills { .. } => Operation::Skills,
         Command::Status => Operation::Status,
         Command::Workspace { command } => command.operation(),
         Command::Darktable(command) => command.operation(),

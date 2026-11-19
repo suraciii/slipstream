@@ -15,6 +15,7 @@ An anonymous visitor MUST NOT read private facts or receive a state-changing res
 - Photos, counts, and filenames.
 - Previews and Edit Previews.
 - Processing results, Exports, and downloads.
+- Workspace files, file metadata, paths, and execution hosts.
 
 Only the nonprivate application shell, access entry points, and minimal health information MAY be public. Original safety and operation preconditions continue to apply after access is granted.
 
@@ -96,7 +97,7 @@ The Photographer MAY use any allowed access origin directly. [Access Architectur
 
 HTTP MUST show an unencrypted connection warning before browser token entry and keep it visible during the session. It MUST warn once per CLI invocation.
 
-HTTP MUST preserve authentication, CSRF protection, and all ordinary browser Library operations, including editing, deletion, and verified downloads. It MUST NOT enable anonymous access, including on loopback.
+HTTP MUST preserve authentication, CSRF protection, and all ordinary browser Library operations, including deletion and verified downloads. It MUST NOT enable anonymous access, including on loopback.
 
 Clients MUST NOT change the configured scheme after a connection failure. PWA installation remains subject to [Installed Web App](../web-application/installation/spec.md).
 

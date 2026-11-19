@@ -386,28 +386,24 @@ cargo build --locked -p darktable-edit --bins
 The service selects `DARKTABLE_EDIT_BINARY` explicitly or finds the executable
 beside the server, then on `PATH`. Its supervisor must remain beside the tool.
 `DARKTABLE_EDIT_BUNDLE` points to the qualified independent `edit-manifest.json`
-bundle root, such as `/opt/darktable-edit` in the built photo image. The native
-editing smoke requires only the RAW sample and these two tool environment values.
-For a local native installation, install the pinned [output ICC assets](tools/processing/README.md#build)
+bundle root, such as `/opt/darktable-edit` in the built photo image. Native
+editing acceptance requires the RAW sample and these two tool environment
+values; the Web Workspace smoke below does not. For a local native installation,
+install the pinned [output ICC assets](tools/processing/README.md#build)
 before discovery/manifest generation so discovery and rendering use identical
 deterministic profile bytes.
 
 ```sh
-SLIPSTREAM_RAW_SAMPLE=/absolute/path/to/sample.ARW \
-DARKTABLE_EDIT_BINARY="$PWD/target/debug/darktable-edit" \
-DARKTABLE_EDIT_BUNDLE=/absolute/path/to/independent-darktable-bundle \
-bun x playwright test --grep real-processing --workers=1
+bun x playwright test --grep "Workspace presents" --workers=1
 ```
 
-It opens the Photo Workspace in the real browser and explicitly starts darktable
-editing against its retained input. A native-discovered numeric control saves
-canonical tool state; explicit Preview and Export use that saved edit and expose
-completed workspace files. Reloading preserves the selected edit and retained
-output. It checks the isolated Library Original and same-basename external XMP
-sidecar for unchanged digests and metadata. This smoke does not establish general
-editing or conflict coverage. The independent CLI workspace acceptance separately
-exercises export before preview and arbitrary local-file execution; complete Issue
-#509 acceptance requires the recorded general editing and restore evidence.
+It opens the Workspace file view in the real browser, inspects the bounded file
+list, downloads a completed file with its checked revision, and removes that
+file through the explicit inspection step. The fixture supplies workspace file
+facts; the smoke asserts that no darktable or tool command request occurs. It
+does not establish native editing or conflict coverage. Native darktable
+verification belongs to the independent `darktable-edit` acceptance and the CLI
+workspace acceptance, which exercise tool execution without the Web surface.
 Qualifying a subsequent SpektraFilm stage requires an explicitly selected completed
 workspace TIFF with a compatible inspected contract and its own finite resources.
 

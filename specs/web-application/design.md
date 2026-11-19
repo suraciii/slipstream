@@ -126,15 +126,13 @@ The owner retains an attempt identity before confirmation. It keeps admitted cle
 
 Trash never deletes Original Files; external deletion belongs to the Photographer under the [Trash contract](../photo-library/trash/spec.md).
 
-#### Editor rendition owner
+#### Workspace file owner
 
-The **Editor rendition owner** owns independent current and baseline request admission, bounded polling, cancellation, retained images, and object-URL lifetime. Both lanes use one transfer lifecycle and the existing rendition validators.
+The **Workspace file owner** owns Workspace open, bounded file-list reads,
+inspected-file selection, Download, and admitted Remove for one current Photo.
 
-The current lane follows recipe and edit-source identity. The baseline is retained across saved-settings changes for the same Photo, stage, and source revision.
-
-Every asynchronous response or body continuation checks its lane generation and Photo scope before changing presentation or admitting another poll.
-
-The Editor controller provides current session identity and chooses the presented lane. Its save stream waits on the Photo-scoped output controller's admission barrier before sending dependent writes.
+Its reads and writes are fenced to the Photo and workspace generation. It MUST
+NOT read or write Edit State, initialize a tool, or render a Preview or Export.
 
 #### Page UI
 
@@ -180,11 +178,11 @@ An extracted module MUST hide meaningful state or policy behind a smaller interf
 
 Otherwise the responsibility stays with its nearest existing owner.
 
-Sharing the two rendition lifecycles inside the page model hides their transport and image-resource rules without adding a second editing session.
+Thumbnail, Preview, and Workspace file transfers retain distinct lifecycles and
+validators.
 
-Keeping two copies in the Editor controller duplicates cancellation and body-settlement policy.
-
-A general poller spanning rendition, Export and Development Proxy work would erase their different effects and settlement contracts and is not used.
+A shared poller across unrelated operations would erase their different
+settlement contracts and is not used.
 
 ### Async ownership module
 
@@ -294,7 +292,7 @@ The Quick Action Dock is a responsive presentation of existing intents.
 
 It MUST NOT become a second page controller or a second persistence admission.
 
-The Photo tools surface presents existing Details, Album, Zoom, and Clear controls; each retains its existing owner, failure isolation, and focus restoration rules.
+The Photo tools surface presents existing Details, Album, Workspace, Zoom, and Clear controls; each retains its existing owner, failure isolation, and focus restoration rules.
 
 Undo is presented once in the primary Photo action region and retains the same Photo action owner.
 

@@ -6,11 +6,11 @@ The executor supervises an independent file/state executable; that tool owns its
 
 ## Model
 
-The Web service owns one bounded heavy-work queue and supervisor. At most one supervised attempt runs at a time; Preview and Export share bounded fair admission. This lock covers only supervised work, not independent commands.
+The service owns one bounded heavy-work queue and supervisor. At most one supervised attempt runs at a time; Preview and Export share bounded fair admission. This lock covers only supervised work, not independent commands.
 
 Per-edit tool locks prevent conflicting state writes without locking the whole workspace.
 
-Each standalone command owns its input/state capture, finite resource policy, private native process group, scratch, and synchronous terminal result. Web invokes the same tool against authorized workspace paths and retains a captured receipt. The executable's pinned bundle MUST be usable without Slipstream.
+Each standalone command owns its input/state capture, finite resource policy, private native process group, scratch, and synchronous terminal result. The service invokes the same tool against authorized workspace paths and retains a captured receipt. The executable's pinned bundle MUST be usable without Slipstream.
 
 Optional bundles identify engine/runtime, semantic schemas, profiles, and native assets. Startup and discovery MUST verify manifest identity and digests per tool.
 
@@ -20,7 +20,7 @@ Service startup policy controls permitted executables and resource capacity. HTT
 
 ## Execution
 
-The Web supervisor resolves confined paths and invokes an argument vector with a unique run identity and bounded structured output. Shell interpretation MUST NOT occur. A remote caller receives the true execution host/path facts and MUST use an environment with access; no implicit remote mount or synchronization is supplied.
+The service supervisor resolves confined paths and invokes an argument vector with a unique run identity and bounded structured output. Shell interpretation MUST NOT occur. A remote caller receives the true execution host/path facts and MUST use an environment with access; no implicit remote mount or synchronization is supplied.
 
 The tool captures canonical revision and input content evidence under its local state rules. Protected inputs are reused; mutable external input first receives a protected snapshot under the [workspace contract](../workspace/design.md#stable-bytes-and-containment).
 
@@ -28,9 +28,9 @@ Native children receive read-only inputs and resources with fresh private config
 
 Private protocol values, diagnostics, and result sizes MUST be bounded. Malformed, truncated, oversized, or incompatible responses MUST fail explicitly.
 
-Finite deadlines cover computation and blocked exchanges. Thread limits cover darktable, NumPy/BLAS, Numba, and FFTW. Cancellation or deadline MUST terminate all owned descendants, reap children, and settle scratch before the Web processing slot is released.
+Finite deadlines cover computation and blocked exchanges. Thread limits cover darktable, NumPy/BLAS, Numba, and FFTW. Cancellation or deadline MUST terminate all owned descendants, reap children, and settle scratch before the processing slot is released.
 
-The tool supervises its native group; Web also owns the tool group. Unexpected parent exit MUST terminate that owner's native children through a qualified parent-death/process-group mechanism. A standalone tool is not a service child and is unaffected by service exit.
+The tool supervises its native group; the service also owns the tool group. Unexpected parent exit MUST terminate that owner's native children through a qualified parent-death/process-group mechanism. A standalone tool is not a service child and is unaffected by service exit.
 
 Unconfirmed termination MUST stop affected heavy admission; it is neither successful cancellation nor permission to reuse scratch.
 

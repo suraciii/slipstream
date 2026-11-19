@@ -55,8 +55,10 @@ Selection State MUST NOT be inferred from Rating or task-specific Album membersh
 
 | Boundary | Scope |
 | --- | --- |
-| Editing | Independent headless darktable editing and the fixed standalone Film capability follow [Photo Development](photo-development/spec.md). |
-| Engine availability | The product MUST report deployed operations and limitations; it does not promise every desktop GUI feature. |
+| Editing | Independent headless darktable editing and the fixed standalone Film capability follow [Photo Development](photo-development/spec.md) through the CLI or Agent. The Web Workspace view is file inspection, Download, and removal only. |
+| External tools | An Agent MAY run independently installed processing tools on Photo Workspace files. Slipstream does not install, execute, sandbox, or attest them. |
+| Agent interface | Delegated use is the `slipstream` CLI. The product MUST NOT require an Agent-facing MCP server, plugin runtime, or Slipstream-managed tool installer. |
+| Engine availability | The product MUST report deployed operations and limitations; it does not promise every desktop GUI feature or every external tool. |
 | Metadata exchange | Explicit XMP interoperability follows [Read and Save Metadata](photo-library/metadata/spec.md), without authorizing Original writes. |
 | Access | [Instance Access](access/spec.md) owns authentication; public sharing requires a separate product contract. |
 | Release qualification | [Support](deployment/support.md) owns qualified release claims; target specifications do not imply publication or expand an already qualified release. |
@@ -64,6 +66,7 @@ Selection State MUST NOT be inferred from Rating or task-specific Album membersh
 Slipstream does not provide:
 
 - an Agent runtime or ownership of its conversations, planning, providers, prompts, or memory;
+- a plugin runtime, Slipstream-managed external-tool installer, or required Agent-facing MCP server;
 - automatic aesthetic scoring;
 - face recognition;
 - a semantic index;
@@ -71,4 +74,4 @@ Slipstream does not provide:
 - cloud backup;
 - multi-user digital asset management.
 
-External Agents MAY compose Slipstream's photo operations without making those external systems part of the product.
+External Agents MAY compose Slipstream's photo operations and independently installed tools without making those external systems part of the product.

@@ -125,7 +125,7 @@ Keyboard focus MUST return to that Photo cell when it is rendered, or to the Gri
 
 Slipstream follows this familiar Library-browser shape without adding editing panels, Folder mutation, Album Groups, Smart Albums, keywording, or publishing to the browser.
 
-The separate [Photo Development](../photo-development/spec.md) workspace and [Headless darktable Editing](../photo-development/darktable/editing.md) own image editing and its shared saved state.
+The separate [Photo Workspace](../photo-development/workspace/spec.md) owns file handoff. Editing happens through the CLI or Agent; the Web Workspace view is file inspection, Download, and removal only.
 
 ## Presentation and Control Hierarchy
 

@@ -14,7 +14,8 @@ execution supervisor.
 
 [Photo Development](spec.md) owns product behavior.
 
-[Photo Editor Workspace](workspace/web.md) owns browser lifecycle and asynchronous presentation.
+[Photo Workspace Web View](workspace/web.md) owns browser file inspection,
+Download, and removal.
 
 [Photo Workspace](workspace/design.md) owns workspace creation, confinement,
 file indexing, ready-file semantics, accessibility, deletion, and retention.
@@ -83,8 +84,6 @@ parameter owners or user-visible workflow stages.
 The [domain glossary](../../CONTEXT.md#development)
 defines these terms.
 
-Browser drafts and session undo/redo remain local pending intent.
-
 A Workspace Artifact is a completed indexed file.
 
 A Processing Artifact adds
@@ -95,7 +94,8 @@ A file without that evidence remains an ordinary
 workspace file, even when placed in `outputs/`.
 
 Observing it MUST NOT invent an
-Export success, an edit revision, or a relationship to a concurrent Web run.
+Export success, an edit revision, or a relationship to a concurrent supervised
+run.
 
 Composition selects one completed file as another tool's explicit input.
 
@@ -120,9 +120,9 @@ It can be invoked directly in the workspace's execution environment.
 Downloading,
 editing elsewhere and submitting files back is not the primary editing flow.
 
-Web controls and optional `slipstream darktable` commands resolve the same
-workspace and state directory, then invoke the same tool using argument vectors
-and bounded structured results.
+Optional `slipstream darktable` commands resolve the workspace and state
+directory, then invoke the same tool using argument vectors and bounded
+structured results.
 
 They do not implement a second parameter
 validator, compute native actions themselves, or require tool callbacks/SDK
@@ -138,7 +138,7 @@ The tool owns validation, atomic edit persistence, captured-revision execution,
 native-child lifetime and filesystem output completion.
 
 Slipstream adds bounded
-admission, browser/run receipts and process supervision for work it starts.
+admission, request/run receipts, and process supervision for work it starts.
 
 Tool availability, input compatibility, resource admission and Library readiness
 remain separate facts.
@@ -197,7 +197,7 @@ It MAY remain an explicitly
 identified reference or retained legacy derivative; reconstructing saved
 creative intent from a baseline proxy is forbidden.
 
-## Edit State Writes and Autosave
+## Edit State Writes
 
 Tool mutations acquire a bounded per-edit lock, validate the complete resulting
 state against the pinned schema, and atomically install canonical state, its
@@ -232,7 +232,7 @@ immutable resource-version meaning.
 
 Custom camera WB remains separately qualified.
 
-Web and Agent writes supply checked expected-revision/state evidence and a
+CLI and Agent writes supply checked expected-revision/state evidence and a
 caller-retained request identity.
 
 The standalone grammar also permits simple
@@ -268,46 +268,30 @@ new guarded revision; a different input requires explicit validated rebind.
 Unsupported saved versions stay inspectable and unavailable for execution;
 no baseline substitution or silent semantic upgrade is permitted.
 
-Browser autosave serializes writes per edit, with one in flight and coalesced
-later actions.
+Concurrent writes from independent callers are serialized by the tool's per-edit
+state guard.
 
-A save acknowledgement confirms only its own action and cannot
-erase newer draft intent.
-
-Navigation does not move response ownership to another
-Photo.
-
-Bounded local recovery drafts identify service, workspace, edit, input,
-observed revision and request identity.
-
-Storage failure is disclosed while
-online saving continues.
-
-Unconfirmed drafts are removed only after matching
-confirmation or explicit discard.
-
-Uncertain mutations are reconciled through
-the tool's receipt before dependent writes proceed; inspecting equal settings
-alone does not prove which action committed.
+Uncertain mutations are reconciled through the tool's receipt before dependent
+writes proceed; inspecting equal settings alone does not prove which action
+committed.
 
 ## Export Submission and Ordering
 
 Export captures the confirmed edit revision, input byte evidence, bundle/schema,
 resources and intended output contract.
 
-Web settles prior writes, commits the
-captured visible draft if needed, and admits that exact revision before releasing
-its submission barrier.
+A supervising caller settles prior writes and admits that exact revision before
+releasing its submission barrier.
 
 Later edits cannot modify the captured output request.
 
-A concurrent conflict preserves the user's captured intent for explicit resolution.
+A concurrent conflict preserves the caller's captured intent for explicit
+resolution.
 
 Standalone export is a synchronous local command owning its process; no server
 queue, HTTP polling or service task lifecycle is imposed on it.
 
-Web MAY queue and
-supervise the same executable.
+The service MAY queue and supervise the same executable.
 
 Its receipt records immutable invocation identity
 and does not become the canonical edit state.
@@ -331,15 +315,13 @@ admitted separately.
 A finite rendition derivation changes geometry/display
 only as qualified; it does not silently alter effects, precision or randomness.
 
-Browser latest-intent ownership includes workspace, edit, revision, input,
-bundle, geometry and display transform.
+A preview request identifies the workspace, edit, revision, input, bundle,
+geometry, and display transform.
 
-Comparison owns its two operands
-separately.
+Comparison owns its two operands separately.
 
-Prior completed preview files remain available while a replacement
-renders; the browser labels stale results and never presents late old-revision
-completion as the current canvas.
+A completed preview for an older revision MUST NOT be presented as the current
+result.
 
 Camera Preview is a separate reference.
 
@@ -376,11 +358,10 @@ a ready file even when a tool response was lost; that alone cannot settle the ru
 Concurrent same-directory runs MUST be attributed by their unique invocation and
 output evidence, never by newest filename or watcher-event timing.
 
-Web-run state is queued, running, succeeded, failed or cancelled; an uncertain
-observation is reported as outcome-unknown until reconciled.
+Supervised run state is queued, running, succeeded, failed, or cancelled; an
+uncertain observation is reported as outcome-unknown until reconciled.
 
-Browser departure
-does not cancel accepted work.
+A client departure does not cancel accepted work.
 
 Cancellation settles against actual completion;
 it cannot undo an already completed file.
@@ -420,12 +401,12 @@ owns file-index reconciliation independently from this run lifecycle.
 ## Resources and Retention
 
 [Local Photo Executor](processing/execution.md) owns process containment,
-cancellation, finite deadlines and Web admission.
+cancellation, finite deadlines, and service admission.
 
 [Processing Memory](processing/memory.md)
 owns memory/CPU enforcement and unchanged-image resource planning.
 
-The Web
+The service
 supervisor initially admits one heavy attempt at a time, with bounded queue
 fairness between preview and export.
 
@@ -455,7 +436,7 @@ disclosed limits; expiring a receipt does not delete a user's required files.
 
 Capacity refusal preserves earlier results and saved intent.
 
-Cleanup excludes
+Reclamation excludes
 live work and referenced dependencies.
 
 Downloads pin the exact indexed revision;

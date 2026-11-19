@@ -120,7 +120,7 @@ pub(crate) async fn execute(
 
     let result = async {
         match &cli.command {
-            Command::Auth { .. } => unreachable!("auth commands return before service dispatch"),
+            Command::Skills { .. } | Command::Auth { .. } => unreachable!("local dispatch"),
             Command::Workspace { command } => {
                 workspace::execute(
                     &client,

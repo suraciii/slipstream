@@ -342,17 +342,6 @@ export async function openPhotoToolsView(page: Page, view: string) {
   await expect(target).toBeVisible();
 }
 
-/** Opens the explicit legacy snapshot controls when a browser test exercises
- * the compatibility surface. The product UI keeps this disclosure collapsed
- * in the normal Edit State flow. */
-export async function openPhotoEditorAdvanced(page: Page) {
-  const details = page.locator("[data-photo-editor-advanced]");
-  await expect(details).toBeVisible();
-  if ((await details.getAttribute("open")) === null)
-    await details.locator(":scope > summary").click();
-  await expect(details).toHaveAttribute("open", "");
-}
-
 /** Opens the advanced filter conditions when a test needs the kind,
  * availability, or Capture Time controls. */
 export async function openAdvancedFilters(page: Page) {

@@ -157,7 +157,7 @@ CLI and Agent capabilities MAY differ from Web capabilities. They MUST be discov
 
 Library Browser [touch gestures](../library-browser/spec.md#touch-gestures) and [visible controls](../library-browser/experience/spec.md#photo-view) MUST remain equivalent paths for feature-defined decisions and navigation.
 
-Undo MUST identify its operation scope and be understandable as an eligible operation's inverse. [Library Browser Undo](../library-browser/spec.md#undo) and [Photo Development history](../photo-development/spec.md#autosave-and-reversible-editing) own their distinct rules.
+Undo MUST identify its operation scope and be understandable as an eligible operation's inverse. [Library Browser Undo](../library-browser/spec.md#undo) owns its rule. Photo Development revision restore MUST be named as history restore, not Undo.
 
 Controls MUST communicate client-known state and availability before activation when these affect the outcome. The surface MUST report authoritative refusal or conflict.
 

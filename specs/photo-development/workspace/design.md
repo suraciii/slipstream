@@ -72,7 +72,7 @@ Unsupported or unreadable tool state stays retained and
 is shown as unavailable; unknown private directories are never presumed to be
 disposable cache.
 
-Missing dependency knowledge blocks automatic cleanup rather
+Missing dependency knowledge blocks automatic reclamation rather
 than authorizing deletion.
 
 Unrelated tools can still exchange ordinary files
@@ -324,8 +324,6 @@ It MUST NOT copy inputs
 out to a separate checkout, persist a parallel parameter tree, or require
 submitting edits back.
 
-Browser controls operate through the same integration.
-
 Existing generic recipe interfaces are projections onto those canonical states,
 not competing parameter stores.
 
@@ -334,9 +332,8 @@ A single edit's mutations MUST serialize within the tool.
 Each successful
 mutation atomically creates a saved revision.
 
-Requests based on an inspected
-revision, including browser drafts, MUST carry that revision and reject stale
-state.
+Requests based on an inspected revision, including CLI and Agent requests, MUST
+carry that revision and reject stale state.
 
 The standalone CLI MAY expose focused convenience mutations that inspect
 and validate under one lock.
@@ -435,7 +432,7 @@ Explicit
 refresh MAY create a new artifact identity, while exact removal replay retains
 the original settled result.
 
-Directory cleanup MUST NOT follow symlinks, erase
+Directory reclamation MUST NOT follow symlinks, erase
 the Library, or delete state as though it were cache.
 
 Missing externally deleted

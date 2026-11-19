@@ -11,7 +11,7 @@ A Photo Workspace MUST therefore be a real persistent directory.
 Tools MUST read
 its inputs and write their results directly into it.
 
-The Web Edit view and file
+The Web Workspace view and file
 commands MUST present those same files.
 
 [Photo Development](../spec.md) owns processing behavior.
@@ -24,7 +24,7 @@ optional `slipstream darktable` integration.
 
 ## Open and Resume
 
-The Photo View MUST offer Edit to open or reopen the Photo's workspace.
+The Photo View MUST offer Workspace to open or reopen the Photo's workspace.
 
 Opening
 MUST create at most one default workspace for that Photo, including concurrent
@@ -52,7 +52,8 @@ Directories for previews, outputs, and tool state MUST appear only when needed.
 
 The input's Original filename MUST remain recognizable.
 
-A subsequent open MUST reuse existing files and tool state without recopying the Original or resetting edits.
+A subsequent open MUST reuse existing files and tool state without recopying the
+Original or resetting tool state.
 
 After explicit removal of the default input, open MUST disclose that no default is selected.
 
@@ -151,7 +152,7 @@ that edit.
 The tool MUST own initialization, operation semantics, validation,
 and persistence.
 
-Browser controls and `slipstream darktable` MUST use the same
+`slipstream darktable` and other tool callers MUST use the same
 tool state as independent calls.
 
 A user MUST NOT import, synchronize, submit, or
@@ -165,14 +166,11 @@ require a full render.
 Preview MUST render a captured saved version and write a
 completed image into the preview directory.
 
-The workspace MUST show that version
-and whether it still matches the selected edit.
+The preview result MUST identify that version and whether it still matches the selected edit.
 
-During an update, the last
-completed preview remains visible with an Updating status.
+A replacement MUST NOT overwrite the last completed preview until it completes.
 
-A late result for an
-older version MUST NOT replace the preview of a newer version.
+A late result for an older version MUST NOT replace the preview of a newer version.
 
 Changing settings and previewing MUST remain repeatable without regenerating a
 full-resolution TIFF, restaging the RAW, or asking the caller to reconstruct all
@@ -203,17 +201,17 @@ A tool MUST finish the file before publishing its final path.
 Slipstream MUST
 automatically discover it and show it after file validation.
 
-The user MUST NOT
-upload it again or call a separate artifact registration or commit operation.
+The caller MUST NOT upload it again or call a separate artifact registration or commit operation.
 
 Successful tool processing and workspace file visibility are separate facts: if
 indexing is still underway, the command MUST return the existing final path and
 show Checking file rather than claim the render failed or rerun it.
 
-Each completed output MUST offer Download and Continue processing.
+Each completed output MUST offer Download. Continue processing is a CLI or Agent
+action.
 
-Download
-MUST deliver the selected file's checked bytes with its recognizable filename.
+Download MUST deliver the selected file's checked bytes with its recognizable
+filename.
 
 It MUST NOT render again or return whatever output is now newest.
 
@@ -221,8 +219,7 @@ Continue
 processing MUST carry the exact selected file into the next tool without asking
 the user to browse for it, copy it, or re-enter an artifact ID.
 
-With several
-compatible tools, the user chooses one.
+With several compatible tools, a CLI or Agent caller chooses one.
 
 With none, the file remains downloadable
 and the product MUST explain the missing compatible capability.
@@ -238,7 +235,8 @@ appeared.
 Changing an earlier edit MUST NOT rerun downstream work or replace its
 input.
 
-Download and Continue processing remain independent choices.
+Download and Continue processing are independent choices; Continue processing
+remains a CLI or Agent action.
 
 Preview files MUST be viewable and downloadable as previews.
 
@@ -255,149 +253,21 @@ successful Export attribution.
 Such a file becomes an admitted next input only
 after its actual contract passes the selected tool's checks.
 
-## Web Interaction
+## Web Workspace View
 
-The main Edit view MUST show the selected image, relevant tool controls, the input name, and concise save and processing status.
+The Web Workspace view is the non-editing file view defined by
+[Photo Workspace Web View](web.md).
 
-A Files disclosure MUST group inputs, previews, and outputs without requiring a separate workflow screen.
+It MUST present the workspace input and completed files with Download and
+Remove. It MUST NOT present tool controls, Edit State, a Preview action, Export,
+or Continue processing. An existing Preview file MAY be inspected and downloaded
+as a workspace file; that is not a Preview action.
 
-The initial view MUST NOT be a general file manager or a blank stage editor.
+Opening, file inspection, download, removal, failure, and accessibility follow
+[Photo Workspace Web View](web.md).
 
-With no saved edit, the prepared input and tool choice MUST be visible together with an explicitly labeled **Camera reference** when that Photo's Preview is available.
-
-The Camera reference is Library display evidence, not an Edit Preview or proof of workspace input readiness.
-
-When it is unavailable, the view MUST show **Camera reference unavailable** without substituting a sibling image or disabling an otherwise intact input.
-
-Once an applicable Edit Preview is selected, the Camera reference requires explicit selection and MUST NOT replace its pending, stale, or failed result automatically.
-
-The Camera reference MUST NOT be substituted as a comparison operand.
-
-No saved edit is a normal start state, not a Preview failure.
-
-Opening or reopening MUST NOT implicitly initialize a tool or start rendering.
-
-Tool choices MUST show known availability and refusal reasons beside the input before creation is offered.
-
-Unanswered discovery MUST remain loading or retryable, not supported or unsupported by assumption.
-
-Engine availability, selected-input compatibility, and execution capacity remain independent; an available engine MAY still refuse authoritative admission.
-
-A missing tool MUST NOT disable other tools, Files, or existing downloads.
-
-At default text size, the initial image or reference and the next available editing action or actionable blocker MUST share the first view at 375 by 667 and 390 by 844.
-
-Routine technical status MUST NOT displace them.
-
-Short layouts MUST retain an image or reference region and primary actions while controls scroll independently, yielding supporting details before clipping controls.
-
-At 200% text enlargement, controls and text MUST remain usable without horizontal page overflow; vertical reflow MAY be necessary.
-
-### Primary action strip
-
-One primary action strip carries the actions that belong to every editing task:
-
-- save state, with its current saving, saved, conflict, failure, or unknown
-  status;
-- session Undo;
-- session Redo;
-- Preview; and
-- Export.
-
-These five are the strip's peers.
-
-The strip stays with the image rather than
-inside a tool panel, so the Photographer never scrolls editing controls or opens
-a technical disclosure to save, reverse an edit, render a Preview, or start an
-Export.
-
-A narrow layout MAY compress or regroup the strip, but it MUST NOT
-remove an action from the primary level.
-
-Files, jobs, catalogs, resources, and raw technical details are supporting
-disclosures.
-
-They have a clear name and invoker, but they are not peers of the
-strip: moving between them MUST NOT replace the strip, and the strip MUST NOT be
-represented as one more disclosure beside them.
-
-A revision restore from the
-tool's retained history remains a separate operation with its own label, as
-[Autosave and Reversible Editing](../spec.md#autosave-and-reversible-editing)
-requires.
-
-A file card MUST show a thumbnail when displayable, filename, file role, size,
-and readiness.
-
-Dimensions and relevant output characteristics MUST be available
-without exposing internal IDs.
-
-Provenance, full execution paths, revisions, and
-diagnostic details belong in an optional details view.
-
-An output that cannot be
-displayed directly MUST still offer its valid Download and compatible Continue
-processing actions; any display conversion MUST be labeled as such.
-
-Selecting a file for inspection MUST NOT change the active edit or bind a tool
-to a different input.
-
-Continue processing is the explicit transition.
-
-Download
-MUST NOT remove the file.
-
-Leaving Edit or returning from the Library MUST
-preserve selected state and completed files.
-
-Keyboard actions and narrow-screen
-presentation MUST retain the same actions and status meanings.
-
-Files MUST offer Remove for an explicitly selected protected input as well as
-other eligible files.
-
-Protection means read-only to tools, not forever retained.
-
-The reviewed file revision MUST be checked at removal.
-
-A refusal MUST name the
-dependent saved edits, jobs, outputs, resources, or active tools and offer the
-relevant explicit rebind/remove/settle action; unknown external use MUST be
-resolved before removal.
-
-No force action MAY break those dependencies.
-
-Removing
-an unused older RAW MUST preserve unrelated edits/results and the Library
-Original.
-
-Removing the default/last input MUST disclose that no default is
-selected while preserving access to remaining files and edits.
-
-Offer explicit
-selection of a compatible retained file, Prepare input again when the Original
-is available, or source recovery otherwise.
-
-The primary statuses MUST distinguish Preparing input, Saving settings,
-Rendering preview, Exporting, Checking file, and Ready.
-
-Failures MUST name the failed operation and a concrete recovery action when known.
-
-A successful settings save MUST
-remain saved if the following render fails.
-
-Files MUST remain visible while an
-unrelated operation is pending or fails.
-
-Routine diagnostics, revision identifiers, and execution paths MAY move into Details.
-
-Saving, conflict, failed or unknown writes, Preview staleness, and actionable refusal MUST remain visible beside the affected primary action.
-
-Primary messages MUST name the condition, its effect, and a valid next action when known.
-
-Raw error codes and operating-system messages are diagnostic detail.
-
-The interface MUST NOT invent a retry or configuration fix for an unclassified failure.
+The view MUST NOT edit Library selection, Rating, Album membership, navigation,
+or saved tool intent. Remove follows workspace removal rules.
 
 ## Lifetime and Recovery
 
@@ -409,16 +279,8 @@ resources, and completed outputs MUST remain until explicitly removed.
 They
 MUST NOT inherit a temporary download or task receipt expiry.
 
-Disposable
-previews and abandoned temporary files MAY be offered for cleanup with an
-estimated size; cleanup MUST preserve the currently displayed preview and any
-file required by a retained edit or active operation.
-
-An individually selected, unreferenced preview MAY be explicitly removed; if it
-was displayed, the view MUST clear it and disclose that removal.
-
-This explicit
-action is distinct from bulk cleanup, which preserves the current preview.
+An individually selected, unreferenced preview MAY be explicitly removed. A
+presenting client that displayed it MUST clear it and disclose the removal.
 
 Removal MUST check the selected revision, dependencies, and active use under
 the same admission protection as binding a new edit or job.

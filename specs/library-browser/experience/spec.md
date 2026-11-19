@@ -172,7 +172,7 @@ The Preview MUST show transient direction feedback during a swipe. Feedback MUST
 More opens these supporting action groups:
 
 - **Review:** Clear flag with its existing availability rule, Rating using the same choice surface as the primary Rating entry, and Details with capture facts and Preview Source. This group leads the list;
-- **Photo:** Album membership, Edit, Preview Zoom, and Nearby Photos;
+- **Photo:** Album membership, Workspace, Preview Zoom, and Nearby Photos;
 - **Library:** Browse Library, View options, and Review unavailable Originals when the current Photo reports an unavailable Original; and
 - **Shortcuts and gestures:** a named disclosure for the combined Preview
   detail-limit explanation, Selection State semantics, and gesture guidance.
@@ -193,7 +193,7 @@ Details and membership MAY load on request. Their loading or failure MUST remain
 
 Library navigation, View options, Rating, Photo tools, Album forms, and recovery review MUST have an explicit name and Close or Cancel action. A compact surface opens from the bottom and scrolls internally as needed; a wide surface MAY be a centered dialog or appropriate source drawer.
 
-At most one modal surface MAY be active. Moving from Photo tools to Details, Albums, Zoom, or Nearby Photos replaces its content and provides a local return to Photo tools, not a browser history entry.
+At most one modal surface MAY be active. Moving from Photo tools to Details, Albums, Workspace, Zoom, or Nearby Photos replaces its content and provides a local return to Photo tools, not a browser history entry.
 
 Each active subview MUST have one visible primary title naming the current task and one clear local return action. Shell and body MUST NOT repeat that title as adjacent headings; distinct subsection headings and programmatic group names remain available.
 

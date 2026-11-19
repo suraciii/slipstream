@@ -6,7 +6,7 @@ The native bridge keeps parameter layouts, image defaults, legal ordering, and h
 
 ## Model and Ownership
 
-The dependency is `Slipstream -> darktable-edit -> native darktable`. The tool MUST operate on accessible input and state paths with its own qualified bundle and resources, without Slipstream or a desktop catalog. Optional Web and CLI integration MUST resolve authorized identities to the same tool and state directory.
+The dependency is `Slipstream -> darktable-edit -> native darktable`. The tool MUST operate on accessible input and state paths with its own qualified bundle and resources, without Slipstream or a desktop catalog. Optional CLI integration MUST resolve authorized identities to the same tool and state directory.
 
 The tool owns semantic Edit State, revisions, input binding, instance and mask identities, immutable resource references, request replay, and per-edit locking. Slipstream MAY retain pointers and observed facts but MUST NOT retain a second mutable parameter snapshot.
 
@@ -38,7 +38,7 @@ Image-context inspection MUST return actual initialized and reset values and ope
 
 Add and reset MUST initialize for the bound image; clone MUST allocate a distinct stable instance identity. Partial updates MUST preserve omitted values and produce a complete validated revision. Native handles MUST NOT become durable identities.
 
-[Presets and Styles](editing.md#presets-and-styles) owns application semantics. The bridge supplies actual defaults, compatibility, relationship validation, and native legal ordering; the tool resolves mappings and computes the candidate. Slipstream and Web MUST NOT implement another reset or replacement algorithm.
+[Presets and Styles](editing.md#presets-and-styles) owns application semantics. The bridge supplies actual defaults, compatibility, relationship validation, and native legal ordering; the tool resolves mappings and computes the candidate. Slipstream MUST NOT implement another reset or replacement algorithm.
 
 Validation MUST reject wrong types, non-finite or unrepresentable values, invalid integers or enums, overlong strings, wrong array dimensions, unknown fields, and invalid stack or reference structure. Values MUST NOT be coerced, clamped, truncated, or ignored.
 

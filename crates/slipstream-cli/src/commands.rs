@@ -68,6 +68,11 @@ pub fn parse_error_preferences(arguments: &[OsString]) -> ParseErrorPreferences 
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// List or print bundled Agent Skills without contacting a service.
+    Skills {
+        #[command(subcommand)]
+        command: Option<SkillsCommand>,
+    },
     /// Manage real Photo workspace directories and their completed files.
     Workspace {
         #[command(subcommand)]
@@ -116,6 +121,18 @@ pub enum Command {
     Recovery {
         #[command(subcommand)]
         command: RecoveryCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SkillsCommand {
+    /// List every bundled Agent Skill.
+    List,
+    /// Print one bundled Agent Skill as Markdown.
+    Get {
+        /// One lowercase ASCII Skill name separated by hyphens.
+        #[arg(value_name = "NAME", value_parser = nonempty)]
+        name: String,
     },
 }
 

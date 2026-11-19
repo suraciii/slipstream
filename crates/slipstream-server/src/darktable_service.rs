@@ -445,10 +445,7 @@ fn attach(value: &mut Value, photo: &str, workspace: &str, edit: &str) {
         o.insert("photoId".into(), json!(photo));
         o.insert("workspaceId".into(), json!(workspace));
         o.insert("editId".into(), json!(edit));
-        o.insert(
-            "webUrl".into(),
-            json!(format!("/?photoId={photo}&edit=1&editId={edit}")),
-        );
+        o.insert("webUrl".into(), json!(format!("/?photoId={photo}")));
     }
 }
 pub(crate) fn valid_id(value: &str) -> bool {

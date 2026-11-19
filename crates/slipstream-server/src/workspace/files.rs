@@ -45,7 +45,7 @@ impl Record {
 }
 
 fn view(session: &WorkspaceSession, r: &Record) -> Value {
-    json!({"workspaceId":session.workspace.id,"artifactId":r.id,"revision":r.revision(),"relativePath":r.path,"filename":Path::new(&r.path).file_name().and_then(|n|n.to_str()),"path":session.directory.path().join(&r.path),"kind":r.kind,"state":if r.removed {"removed"}else{r.state.as_str()},"byteLength":r.evidence.as_ref().map(|e|e.byte_length),"sha256":r.evidence.as_ref().filter(|_|r.state=="ready"&&!r.removed).map(|e|&e.sha256),"evidence":r.evidence,"imageContract":r.contract,"imageFacts":r.facts,"sourceRevision":r.source,"managed":r.managed,"provenance":r.provenance,"availability":if r.removed {"removed"}else{r.state.as_str()},"webUrl":format!("/?photoId={}&workspaceId={}&artifactId={}",session.workspace.photo_id,session.workspace.id,r.id)})
+    json!({"workspaceId":session.workspace.id,"artifactId":r.id,"revision":r.revision(),"relativePath":r.path,"filename":Path::new(&r.path).file_name().and_then(|n|n.to_str()),"path":session.directory.path().join(&r.path),"kind":r.kind,"state":if r.removed {"removed"}else{r.state.as_str()},"byteLength":r.evidence.as_ref().map(|e|e.byte_length),"sha256":r.evidence.as_ref().filter(|_|r.state=="ready"&&!r.removed).map(|e|&e.sha256),"evidence":r.evidence,"imageContract":r.contract,"imageFacts":r.facts,"sourceRevision":r.source,"managed":r.managed,"provenance":r.provenance,"availability":if r.removed {"removed"}else{r.state.as_str()},"webUrl":format!("/?photoId={}",session.workspace.photo_id)})
 }
 
 pub(super) fn file(session: &WorkspaceSession, id: &str) -> Result<Value> {

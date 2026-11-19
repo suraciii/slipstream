@@ -96,7 +96,7 @@ impl WorkspaceManager {
             "observedSourceRevision":observed_source,"inputMatchesObservedSource":source_matches,
             "workspaceStateToken":token(&session,&inventory)?,"edits":edits,"files":listing,
             "deletionSummary":{"counts":counts,"totalKnownBytes":bytes,"externalDependencies":inventory.get("externalDependencies").cloned().unwrap_or_else(||json!([])),"activeOperations":inventory.get("activeOperations").cloned().unwrap_or_else(||json!([])),"unknown":inventory.get("unknown").cloned().unwrap_or_else(||json!([])),"sample":listing.get("items"),"nextCursor":listing.get("nextCursor")},
-            "webUrl":format!("/?photoId={}&edit=1",session.workspace.photo_id)
+            "webUrl":format!("/?photoId={}",session.workspace.photo_id)
         }))
     }
     pub(crate) fn files(
