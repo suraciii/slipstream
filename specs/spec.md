@@ -32,6 +32,7 @@ One configured Library Folder defines discovery. Each supported Original File is
 | Recover Locations | Preserve identity when the recovery contract admits a moved Original. | [Library Identity](photo-library/identity.md) |
 | Browse | Read-only Original Folders, progressive Grid and Photo views, and Album Resume. | [Library Browser](library-browser/spec.md) |
 | Inspect | A trustworthy Preview with visible source and detail limits. | [Photo Previews](photo-library/previews/spec.md) |
+| Present | A local Preview file for the Agent and a browser Destination for the same Photo. | [Command-Line Use](command-line/spec.md#viewing-photos) |
 | Decide | Independent Selection State and Rating with truthful persistence and conflict outcomes. | [Library Browser](library-browser/spec.md) |
 | Organize | Explicitly ordered Albums without moving files or changing Photo-wide decisions through membership changes. | [Photo Library](photo-library/spec.md) |
 | Continue | Stable identities and addressable Destinations across Web and CLI. | [Browser Experience](library-browser/experience/spec.md) |
@@ -57,7 +58,7 @@ Selection State MUST NOT be inferred from Rating or task-specific Album membersh
 | --- | --- |
 | Editing | Independent headless darktable editing and the fixed standalone Film capability follow [Photo Development](photo-development/spec.md) through the CLI or Agent. The Web Workspace view is file inspection, Download, and removal only. |
 | External tools | An Agent MAY run independently installed processing tools on Photo Workspace files. Slipstream does not install, execute, sandbox, or attest them. |
-| Agent interface | Delegated use is the `slipstream` CLI. The product MUST NOT require an Agent-facing MCP server, plugin runtime, or Slipstream-managed tool installer. |
+| Agent interface | Delegated use is the `slipstream` CLI. The product MUST NOT require an Agent-facing MCP server, MCP App, plugin runtime, or Slipstream-managed tool installer. |
 | Engine availability | The product MUST report deployed operations and limitations; it does not promise every desktop GUI feature or every external tool. |
 | Metadata exchange | Explicit XMP interoperability follows [Read and Save Metadata](photo-library/metadata/spec.md), without authorizing Original writes. |
 | Access | [Instance Access](access/spec.md) owns authentication; public sharing requires a separate product contract. |

@@ -10,7 +10,7 @@ Slipstream MUST expose discoverable, composable operations for delegated use. It
 
 The external Agent owns interpretation, planning, visual judgment, and communication with the Photographer. Slipstream owns valid operations, Original safety, persistence, and truthful results. Model judgments MUST NOT be presented as measured Photo metadata.
 
-The supported delegated interface is the `slipstream` CLI. An Agent with process execution MUST NOT need an MCP adapter, plugin runtime, or service-specific SDK.
+The supported delegated interface is the `slipstream` CLI. An Agent with process execution MUST NOT need an MCP adapter, MCP App, plugin runtime, or service-specific SDK.
 
 Slipstream MUST NOT install, execute, sandbox, or manage external processing tools. The Agent runs them independently on Photo Workspace files.
 
@@ -129,13 +129,21 @@ The CLI MUST NOT offer unbounded query-wide writes. Callers submit explicit boun
 
 ## Viewing Photos
 
-Preview retrieval MUST provide a local JPEG, not only a private server URL. It MUST identify the Photo, Preview Source, actual dimensions, detail limit, source revision, and local path.
+Preview retrieval MUST provide a local JPEG and a browser Destination, not only a Preview derivative URL. It MUST identify the Photo, Preview Source, actual dimensions, detail limit, source revision, and local path.
+
+The local JPEG supports Agent inspection and presentation. The browser Destination supports interactive review in the Web.
 
 [Photo Previews](../photo-library/previews/spec.md) owns source selection and quality. A thumbnail MUST NOT be described as precise focus evidence, and the CLI MUST NOT substitute a sibling JPEG, develop RAW data, upscale evidence, or silently return stale data.
 
 The caller chooses the output path. The CLI MUST refuse an existing file or symbolic link and MUST NOT truncate or replace a local Original. [Preview Transfer](design.md#preview-transfer-and-local-files) owns publication and failure handling.
 
-One command downloads one image; the Agent chooses what to inspect. Preview reads MUST NOT change decisions, membership, or saved browsing position, precompute the Library, or upload images elsewhere.
+One command downloads one image; the Agent chooses what to inspect.
+
+The local JPEG and Destination MUST identify the same Photo.
+
+The Agent SHOULD present the local JPEG when it can display images. It SHOULD offer the browser Destination for interactive review.
+
+Preview reads MUST NOT change decisions, membership, or saved browsing position, precompute the Library, or upload images elsewhere.
 
 ## Changing Photo Decisions
 

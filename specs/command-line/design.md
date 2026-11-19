@@ -30,6 +30,8 @@ A darktable state token guards canonical tool state, a saved revision identifies
 
 The CLI is the complete delegated interface. The client MUST NOT require an Agent-facing MCP server, plugin runtime, external-tool installer, or service-specific Agent SDK.
 
+Visual handoff uses the caller-local Preview file and browser Destination specified by [Command-Line Use](spec.md#viewing-photos). It does not require an MCP App.
+
 Agent Skills are static natural-language Markdown assets embedded in the client. The service MUST NOT serve, generate, or version them separately.
 
 Command Manual text and Skills are both offline client assets. The command grammar used for parsing is the single source for option names, defaults, and limits; a Skill MUST refer to that grammar rather than restate it.
