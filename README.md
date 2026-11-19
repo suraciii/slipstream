@@ -26,16 +26,17 @@ an unencrypted connection warning. Authentication is required on both transports
 - In Photo View, **More** groups Review, Photo, Library, and Help. Swipe
   feedback appears only while a gesture is active. The visible review controls
   remain available without gestures.
-- **Edit** shows the Photo's Camera reference when available. It is not an Edit
-  Preview or proof that an editing tool can run. Inspect tool availability and
-  select a tool explicitly; opening Edit does not render a result.
+- **Workspace** opens the Photo's Workspace file view. It shows the protected
+  input and completed files for inspection, Download, and Remove. It does not
+  start a tool or edit a Photo; editing stays with the CLI or Agent.
 - Open **Trash** from View options to inspect removed Photos and Restore them.
   Location output identifies its server-side namespace. Record cleanup never
   deletes Original Files.
 
 See [Library Browser Experience](specs/library-browser/experience/spec.md) for
 navigation and accessibility, [Photo Workspace](specs/photo-development/workspace/spec.md)
-for editing, and [Trash](specs/photo-library/trash/spec.md) for recovery boundaries.
+for workspace handoff and file management, and [Trash](specs/photo-library/trash/spec.md)
+for recovery boundaries.
 
 ## License
 

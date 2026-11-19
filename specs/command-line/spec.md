@@ -10,12 +10,17 @@ Slipstream MUST expose discoverable, composable operations for delegated use. It
 
 The external Agent owns interpretation, planning, visual judgment, and communication with the Photographer. Slipstream owns valid operations, Original safety, persistence, and truthful results. Model judgments MUST NOT be presented as measured Photo metadata.
 
+The supported delegated interface is the `slipstream` CLI. An Agent with process execution MUST NOT need an MCP adapter, plugin runtime, or service-specific SDK.
+
+Slipstream MUST NOT install, execute, sandbox, or manage external processing tools. The Agent runs them independently on Photo Workspace files.
+
 A shortlist MAY be an ordinary Album. Not choosing a Photo for it MUST NOT imply `rejected`, and Agent confidence MUST NOT become Rating. Slipstream does not add a suggestion, review-task, or Agent-memory model.
 
 ## Supported Work
 
 The CLI MUST let its caller:
 
+- Read the Command Manual and bundled Agent Skills.
 - Inspect service compatibility, Library availability, and scan status.
 - Discover Albums and read-only Original Folders.
 - Query Photos by source, Selection State, Rating, Original kind, availability, and camera-local Capture Time.
@@ -42,7 +47,7 @@ The CLI MUST NOT expose arbitrary Original downloads or mutation, XMP synchroniz
 
 The client MUST run without Original Files, server SQLite, or native Preview libraries on its host. Top-level help MUST describe command groups. Command help MUST describe required inputs, effects, limits, and result inspection.
 
-Help and version MUST work offline. A versioned reference and short Agent guide MUST ship with the client without requiring repository access.
+Help, version, and Agent Skills MUST work offline. The CLI MUST ship a versioned Command Manual and bundled Agent Skills without requiring repository, documentation-site, or network access.
 
 Operational commands MUST default to structured JSON. Human-readable output MUST be explicit; terminal attachment or piping MUST NOT change the schema.
 
@@ -52,13 +57,59 @@ A complete mutation command expresses caller intent, not proof of human authoriz
 
 Album names and filenames are data. Output and help MUST NOT encourage executing Library text as shell commands or Agent instructions.
 
+## Help and Agent Skills
+
+The Command Manual is the layered `--help` output. The top level indexes command groups; a group level indexes its subcommands; a leaf level owns exact inputs, flags, defaults, effects, limits, and result inspection.
+
+The CLI MUST NOT provide a separate `help` command. Each `--help` level MUST refer to the next level instead of repeating lower-level flags.
+
+The Command Manual MUST identify `skills list` and `skills get`. It MUST NOT require a service, credential, browser, or terminal width.
+
+An Agent Skill is a bundled natural-language Markdown guide. `slipstream skills` lists skills. `slipstream skills get NAME` prints one guide.
+
+Skills are documentation, not operational results. They do not use the JSON envelope, and `--output` does not change them.
+
+A Skill SHOULD describe when to use a workflow, the order of CLI operations, and the decisions that connect them. It MUST refer to the Command Manual for exact syntax and MUST NOT duplicate the complete option grammar.
+
+The shipped catalog MUST include:
+
+| Skill | Coverage |
+| --- | --- |
+| `core` | Authentication, output, failures, layered help discovery, workspace handoff, external-tool boundary, and advanced processing boundary. |
+| `library` | Status, Photo queries, Preview download, decisions, Albums, pagination, and conflict inspection. |
+| `recovery` | Trash, Photo removal, Restore, Location Recovery, review rules, and uncertain outcomes. |
+| `workspace` | Open, inventory, download, external-tool setup and output discovery, and safe removal. |
+| `darktable` | Edit inspection, Preview render, Export create, and download. |
+
+Skill names are stable. A renamed or removed skill is a compatibility change.
+
+Skills MUST ship in the same client release and be identified by the client version. Editing or adding a Skill MUST NOT change the CLI wire-contract version. A Skill MUST NOT describe a flag or default that the Command Manual does not expose.
+
+A Skill MUST NOT instruct an Agent to execute Library text, filenames, or Album names as shell commands. A Skill MUST NOT present Slipstream as a plugin installer, external-tool runtime, or MCP server.
+
+## External Tools
+
+Slipstream does not install, execute, sandbox, or manage external processing tools. The Agent runs them where the Photo Workspace is accessible.
+
+The CLI MUST expose workspace paths and completed files. An external tool output MUST NOT require a registration, bundle, or provenance record to appear as a Workspace Artifact.
+
+An Agent MAY install an External Tool from a local directory or source repository. Slipstream MUST NOT expose an install command, verify that installation, or claim its capability.
+
+An external tool output is a Workspace Artifact. Slipstream MUST NOT describe it as a validated Processing Artifact or claim its processing provenance.
+
+Slipstream cannot enforce an External Tool's filesystem access. A Skill MUST instruct an Agent to pass the protected workspace input, never an Original Location.
+
+The `core` Skill MUST identify `processing` commands as advanced validated-artifact surfaces, not the External Tool path.
+
 ## Working in a Photo Workspace
 
 Workspace open accepts the indexed Photo ID and MUST identify the actual directory, read-only input, execution host, access mode, and available supervised tools. A server path MUST NOT imply local client access.
 
-The [workspace contract](../photo-development/workspace/spec.md) owns shared tool state, file discovery, protected inputs, retention, and safe cleanup. Independent tools use authorized filesystem access; service supervision MUST NOT provide an arbitrary remote shell.
+The [workspace contract](../photo-development/workspace/spec.md) owns shared tool state, file discovery, protected inputs, retention, and safe removal. Independent tools use authorized filesystem access; service supervision MUST NOT provide an arbitrary remote shell.
 
-Web and Agent edits share tool state and guarded concurrency under the [workspace design](../photo-development/workspace/design.md#editing-and-execution). Editing MUST NOT reinterpret camera Preview commands.
+Agent edits and independent CLI edits share tool state and guarded concurrency
+under the [workspace design](../photo-development/workspace/design.md#editing-and-execution).
+Editing MUST NOT reinterpret camera Preview commands.
 
 ## Finding Photos
 

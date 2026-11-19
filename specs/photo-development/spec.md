@@ -20,6 +20,12 @@ development; standalone SpektraFilm provides negative, print, and scan simulatio
 
 The SpektraFilm integration inside darktable is not the standalone module.
 
+An external tool is not a Processing Engine, Processing Module, or Slipstream-supervised process. It runs independently on Photo Workspace files under Agent control.
+
+darktable and standalone SpektraFilm remain first-party Processing Engines. They are not External Tools.
+
+An External Tool installed from a local directory or source repository remains Agent-owned. Slipstream MUST NOT claim that installation as a capability or qualification.
+
 Slipstream MUST NOT impose an order, automatically chain modules, or insert a
 conversion.
 
@@ -111,15 +117,10 @@ Input orientation MUST be respected without requiring a rotation edit.
 
 Parameters belong to the selected tool's on-disk state.
 
-Slipstream MAY index its
-location and present a projection for the Web, but MUST NOT maintain a competing
-parameter source of truth.
+Slipstream MAY index its location and expose bounded inspection through the Agent
+interface, but MUST NOT maintain a competing parameter source of truth.
 
-Inspecting another tool's result MUST NOT change the
-saved state.
-
-Optional Web controls MUST invoke the same tool against that same
-state and preserve settings they cannot display.
+Inspecting another tool's result MUST NOT change the saved state.
 
 Automatic adjustments are explicit actions.
 
@@ -130,193 +131,44 @@ values without independently rerunning the detector.
 A failed action or stale
 revision leaves the saved state unchanged.
 
-## Editing Workspace
+## Agent and CLI Workspace Handoff
 
-[Photo Workspace](workspace/spec.md) owns entry, file presentation, input selection,
-tool launch, downloads, and Continue processing.
+[Photo Workspace](workspace/spec.md) owns entry, file presentation, input
+selection, tool launch, downloads, and Continue processing. [Web Workspace
+View](workspace/web.md) owns browser file inspection, Download, and removal.
 
-A module choice MUST explain
-unavailable input support, engine dependencies, and execution capacity separately.
-
-Editing gestures MUST NOT change Library selection or navigate Photos.
-
-The
-Original reference shows the camera-produced Preview, not a tool result.
-
-Entering Edit MUST NOT require a Preview, reset saved state, or require a
+Opening a workspace MUST NOT require a Preview, reset saved state, or require a
 file-manager sequence.
 
-Browser controls MUST remain usable by keyboard and touch.
-
-[Photo Workspace](workspace/spec.md#web-interaction) owns their presentation.
-
-The workspace MUST distinguish save status from Preview status.
-
-A previous
-Preview MAY remain visible while rendering, but MUST be marked stale.
-
-Current
-status depends on the input and saved tool revision, not filename or arrival time.
-
-When settings are saved while a Preview is rendering, the editor MUST request a
-Preview of the newest confirmed revision after the older render settles.
-
-An
-older completion MUST NOT replace that current result.
-
-A failed Preview MUST
-remain an explicit failure with a retry action rather than trigger repeated
-automatic execution.
-
-After a render completes, a temporary workspace lease can delay file discovery.
-
-The editor MUST keep checking the completed file until discovery can proceed,
-without reporting an engine failure or submitting another render.
-
 Library scanning, live Original availability, workspace input availability, and
-tool availability are independent.
+tool availability are independent. A missing or changed live Original MUST NOT
+disable editing or Export while the input snapshot remains available.
 
-Once the input snapshot is complete and
-unchanged, a missing or changed live Original MUST NOT disable its editing or
-Export.
+An unavailable workspace input MUST preserve saved state and earlier outputs and
+MUST name the unavailable dependency.
 
-An unavailable workspace input MUST preserve state and earlier outputs
-and explain the unavailable dependency.
+Editing MUST NOT change Library selection, Rating, Album membership, or browsing
+position.
 
-Browsing thumbnails, Selection State,
-Rating, Album membership, and browsing position remain independent of editing.
+When a caller selects a retained Processing Artifact as input, that Artifact is
+the explicit input identity. The tool MUST NOT reopen or re-stage the upstream
+Original, mutate upstream state, or assume a latest result.
 
-The Grid's saved-edit indicator reflects retained tool state, even if it equals
-the baseline or cannot currently execute.
+## Tool History
 
-The workspace identifies the current Engine, input, and Controls in plain
-language.
+[History and Recovery](darktable/editing.md#history-and-recovery) owns retained
+tool revisions and restore.
 
-It distinguishes edit-state saving, saved, conflict, and failure
-from Preview updating, current, stale, and failure.
+A revision restore MUST NOT be presented as Library Browser Undo or Redo.
 
-Technical evidence such as revision tokens, request identities, and diagnostic processing reasons stays behind an optional details affordance.
-
-Actionable status and refusals remain visible as specified by [Web Interaction](workspace/spec.md#web-interaction).
-
-The primary flow uses editing state, editing TIFF,
-and output language.
-
-The current image and comparison controls MUST stay visible while the
-Photographer operates or scrolls editing controls.
-
-Wide layouts place image
-and controls beside each other; narrow layouts retain an image region above
-independently scrolling controls.
-
-When selected and available, the Original reference MUST show the camera Preview inside this workspace at normal visibility, explicitly labelled as reference.
-
-No saved Edit State is a start state, not an Edit Preview failure.
-
-Controls and explanations MUST fit without horizontal scrolling or clipping.
-
-Undo, Redo, save feedback, and conflict recovery belong beside the primary
-controls rather than inside a technical disclosure.
-
-Edit availability reports these independent facts:
-
-- Whether the selected Processing Engine admits the workspace input.
-- Whether the Library is scanning or recovering.
-- Whether the Photo's live Original File currently reads.
-
-A recovering Library or a busy Engine MUST NOT be presented as an unreadable Original.
-
-The live Original fact does not disable editing or Export when the workspace input snapshot remains available.
-
-When a service accepts a retained Processing Artifact, that Artifact is the explicit input identity for the selected tool's canonical Edit State.
-
-The tool uses the Artifact's actual image contract and workspace retention state; it MUST NOT reopen or re-stage the upstream Original, mutate upstream state, or assume a latest result.
-
-If the workspace input itself is missing or unreadable, the workspace preserves saved Edit State and prior Artifacts and reports the unavailable dependency.
-
-## Autosave and Reversible Editing
-
-One completed pointer drag, committed numeric entry, or settled keyboard
-adjustment is one Web edit action.
-
-The Web MUST save it through the tool without
-a Save button or a write for every intermediate pointer position.
-
-Saved means
-the tool confirmed the corresponding atomic on-disk revision.
-
-A late response
-MUST NOT mark later settings saved.
-
-A navigation MUST retain ownership of an
-already submitted save without changing another Photo's controls.
-
-Unconfirmed browser settings remain a draft.
-
-Bounded browser recovery MAY retain
-it, but MUST disclose when reload recovery is unavailable.
-
-A draft MUST NOT
-silently override the on-disk state.
-
-Reopening restores the tool's confirmed
-state, not a separately maintained Web recipe.
-
-The Web MUST submit the revision it observed.
-
-A stale write stops autosave for
-that state and retains the draft.
-
-The Photographer MAY use the newly saved state
-or explicitly reapply the draft against its newly observed revision; this can
-conflict again.
-
-A busy state MUST report bounded waiting or refusal.
-
-Separate
-state directories MUST NOT conflict merely because they share a workspace.
-
-Recovered settings remain local drafts until the selected tool confirms them.
-
-Undo and redo in the browser submit new guarded updates for edit actions; the tool's retained history and restore semantics remain authoritative across sessions.
-
-Primary exposure changes, individual resets, and compatibility edits share one chronological edit history per Photo through the selected tool's saved state.
-
-An external revision invalidates history entries that can no longer be applied safely; it MUST NOT erase a local action merely because that action was confirmed by the tool.
-
-Undo and redo apply completed actions through the same guarded state history.
-
-[History and Recovery](darktable/editing.md#history-and-recovery) owns darktable's
-retained revisions and restore.
-
-An uncertain mutation MUST be reconciled with
-its original request identity before dependent writes proceed; equality of
-current values is not proof that the request completed.
-
-Two reversible operations share the editing surface and MUST NOT be conflated:
-
-- **Session Undo and Redo** are browser-local over the drafted Edit State and
-  available without reopening the tool. Each submits a guarded update with a new
-  request identity through the per-edit queue and appends to the chronological
-  edit history.
-- **Retained revision restore** selects an earlier confirmed tool-owned revision.
-  It MAY select a revision the current draft never visited.
-
-Both stay beside the primary controls so the Photographer does not leave the image to reverse a change.
-
-A revision restore MUST NOT be labeled Undo or Redo. Session Undo and Redo
-MUST NOT be labeled as history restore; their owners, scope, and outcomes differ.
+An uncertain mutation MUST be reconciled with its original request identity
+before dependent writes proceed; equal current values do not prove completion.
 
 ## Preview Behavior
 
-Controls MUST respond immediately; preview generation follows confirmed edits.
+Rendering failure MUST NOT discard saved state.
 
-The previous complete preview stays visible while a replacement is pending or
-fails.
-
-Rendering failure MUST NOT discard saved state or a recoverable draft.
-
-Late, cancelled, or obsolete results MUST NOT replace the current view.
+Late, cancelled, or obsolete results MUST NOT be reported as current.
 
 An Edit Preview captures a saved tool revision, input revision, rendition
 geometry, processing assets, and display conversion.
@@ -421,25 +273,12 @@ Workspace retention is governed by [Photo Workspace](workspace/spec.md), explici
 
 A run receipt or cache lifetime MUST NOT expire or delete a confirmed output, saved state, or required input.
 
-If a retained file is removed, the primary Download location MUST identify that it is unavailable and MUST NOT offer an enabled Download action.
-
-The primary Download location shows whether an output uses earlier settings.
-
-Provenance identifiers and image-contract details remain available through an optional disclosure.
-
-The Web uses plain status such as Exporting and Ready to download.
-
-Output cards
-identify available filename, size, time, tool, dimensions, and verified image
-facts; missing provenance stays unknown.
-
-An earlier-state output remains
-available with that fact shown.
+An unavailable retained file MUST NOT offer an enabled Download action.
 
 New failures MUST NOT hide previous files.
 
-Download and Continue processing are actions on a completed identified file;
-Continue processing checks the chosen next tool's compatibility and does not
+Download is an action on a completed identified file. Continue processing is a
+CLI or Agent action that checks the chosen next tool's compatibility and does not
 implicitly rerun an upstream edit.
 
 Outputs MUST NOT create Photos or Albums.
@@ -449,11 +288,11 @@ A standalone command owns its synchronous process lifetime.
 Returning or losing
 its output does not imply a service-owned background task.
 
-Slipstream MAY
-supervise that same tool for Web execution; its accepted-work tracking MUST
-truthfully distinguish running, interrupted, completed, and uncertain outcomes.
+Slipstream MAY supervise that same tool for a CLI or Agent request; its
+accepted-work tracking MUST truthfully distinguish running, interrupted,
+completed, and uncertain outcomes.
 
-A browser departure need not stop supervised work.
+A client departure need not stop supervised work.
 
 Neither mode MAY claim that
 an interrupted process survives a machine restart.
@@ -567,9 +406,9 @@ under [Photo Workspace](workspace/spec.md).
 
 Each execution environment has finite memory and computing capacity.
 
-Supervised
-Web work MUST obey configured admission and report waiting separately from
-running; standalone execution MUST disclose its own execution limits.
+Service-supervised work MUST obey configured admission and report waiting
+separately from running; standalone execution MUST disclose its own execution
+limits.
 
 A lock on
 one edit state MUST NOT serialize all independent workspace edits or unrelated
@@ -597,7 +436,7 @@ capacity MUST NOT change a successfully rendered look.
 
 ## Failure and Retention
 
-Workspace retention, cleanup, download integrity, and explicit deletion follow
+Workspace retention, download integrity, and explicit deletion follow
 [Photo Workspace](workspace/spec.md).
 
 Needed inputs, saved state, referenced

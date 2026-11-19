@@ -438,85 +438,35 @@ A batch Undo is one settlement family of sequential single-Photo compare-and-set
 
 A batch Undo never navigates: the change it restores never advanced away from a Photo.
 
-### Edit Recipe reads and guarded saves
+### Workspace files and downloads
 
-An Edit Recipe read is owned by the Photo scope with key `(requestGeneration, photoId, recipe)`.
+A Workspace file read is owned by the Photo scope with key
+`(requestGeneration, photoId, workspace, cursor)`.
 
-It starts when a Photo's Develop surface opens; the Photo scope aborts it on Photo or source change, and a stale read writes neither controls nor committed state.
+The Web Workspace view uses the existing workspace open operation to create or
+reuse the default workspace and input. That operation is Photo-scoped; a newer
+Photo or source supersedes presentation, while an admitted open settles.
 
-Readiness is represented by independent source-support, processing-capability, and preview-result axes: `read-pending` and `resource-unavailable` are retryable waits, not evidence that the Original is unreadable.
+The following file read starts when the view opens. It resolves the current
+workspace association and indexed files. A cursor continuation uses the same
+scope. A newer cursor, Photo, source, or workspace change supersedes it; a stale
+read writes no files or status.
 
-Reads for the same Photo and source revision join one in-flight request; a successful publication advance invalidates that request's captured facts and schedules one replacement read rather than creating parallel reads.
+Readiness separates workspace availability, input availability, and file
+readiness. A missing Original or failed preparation is a disclosed state, not a
+reason to start a tool.
 
-A save is an admitted write with settlement-family key `(photoId, recipe-write)`. The newest save for that Photo owns the Develop notice and its connectivity presentation.
+A file download is a browser-managed byte transfer owned by the Photo scope and
+the current workspace/file revision. It follows the Browser image transfer
+rules. A completion writes only while the Photo, workspace, and file revision
+remain current.
 
-A superseded save stays locally silent; its committed revision remains observable through the recipe read.
+Remove is an admitted workspace write owned by the Photo scope. It settles once.
+A changed scope or named dependency refuses without a fresh confirmation. An
+unknown outcome is reconciled from workspace file facts, never by repeating the
+removal with a new identity.
 
-The client coalesces edits during one gesture and sends one save per settled gesture through a single per-Photo queue; a settled gesture waits behind an in-flight save instead of running concurrently.
-
-Each queued write carries the stable request identity captured for it and the revisions the Photographer observed; identity is never regenerated for a retry.
-
-`recipe_conflict`, `source_changed`, and `requires_rebind` present current server facts and require an explicit Photographer action before a further write; they never silently adopt the newer revision or the newer source.
-
-An `unknown` outcome keeps the pending draft and offers retry under the same identity. `unsupported`, `invalid_settings`, `unavailable`, and transport failures keep the last committed revisions in the controls and never claim the draft was saved.
-
-Session undo, redo, and reset are browser-local over drafted settings; none is a save until the next settled write.
-
-Each session undo, redo, or reset becomes one guarded write through the same per-edit queue as an ordinary edit. It uses a new request identity and settles as its own operation.
-
-The tool's confirmed state records the reversal exactly as it records a slider change.
-
-A revision restore from the tool's retained history is a separate tool-owned operation with its own request identity and is never presented or submitted as a session undo, redo, or reset.
-
-An `unavailable` read or refusal carries the closed `supportReason`.
-
-A retryable reason (`read-pending`, `resource-unavailable`) presents a wait state: the Develop surface keeps its last committed revisions read-only with a retry or refresh action and re-reads later; it never presents the source as unreadable.
-
-A confirmed reason (`original-missing`, `original-unreadable`) presents the permanent read failure.
-
-The Develop surface keeps the engine, Library, and Photo axes separate — capability note, scan status, and source reason each name their own condition — and native-work saturation never downgrades a supported Photo's presentation.
-
-An Edit Preview request is owned by the Photo and selected Processing Step scope with key `(requestGeneration, photoId, step, identity)`.
-
-The identity includes the exact staged/input byte digest and size, the input artifact or guarded source binding, selected module and adapter/schema version, complete parameter snapshot or digest, bounded Preview geometry, processing bundle, and display conversion.
-
-An Original's guarded source revision remains a separate source guard; it does not replace the exact byte evidence in the identity.
-
-Requests with the same full identity coalesce.
-
-A changed identity supersedes the older request locally without claiming to cancel admitted server work, and displays the last image as stale while the replacement is pending.
-
-A superseded result never publishes, including one whose source revision is unchanged but whose selected module, parameter digest, artifact input, or proxy digest changed.
-
-The rendered image retains explicit provenance: Original-backed, Processing-Artifact-backed, and development-proxy-backed results are distinct facts.
-
-A proxy-backed result is labelled as such rather than presented as full-resolution Original evidence.
-
-A refusal names the selected module, input compatibility, and reason.
-
-Preview failure never changes Originals, committed recipe intent, or a published artifact.
-
-### Export submission and lifecycle
-
-Export submit, inspect, cancel, and retry are owned by the Photo scope with settlement-family key `(photoId, export-command)`.
-
-Submission captures the revisions the Photographer observed and renders its returned snapshot, and is admitted only against a confirmed save; an `unknown` save outcome is reconciled first.
-
-A submit that loses its response presents an `unknown` outcome and resolves by inspecting that Photo's current Exports, never by resubmitting with a fresh identity.
-
-Cancellation settles once against the returned state, and a result that raced it is presented as the actual terminal outcome.
-
-Inspection polling stops with the Photo scope, and a later poll never refreshes controls for a superseded identity.
-
-### Artifact downloads
-
-An artifact download is a browser-managed byte transfer owned by the Photo scope and follows the Browser image transfer rules. Before its scope halts or the element is replaced, the client removes the pending transfer and its handlers.
-
-A completion writes only while the download record and Photo identity remain current.
-
-The Develop surface discloses the artifact's expiry from Export metadata.
-
-A download requested after expiry presents `artifact_expired` and never implies that settings or the artifact changed.
+The view MUST NOT read or write Edit State, recipe, Preview, or Export records.
 
 ### Saved Album position
 
@@ -606,19 +556,17 @@ Opening a Photo creates a new Photo scope and aborts Grid-speculative work. If t
 
 If still current, it renders facts and starts current Preview. It sends saved position only while still current immediately before send; once sent, that write always settles.
 
-### Opening an Edit surface
+### Opening the Workspace view
 
-Opening a Photo's Edit surface opens or resumes its Photo Workspace and reads
-the selected tool's canonical file state. It starts no rendering. Each settled
-gesture sends one guarded tool mutation through the per-edit queue; a preview
-refresh starts only for the committed revision and only while the Photo scope,
-selected edit, and that revision remain current.
+Opening the Web Workspace view admits the default Workspace open and starts a
+Workspace file read for the current Photo. It starts no tool, rendering, or edit
+mutation. Selecting a file starts no read beyond the current file list.
 
-### Submitting an Export
+### Downloading a workspace file
 
-Submitting an Export is the admitted submission followed, while the Photo
-scope and the captured identity remain current, by inspection polling until a
-terminal state. Cancelling replaces inspection for that Export only.
+Starting a download is a browser-managed transfer for the current file revision.
+A Photo, workspace, or file revision change cancels presentation; the transfer
+settles independently under the Browser image transfer rules.
 
 ### Reopening an expired source
 

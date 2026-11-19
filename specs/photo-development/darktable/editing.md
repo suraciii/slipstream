@@ -16,9 +16,9 @@ Supported operations MUST use a general language rather than a bespoke command f
 
 The tool owns on-disk state, validation, mutation guards, history, rendering, and local file completion. darktable owns algorithms and valid operation relationships. Slipstream owns Library identity, workspace association, file indexing, access, and supervised invocation.
 
-An external Agent owns editing decisions and workflow order. Neither component MUST embed a model, chat interface, planner, or Agent runtime. Web and CLI MUST use the same tool-owned JSON state, retained resources, and revisions.
+An external Agent owns editing decisions and workflow order. Neither component MUST embed a model, chat interface, planner, or Agent runtime. All callers MUST use the same tool-owned JSON state, retained resources, and revisions.
 
-A partial Web control MUST preserve objects and settings it does not edit and identify state it cannot present. Editing MUST NOT change Rating, Selection State, Album membership, Photo identity, or browsing position.
+Editing MUST NOT change Rating, Selection State, Album membership, Photo identity, or browsing position.
 
 Discovery MUST distinguish readable settings, supported mutations, and executable results. Missing mappings, actions, assets, or output capabilities MUST have specific reasons and recovery actions. A complete schema alone does not qualify a control.
 
@@ -66,7 +66,7 @@ A mutation MUST address an explicit state and intended change. Assignment is abs
 
 Related instance, parameter, mask, blending, and output changes MAY form one bounded atomic mutation. Validation MUST evaluate the resulting combination; any failure MUST preserve the complete prior state.
 
-Writes use a per-state lock and revision. Web and other callers acting on observed state MUST supply the expected revision. A stale guard MUST conflict; independent states MUST NOT be locked merely because they share a workspace.
+Writes use a per-state lock and revision. Callers acting on observed state MUST supply the expected revision. A stale guard MUST conflict; independent states MUST NOT be locked merely because they share a workspace.
 
 [CLI mutation rules](cli.md#atomic-editing) own bounded waiting, no-guard convenience, and exact-request recovery.
 
@@ -102,7 +102,7 @@ Resources, Module Presets, and Styles belong to tool-owned catalogs. The state d
 
 An unscoped catalog command selects the standalone user catalog or the supervised tool's configured catalog; the selection MUST be disclosed. A scoped command selects only the named edit-local catalog.
 
-Multiple edits require explicit selection; reads MUST NOT initialize or choose an edit by recency or Web selection. Ambient desktop catalogs MUST NOT be read.
+Multiple edits require explicit selection; reads MUST NOT initialize or choose an edit by recency or Library selection. Ambient desktop catalogs MUST NOT be read.
 
 Save and apply default to the target edit-local catalog. An explicit global selection resolves definitions and new resource references in the executing tool's disclosed user or configured catalog. Atomic validation and application MUST use one selected catalog for all new references.
 

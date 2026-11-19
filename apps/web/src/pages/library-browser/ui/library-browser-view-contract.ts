@@ -1,4 +1,4 @@
-import type { EditorIntent } from "../model/editor-intent-contract.js";
+import type { WorkspaceIntent } from "../model/workspace-intent-contract.js";
 import type { RecoveryApplyMapping } from "../model/recovery-review.js";
 import type { GridPhotoViewModel } from "./grid-cell-presenter.js";
 
@@ -80,7 +80,7 @@ export type GridProgressViewModel = Readonly<{
 }>;
 
 export type LibraryBrowserIntent =
-  | EditorIntent
+  | WorkspaceIntent
   | Readonly<{ kind: "summary-action"; presentationId: number }>
   | Readonly<{ kind: "sign-out" }>
   /// Commits the View options draft once. A size-only change never reaches the

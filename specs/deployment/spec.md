@@ -132,6 +132,8 @@ Photo Workspace directories are durable state outside cache and native scratch. 
 
 [Photo Workspace](../photo-development/workspace/spec.md) owns file lifetime and recovery. Independent tools MUST use the disclosed execution namespace or authorized filesystem access with explicit path mapping; a remote API client MUST NOT assume a server path is local.
 
+The deployment MUST NOT install, manage, or execute an [External Tool](../../CONTEXT.md#agent-use). Built-in Processing Engines remain deployment assets. An Agent-owned External Tool runs outside the application container and uses Photo Workspace files through authorized filesystem access.
+
 Service-supervised development requests serialize, with at most one running and later requests queued. Independent CLI processes obey their own resource bounds and are not serialized by the service queue.
 
 The service and engine share finite container memory and CPU without per-attempt isolation. An engine failure can stop the application; the ordinary restart path recovers. [Processing Memory](../photo-development/processing/memory.md) owns resource details.

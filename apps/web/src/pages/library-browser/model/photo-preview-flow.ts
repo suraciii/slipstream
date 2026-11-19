@@ -23,8 +23,6 @@ export type PhotoPreviewFlowDependencies = Readonly<{
     readonly total: number;
     photoAt(index: number): PhotoSummary | undefined;
   }>;
-  currentPhotoId: () => string | undefined;
-  editorReferenceChanged: (photoId: string) => void;
   failPhotoRecovery: (
     authority: PhotoAuthority,
     surface: "preview",
@@ -112,8 +110,6 @@ export function createPhotoPreviewFlow(
       return false;
     }
     if (!photoOwner.isCurrent(authority)) return false;
-    const photoId = dependencies.currentPhotoId();
-    if (photoId) dependencies.editorReferenceChanged(photoId);
     if (outcome.kind === "not-ready") {
       if (view.isPhotoStatusSurfaceCurrent(capturedStatus))
         view.setPhotoStatus(outcome.preview.message ?? "Preview unavailable");

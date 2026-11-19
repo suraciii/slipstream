@@ -43,6 +43,62 @@ Unknown keys, duplicate JSON object keys, duplicate Photo IDs, trailing content,
 
 Except Trash Record Cleanup, a mutation contains at most 100 Photo IDs. The CLI MUST NOT split it automatically. Local input-file failures perform no write.
 
+## Command Manual
+
+The Command Manual is the built-in `--help` text. It has three levels.
+
+```text literal
+slipstream --help
+slipstream GROUP --help
+slipstream GROUP SUBCOMMAND --help
+```
+
+The CLI MUST NOT provide a separate `help` command.
+
+Top-level help states the product purpose, command groups, global options, Agent Skills, and one starting workflow. It MUST NOT enumerate leaf-command flags.
+
+Group help states the group purpose, its subcommands, shared constraints, and one example. It MUST NOT repeat leaf flags or defaults.
+
+Leaf help states exact inputs, flags, defaults, effects, finite limits, result inspection, and one example. It MUST NOT repeat parent-level command-group guidance.
+
+Each level refers the caller to the next level. The leaf level owns exact syntax.
+
+Help requires no service, credential, browser, or pager. It is plain text; `--output` does not change it.
+
+Help MUST distinguish Location Recovery from Trash Restore. It MUST describe mutation limits and how to inspect an uncertain result.
+
+The Command Manual is the syntax authority. Agent Skills MUST refer to it for exact options and defaults.
+
+## Agent Skills
+
+```text literal
+slipstream skills
+slipstream skills list
+slipstream skills get NAME
+```
+
+`skills` and `skills list` are equivalent. They print one line per bundled Agent Skill.
+
+```text
+core — Core agent workflow
+library — Find, inspect, and decide
+workspace — Work in a Photo Workspace
+darktable — Edit, preview, and export with darktable
+recovery — Trash, removal, Restore, and Location Recovery
+```
+
+`skills get NAME` prints the Skill's Markdown content exactly. It adds no JSON envelope and no `Success` wrapper.
+
+Skills are documentation, not operational results. `--output` does not change `skills` or `skills get` output.
+
+Skills MUST work without a service, credential, network, or repository. They MUST NOT resolve or send an Access Token.
+
+An unknown or empty `NAME` is `invalid_input`. Skill names are lowercase ASCII words separated by `-`.
+
+The shipped catalog is `core`, `library`, `workspace`, `darktable`, and `recovery`. [Agent Skills](skills.md) owns their required coverage and authority.
+
+Skill text MUST NOT define a flag, default, or limit that the Command Manual does not expose. It MUST refer the caller to `--help` for exact syntax.
+
 ## Instance Credentials
 
 The CLI sends a generated Access Token from a private file only in the Authorization header to the selected origin. The file MUST contain exactly one base64url token, optionally followed by one line ending.

@@ -147,10 +147,28 @@ The content used for a Preview: `jpeg-original` or `raw-embedded-jpeg`. The lega
 **Detail Review**:
 Magnified Preview inspection for focus, motion, or expression. It is a Preview Zoom state in Photo View, not a separate mode. Its detail is limited by the Preview resolution.
 
+## Agent Use
+
+**Agent**:
+The external software that interprets a Photographer's request, composes Slipstream and external-tool operations, and reports its work. An Agent is not part of Slipstream and owns its model, prompts, and conversation.
+_Avoid_: assistant, bot, internal agent
+
+**Command Manual**:
+The layered offline `--help` text at the top level, command group, and leaf command. It owns exact command names, options, defaults, effects, limits, and result inspection. It is the CLI syntax authority; there is no separate `help` command.
+_Avoid_: documentation site, skill text
+
+**Agent Skill**:
+A bundled, versioned natural-language Markdown guide exposed through `slipstream skills`. It explains when and how to compose CLI operations and defers exact syntax to the Command Manual.
+_Avoid_: prompt, plugin, command reference
+
+**External Tool**:
+A photo-processing program that Slipstream does not install, execute, sandbox, or manage. An Agent runs it directly on Photo Workspace files; its completed files are Workspace Artifacts. Its local directory or source repository is an Agent-owned setup source, not a Slipstream installation.
+_Avoid_: plugin, extension, Processing Engine
+
 ## Development
 
 **Photo Workspace**:
-A persistent directory associated with one Photo that holds its protected input snapshots, tool editing state, and processing files. Tools read and write files there; the Web Edit view presents that same directory.
+A persistent directory associated with one Photo that holds its protected input snapshots, tool editing state, and processing files. Tools read and write files there; the Web Workspace view exposes those files for inspection, download, and removal without editing.
 _Avoid_: workspace as a second Photo Library, checkout, virtual artifact store
 
 **Workspace Artifact**:
@@ -184,7 +202,7 @@ The internal complete snapshot of a tool's Edit State and captured processing in
 _Avoid_: edit history, pipeline, Preset, darktable sidecar
 
 **Edit State**:
-The current confirmed editing intent owned by one tool for an identified input in a Photo Workspace: its selected Processing Engine, input binding, Engine Module Controls, operation instances, masks, resources, output settings, and revision. Web, independent calls, and optional Slipstream integration use that same saved state.
+The current confirmed editing intent owned by one tool for an identified input in a Photo Workspace: its selected Processing Engine, input binding, Engine Module Controls, operation instances, masks, resources, output settings, and revision. Independent calls and optional Slipstream integration use that same saved state.
 _Avoid_: recipe, session, workflow, engine history
 
 **Operation Instance**:

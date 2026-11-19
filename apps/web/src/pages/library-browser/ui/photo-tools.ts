@@ -3,7 +3,7 @@ import type { ModalSurfaces } from "./modal-surface.js";
 export type PhotoToolsView =
   | "tools"
   | "rating"
-  | "edit"
+  | "workspace"
   | "albums"
   | "details"
   | "zoom"
@@ -124,7 +124,7 @@ export function createPhotoToolsController({
   syncFilmstripHost,
   syncSecondarySurface,
   openSources,
-  openEditor,
+  openWorkspace,
   openDetails,
   openViewOptions,
   openRecovery,
@@ -144,7 +144,7 @@ export function createPhotoToolsController({
   syncFilmstripHost: () => void;
   syncSecondarySurface: () => void;
   openSources: () => void;
-  openEditor: (photoId: string) => void;
+  openWorkspace: (photoId: string) => void;
   openDetails?: (photoId: string) => void;
   openViewOptions: () => void;
   openRecovery: () => void;
@@ -178,7 +178,7 @@ export function createPhotoToolsController({
                 ? "Albums"
                 : currentView === "details"
                   ? "Details"
-                  : "Edit";
+                  : "Workspace";
   };
 
   const onClose = (): void => {
@@ -223,8 +223,8 @@ export function createPhotoToolsController({
         openSources();
         return;
       }
-      if (entry === "edit") {
-        openEditor(photoId);
+      if (entry === "workspace") {
+        openWorkspace(photoId);
         return;
       }
       if (

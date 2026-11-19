@@ -27,9 +27,10 @@ Topic contracts own exact behavior within their scope. Web Frontend Architecture
 
 ## Command-Line
 
-- [Command-Line Use](command-line/spec.md): delegated workflows, shared state, Preview delivery, effects, and recovery.
-- [Command-Line Design](command-line/design.md): thin client, bounded queries, mutation guards, transport uncertainty, and Web handoff.
-- [CLI Reference](command-line/reference.md): command semantics, input boundaries, results, errors, and composition.
+- [Command-Line Use](command-line/spec.md): delegated workflows, layered `--help`, raw Markdown Agent Skills, external-tool boundary, shared state, Preview delivery, effects, and recovery.
+- [Command-Line Design](command-line/design.md): CLI-only Agent interface, embedded natural-language skills, thin client, bounded queries, mutation guards, transport uncertainty, and Web handoff.
+- [CLI Reference](command-line/reference.md): command semantics, layered Command Manual, raw Markdown Agent Skills, input boundaries, results, errors, and composition.
+- [Agent Skills](command-line/skills.md): bundled natural-language guides, authority, catalog, content boundaries, and offline delivery.
 
 ### Target Wire Schemas
 
@@ -89,14 +90,14 @@ Topic contracts own exact behavior within their scope. Web Frontend Architecture
 
 ## Photo Development
 
-- [Photo Development](photo-development/spec.md): shared editing state, peer tools, previews, exports, and recovery.
+- [Photo Development](photo-development/spec.md): Agent and CLI editing, shared tool state, peer tools, previews, exports, and recovery.
 - [Photo Development Design](photo-development/design.md): tool-owned state, file handoff, supervised execution, and concurrency.
 
 ### Workspace
 
 - [Photo Workspace](photo-development/workspace/spec.md): real persistent directory, protected inputs, direct tool output, file discovery, downloads, continued processing, and safe removal.
 - [Directory Photo Workspace](photo-development/workspace/design.md): preparation, containment, indexing, tool-owned state, retention, and consistent backup.
-- [Photo Editor Workspace](photo-development/workspace/web.md): browser ownership, tool composition, freshness, conflict, and asynchronous lifecycle.
+- [Photo Workspace Web View](photo-development/workspace/web.md): non-editing file inspection, Download, removal, failure, and accessibility.
 
 ### darktable
 

@@ -26,6 +26,9 @@ pub async fn invoke_until(
     environment: Option<&str>,
     deadline: tokio::time::Instant,
 ) -> InvocationResult {
+    if let Command::Skills { command } = &cli.command {
+        return crate::skills::invoke(command.as_ref());
+    }
     let output = cli.output;
     let operation = command_operation(&cli.command);
     let admission = AdmissionState::default();

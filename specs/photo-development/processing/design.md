@@ -36,7 +36,7 @@ C layouts and native history remain private to the bridge. General editing MUST 
 
 Read-only inspection MAY initialize a prospective baseline privately without saving an edit. Explicit open/create atomically installs an input-bound baseline. Partial mutations preserve omitted settings and validate the complete resulting relationships.
 
-When multiple states exist, the caller MUST select the target explicitly. The tool MUST NOT infer the newest edit, newest artifact, or unrelated Web selection. Tool-local history and exact replay own state recovery for both Web and CLI.
+When multiple states exist, the caller MUST select the target explicitly. The tool MUST NOT infer the newest edit, newest artifact, or unrelated Library selection. Tool-local history and exact replay own state recovery for integrated and independent callers.
 
 [darktable Editing](../darktable/editing.md) owns Preset, Style, and resource semantics. Versions are immutable; applications distinguish fixed from target-initialized scope and merge/update from replace. Applications materialize edit-local instances and masks with typed reference mappings.
 
@@ -68,7 +68,7 @@ Its Finished JPEG additionally requires the pinned embedded sRGB profile. Public
 
 ### Explicit Materialization
 
-Export captures confirmed input byte identity, canonical state revision and parameter digest, bundle/schema, resources, and intended output contract. Later mutations MUST NOT alter that capture. Standalone Export is synchronous; Web MAY queue and supervise the same executable with its own receipt.
+Export captures confirmed input byte identity, canonical state revision and parameter digest, bundle/schema, resources, and intended output contract. Later mutations MUST NOT alter that capture. Standalone Export is synchronous; the service MAY queue and supervise the same executable with its own receipt.
 
 A successful bounded Preview MUST NOT establish full-resolution qualification or capacity. The tool MUST revalidate input stability and full-size resource admission before processing.
 
@@ -82,7 +82,7 @@ Passing this lower bound does not establish full resource qualification. Complet
 
 Invocation identity includes input content evidence, edit revision and complete parameter digest, tool/bundle/schema, resource versions, exact geometry/settings, and display transform. Photo identity and source revision are provenance of the initial snapshot, not a live dependency after stable bytes are installed. Original refresh MUST NOT retarget existing state.
 
-Browser canvas ownership compares full identity rather than completion order. Old revisions become stale, not relabeled current.
+Preview ownership compares full identity rather than completion order. An old revision becomes stale and MUST NOT be relabeled current.
 
 Concurrent completed files can coexist; only exact validated invocation/file evidence settles a supervised run. Timestamp or newest filename MUST NOT attribute an unmanifested external output.
 

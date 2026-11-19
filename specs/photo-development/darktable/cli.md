@@ -41,7 +41,7 @@ A mutation MUST generate and return a request identity when omitted. A caller re
 
 Global module discovery MUST expose native darktable operation schemas, not the peer Processing Module catalog. Input-scoped discovery MUST disclose initialized and reset values, frames, and capability availability. Reads MUST NOT create state.
 
-Standalone state-scoped editing requires `open`. Integration `edit show` MAY inspect a prospective workspace input without saving an edit. One existing edit is selected independently of Web selection; multiple edits MUST return `edit_ambiguous` with candidates unless explicitly selected.
+Standalone state-scoped editing requires `open`. Integration `edit show` MAY inspect a prospective workspace input without saving an edit. One existing edit is selected independently of Library selection; multiple edits MUST return `edit_ambiguous` with candidates unless explicitly selected.
 
 Unavailable initialization MUST expose unknown values as absent, output settings as `{}`, and the image contract as null. It MUST NOT substitute static defaults, camera JPEGs, or another tool. A supplied state token MUST select and validate that exact input and state; changed evidence returns `state_conflict`.
 
@@ -58,7 +58,7 @@ Edit inspection MUST expose these facts:
 
 Each input frame MUST identify its `frameId`, width, height, coordinate schema, and transform.
 
-Integration adds Photo, workspace, edit, and Web references. Capability status MUST distinguish `read`, `write`, and `execute`, with a reason and recovery where unavailable.
+Integration adds Photo, workspace, edit, and browser URL references. Capability status MUST distinguish `read`, `write`, and `execute`, with a reason and recovery where unavailable.
 
 Operation descriptions MUST provide deterministic JSON Schema 2020-12 validation and initialized/reset values when known. Instance, mask, and action inspection MUST identify their semantic targets and relationships. Headless pickers require an advertised region/frame schema.
 

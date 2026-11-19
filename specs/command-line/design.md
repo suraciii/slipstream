@@ -26,6 +26,22 @@ A darktable state token guards canonical tool state, a saved revision identifies
 
 [Photo Workspace Architecture](../photo-development/workspace/design.md) owns tool state, file access, supervision, and retention. [darktable CLI](../photo-development/darktable/cli.md) owns standalone execution and its optional workspace adapter.
 
+## Agent Interface
+
+The CLI is the complete delegated interface. The client MUST NOT require an Agent-facing MCP server, plugin runtime, external-tool installer, or service-specific Agent SDK.
+
+Agent Skills are static natural-language Markdown assets embedded in the client. The service MUST NOT serve, generate, or version them separately.
+
+Command Manual text and Skills are both offline client assets. The command grammar used for parsing is the single source for option names, defaults, and limits; a Skill MUST refer to that grammar rather than restate it.
+
+Skills ship in the client release and are available without a service, credential, or network. They MUST NOT trigger HTTP, credential resolution, or local storage discovery.
+
+The native darktable MCP bridge remains a private Processing Engine implementation. It is not an Agent-facing MCP server.
+
+External tools remain outside the client and service. The client exposes workspace paths and file inventory; it MUST NOT install, launch, supervise, sandbox, or attest an external tool.
+
+The client MUST NOT claim to enforce an external tool's filesystem access. A skill can direct the Agent to the workspace input, but the Agent remains responsible for the path it passes.
+
 ## Client Implementation Boundary
 
 The client MUST remain independent of LibRaw, libvips, the persistence owner, and server startup code. It uses established Rust command and HTTP/TLS libraries and typed JSON.

@@ -460,8 +460,8 @@ export function createApplicationOwner(
     releaseScanFailure();
     releaseScanActive();
     // A completed scan published new Library source facts: the Photo the
-    // Photographer has open is told now, so its Edit surface can re-read its
-    // bounded edit facts instead of waiting for a reload or a reopened Photo.
+    // Photographer has open is told now, so its Workspace view can re-read its
+    // bounded file facts instead of waiting for a reload or a reopened Photo.
     void emit({ kind: "publication-advanced" });
     if (scanCompletionNotice)
       applySummaryUpdate(notices.release(scanCompletionNotice));

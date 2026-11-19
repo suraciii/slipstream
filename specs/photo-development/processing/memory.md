@@ -4,15 +4,15 @@ This contract owns finite resource enforcement and engine workspace planning wit
 
 ## Model and Ownership
 
-The execution environment MUST supply an effective finite memory and CPU allocation covering the tool, native descendants, and required processing IO. The bundled Web deployment shares its application container allocation with service, HTTP, SQLite, and Library work. A standalone command uses its own qualified allocation without a service database, queue, or task ID.
+The execution environment MUST supply an effective finite memory and CPU allocation covering the tool, native descendants, and required processing IO. The bundled deployment shares its application container allocation with service, HTTP, SQLite, and Library work. A standalone command uses its own qualified allocation without a service database, queue, or task ID.
 
 Limits and enforcement facts MUST be inspectable. Missing or unbounded allocation MUST refuse image processing rather than invoke unrestricted host execution.
 
-The Web service reserves a control allowance for browsing, persistence, and bounded supervision beside one heavy attempt. Its one-at-a-time admission does not serialize external commands. When external commands share the enforced environment, their memory MUST be accounted for; capacity that cannot be established MUST be refused rather than described as isolated.
+The service reserves a control allowance for browsing, persistence, and bounded supervision beside one heavy attempt. Its one-at-a-time admission does not serialize external commands. When external commands share the enforced environment, their memory MUST be accounted for; capacity that cannot be established MUST be refused rather than described as isolated.
 
 An attempt owns a captured input/state revision, fresh native child, private scratch, and terminal outcome. Processing, validation, and encoding stages are sequential.
 
-Queued Web work retains bounded metadata, not decoded buffers. Capacity is released only after native termination and scratch settlement under the [executor contract](execution.md#execution).
+Queued service work retains bounded metadata, not decoded buffers. Capacity is released only after native termination and scratch settlement under the [executor contract](execution.md#execution).
 
 A workspace plan accounts for live buffers, temporary workspace, batch geometry, and qualified runtime headroom for the exact input geometry, stage, and bundle. The tool computes and validates the plan against the effective allocation. A plan is neither kernel enforcement nor a promise that every image fits.
 
@@ -20,7 +20,7 @@ The plan belongs to the attempt, not saved intent. Policy changes affect subsequ
 
 ## Enforcement Boundary
 
-The bundled Web deployment enforces finite Linux container memory and CPU limits under [Deployment](../../deployment/spec.md). The tool and descendants share this failure boundary with Web and SQLite; engine OOM can stop the service. Serialized admission and planning reduce risk but do not prove service isolation or control external CLI concurrency.
+The bundled deployment enforces finite Linux container memory and CPU limits under [Deployment](../../deployment/spec.md). The tool and descendants share this failure boundary with the service and SQLite; engine OOM can stop the service. Serialized admission and planning reduce risk but do not prove service isolation or control external CLI concurrency.
 
 A standalone environment MUST enforce an advertised finite allocation covering native allocations and descendants. It MAY use the same qualified container directly or another supported bounded environment.
 
@@ -113,7 +113,7 @@ Grain, halation, diffusion, blur, and sharpening MUST retain qualified image sem
 
 ## Failure, Cancellation, and Recovery
 
-The owning tool or supervisor distinguishes these outcomes before mapping its structured local or Web result:
+The owning tool or supervisor distinguishes these outcomes before mapping its structured local or service result:
 
 - Capability or deployment policy unavailable.
 - Input or stage outside the qualified resource envelope.
@@ -129,10 +129,10 @@ Failure and cancellation follow the termination, scratch, and capacity rules in 
 
 Attempts record bundle and attempt identity, geometry, stage, effective allocation and enforcement, workspace plan, timings, process evidence, and cleanup outcome. Bounded diagnostics are retained for the owning receipt lifetime. Detailed source paths and image contents MUST NOT enter public logs or Issues; an authorized workspace response separately exposes its actual execution path and host.
 
-Errors explain affected work, preserved state and files, and a useful next action. Qualification MUST cover the exact packaged deployment, standalone enforcement, and shared Web mode. The Web supervisor's lock MUST NOT serve as evidence of global CLI serialization.
+Errors explain affected work, preserved state and files, and a useful next action. Qualification MUST cover the exact packaged deployment, standalone enforcement, and shared service mode. The service supervisor's lock MUST NOT serve as evidence of global CLI serialization.
 
 Qualification MUST establish that supported configurations preserve their image, topology, input-ownership, and reproducibility contracts across their qualified resource envelope. Resource planning MUST cover real-camera Preview and full Export separately, including their dimensions, effects, profiles, and encoding. Passing a synthetic small-image check or a single Export does not establish the supported envelope.
 
 Qualification MUST establish bounded execution, preserved publication and source safety, successful cleanup, and subsequent admission in the applicable environment. Low budgets fail predictably; supported budgets succeed without changing pre-encoding pixel identity. Observer or harness changes MUST be reported separately when comparing aggregate peaks.
 
-Shared Web qualification MUST establish that one serialized attempt fits beside responsive Library reads. Qualification MUST include cold and warm process peaks, time, threads, IO, and browse contention against a common idle baseline and declared thresholds.
+Shared service qualification MUST establish that one serialized attempt fits beside responsive Library reads. Qualification MUST include cold and warm process peaks, time, threads, IO, and browse contention against a common idle baseline and declared thresholds.

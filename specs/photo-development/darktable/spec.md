@@ -6,7 +6,7 @@
 
 `darktable-edit` MUST edit accessible files independently of Slipstream. It is distinct from official `darktable-cli` and the desktop GUI. It MUST NOT require a Slipstream server, Library, Photo ID, database, token, or personal desktop catalog.
 
-The tool owns its saved state and qualified engine bundle. Optional `slipstream darktable` and Web controls MUST invoke the same tool against that state, without maintaining another authoritative parameter store.
+The tool owns its saved state and qualified engine bundle. Optional `slipstream darktable` MUST invoke the same tool against that state, without maintaining another authoritative parameter store.
 
 Existing compatible processing interfaces MAY project canonical file state. Historical edits and files MUST be preserved during an explicit supported migration; compatibility aliases MUST NOT be invented. [Photo Development Architecture](../design.md) owns service-state conversion.
 
@@ -28,7 +28,7 @@ The native engine describes operations and schema identities. The tool MUST vali
 
 Unsupported settings MUST remain inspectable with specific limitations. An incompatible engine MUST refuse mutation and rendering without resetting or reinterpreting saved intent. [Migration](cli.md#saved-history-and-recovery) is explicit and retains the prior state.
 
-Web controls MUST preserve settings they cannot display, including CLI-created instances, curves, masks, resources, and output choices.
+Integration callers MUST preserve settings they do not expose, including CLI-created instances, curves, masks, resources, and output choices.
 
 ## Automatic Adjustments
 

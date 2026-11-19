@@ -1,4 +1,4 @@
-import { PHOTO_EDITOR_TEMPLATE } from "./photo-editor-template.js";
+import { PHOTO_WORKSPACE_TEMPLATE } from "./workspace-template.js";
 
 export const PHOTO_TOOLS_TEMPLATE = `
           <dialog class="photo-tools-dialog" data-photo-tools aria-labelledby="photo-tools-title">
@@ -8,7 +8,7 @@ export const PHOTO_TOOLS_TEMPLATE = `
                 <div class="photo-tools-view" data-photo-tools-view="tools">
                   <div class="photo-tools-entries" data-photo-tools-entries>
                     <section class="photo-tools-tier photo-tools-primary" role="group" aria-labelledby="photo-tools-review-heading"><h3 id="photo-tools-review-heading">Review</h3><div class="photo-tools-actions"><button type="button" class="quiet" data-photo-tools-clear>Clear flag</button><button type="button" data-photo-tools-entry="rating">Rating</button><button type="button" data-photo-tools-entry="details">Details</button></div></section>
-                    <section class="photo-tools-tier" role="group" aria-labelledby="photo-tools-photo-heading"><h3 id="photo-tools-photo-heading">Photo</h3><div class="photo-tools-actions"><button type="button" data-photo-tools-entry="albums">Albums</button><button type="button" data-photo-tools-entry="edit">Edit</button><button type="button" data-photo-tools-entry="zoom">Preview Zoom</button><button type="button" data-photo-tools-entry="nearby">Nearby Photos</button></div></section>
+                    <section class="photo-tools-tier" role="group" aria-labelledby="photo-tools-photo-heading"><h3 id="photo-tools-photo-heading">Photo</h3><div class="photo-tools-actions"><button type="button" data-photo-tools-entry="albums">Albums</button><button type="button" data-photo-tools-entry="workspace">Workspace</button><button type="button" data-photo-tools-entry="zoom">Preview Zoom</button><button type="button" data-photo-tools-entry="nearby">Nearby Photos</button></div></section>
                     <section class="photo-tools-tier" role="group" aria-labelledby="photo-tools-library-heading"><h3 id="photo-tools-library-heading">Library</h3><div class="photo-tools-actions"><button type="button" data-photo-tools-entry="sources">Browse Library</button><button type="button" data-photo-tools-entry="view-options">View options</button><button type="button" data-photo-tools-entry="recovery" hidden>Review unavailable Originals</button></div></section>
                     <section class="photo-tools-help" aria-label="Shortcuts and gestures"><h3>Shortcuts and gestures</h3><p data-preview-help></p><p>Unflagged means no decision yet. Pick and Reject change only the Photo’s Selection State; Original Files stay read-only.</p><p>Touch and hold the Fit Preview to open the Rating Wheel. Swipe right to Pick, left to Reject, up for Next, down for Previous. Manual Zoom uses one-finger pan; pinch zooms. Letterbox regions scroll Photo View. Keyboard alternatives: Arrow keys navigate; P Pick; X Reject; U Clear flag; 0–5 Rating.</p></section>
                   </div>
@@ -17,7 +17,7 @@ export const PHOTO_TOOLS_TEMPLATE = `
                   <header class="photo-tools-view-header"><button type="button" class="quiet" data-photo-tools-return>Photo tools</button></header>
                   <div class="rating-controls" id="rating-choices" role="group" aria-label="Rating choices"><div data-ratings></div></div>
                 </div>
-${PHOTO_EDITOR_TEMPLATE}
+${PHOTO_WORKSPACE_TEMPLATE}
                 <div class="photo-tools-view" id="photo-tools-view-albums" data-photo-tools-view="albums" hidden>
                   <header class="photo-tools-view-header"><button type="button" class="quiet" data-photo-tools-return>Photo tools</button></header>
                   <div class="membership" data-membership aria-label="Album membership"><div class="membership-facts"><p class="membership-status" data-membership-status role="status">Loading Albums…</p><ul class="membership-list" data-membership-list hidden></ul><p class="membership-message" data-membership-message role="alert" hidden></p><div class="membership-actions"><button type="button" class="quiet" data-membership-manage aria-expanded="false" aria-controls="membership-panel">Manage</button><button type="button" data-membership-retry hidden>Retry Albums</button></div></div><div class="membership-panel" id="membership-panel" data-membership-panel hidden><div class="membership-options" data-membership-options></div><button type="button" data-membership-new-album>New Album</button></div></div>

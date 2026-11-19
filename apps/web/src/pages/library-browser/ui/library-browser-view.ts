@@ -45,7 +45,7 @@ import { createPhotoToolsController } from "./photo-tools.js";
 import { createPhotoZoomController } from "./photo-zoom.js";
 import * as photoGestureModule from "./photo-gestures.js";
 import { createPhotoGestureFeedback } from "./photo-gesture-feedback.js";
-import { createPhotoEditorSurfaceController } from "./photo-editor-surface.js";
+import { createWorkspaceSurfaceController } from "./workspace-surface.js";
 import {
   createPhotoViewPresenter,
   type PhotoViewPresentation,
@@ -68,7 +68,7 @@ import { createKeyboardHandler } from "./keyboard-handler.js";
 import { addressFor } from "../model/navigation-address.js";
 import type { NavigationGridRestoration } from "../model/browser-navigation.js";
 import { APP_SHELL_TEMPLATE } from "./library-browser-template.js";
-import type { EditorViewModel } from "../model/editor-controller-contract.js";
+import type { WorkspaceViewModel } from "../model/workspace-controller-contract.js";
 import type { EmptySourcePresentation } from "../model/empty-source-message.js";
 export type {
   GridPhotoPreview,
@@ -87,7 +87,7 @@ export type {
   RecoveryPagingViewModel,
 } from "../model/recovery-view-models.js";
 export type { BatchAlbumsViewModel } from "../model/grid-batch-albums-contract.js";
-export type { EditorIntent } from "../model/editor-intent-contract.js";
+export type { WorkspaceIntent } from "../model/workspace-intent-contract.js";
 
 import type {
   FolderAlbumViewModel,
@@ -115,7 +115,7 @@ export type {
   ViewSelectionState,
   ViewSourceOrder,
 } from "./library-browser-view-contract.js";
-export type { EditorViewModel } from "../model/editor-controller-contract.js";
+export type { WorkspaceViewModel } from "../model/workspace-controller-contract.js";
 
 type ControlsViewModel = Readonly<{
   gridEnabled: boolean;
@@ -235,10 +235,8 @@ export interface LibraryBrowserView
   /// strip rebuilds only the entries whose facts or delivery state changed,
   /// so navigating keeps every other entry's thumbnail in place.
   renderFilmstrip(model: FilmstripViewModel): void;
-  editorVisible(): boolean;
-  renderEditor(model: EditorViewModel): void;
-  presentEditorPreview(url: string): void;
-  clearEditorPreview(): void;
+  workspaceVisible(): boolean;
+  renderWorkspace(model: WorkspaceViewModel): void;
   setAlbumFormMessage(formId: string, message: string, unknown?: boolean): void;
   setAlbumFormPending(formId: string, pending: boolean, name?: string): void;
   dismissAlbumForm(
@@ -861,20 +859,20 @@ export function createLibraryBrowserView(
     syncFilmstripHost: filmstripPresenter.syncHost,
     syncSecondarySurface,
     openSources: () => sourceController.open(),
-    openEditor: (photoId) => editorController.open(photoId),
+    openWorkspace: (photoId) => workspaceSurfaceController.open(photoId),
     openDetails: openPhotoDetails,
     openViewOptions: () => viewOptionsController.open(),
     openRecovery: () => send({ kind: "recovery-entry" }),
     releaseDockEntry: () => photoPresenter.releaseDockDisclosure(),
   });
-  const editorController = createPhotoEditorSurfaceController({
+  const workspaceSurfaceController = createWorkspaceSurfaceController({
     root,
     send,
     isPhotoVisible: () => !photoView.hidden,
-    isEditorSurfaceVisible: () =>
+    isWorkspaceSurfaceVisible: () =>
       surfaces.isActive("photo-tools") &&
-      photoToolsController.view() === "edit",
-    openEditorSurface: () => photoToolsController.open("edit"),
+      photoToolsController.view() === "workspace",
+    openWorkspaceSurface: () => photoToolsController.open("workspace"),
   });
   const ratingControls = createRatingControls({
     elements: {
@@ -1344,10 +1342,8 @@ export function createLibraryBrowserView(
       ratingControls.render(model.rating ?? 0);
       return photoPresenter.renderPhotoShell(model);
     },
-    editorVisible: () => editorController.visible(),
-    renderEditor: (model) => editorController.render(model),
-    presentEditorPreview: (url) => editorController.presentPreview(url),
-    clearEditorPreview: () => editorController.clearPreview(),
+    workspaceVisible: () => workspaceSurfaceController.visible(),
+    renderWorkspace: (model) => workspaceSurfaceController.render(model),
     presentReviewImage: photoPresenter.presentReviewImage,
     reviewImageMatches: photoPresenter.reviewImageMatches,
     showPreviewUnavailable: photoPresenter.showPreviewUnavailable,
@@ -1449,7 +1445,7 @@ export function createLibraryBrowserView(
       membershipPanelController.dispose();
       albumFormController.dispose();
       photoToolsController.dispose();
-      editorController.dispose();
+      workspaceSurfaceController.dispose();
       ratingControls.dispose();
       photoPresenter.dispose();
       viewOptionsController.dispose();
