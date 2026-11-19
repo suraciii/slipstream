@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       # Use the same compiler profile for cache restoration and native verification.
       CARGO_PROFILE_DEV_DEBUG: 0
