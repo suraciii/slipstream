@@ -159,3 +159,66 @@ async fn deferred_changed_candidate_stays_pending_until_verified() {
     );
     library.shutdown().unwrap();
 }
+
+#[tokio::test]
+async fn new_candidate_waits_when_a_changed_fingerprint_has_its_shape() {
+    let (_base, config) = fixture();
+    fs::create_dir_all(config.library_root.join("shoot")).unwrap();
+    fs::write(config.library_root.join("shoot/one.JPG"), b"aaaa").unwrap();
+    let library = Library::open(config.clone()).unwrap();
+    let initial = library.scan().await.unwrap();
+    let original = initial.originals[0].clone();
+    library.shutdown().unwrap();
+
+    let connection = Connection::open(config.state_directory.join("library.sqlite")).unwrap();
+    connection
+        .execute(
+            "INSERT OR REPLACE INTO original_fingerprints(original_id,digest,size,mtime_ms) VALUES(?,?,?,?)",
+            params![
+                original.id,
+                crate::digest_bytes(b"aaaa"),
+                i64::try_from(original.facts.size).unwrap(),
+                original.facts.mtime_ms,
+            ],
+        )
+        .unwrap();
+    drop(connection);
+    fs::write(config.library_root.join("shoot/one.JPG"), b"bbbbb").unwrap();
+    fs::create_dir_all(config.library_root.join("incoming")).unwrap();
+    fs::write(config.library_root.join("incoming/new.JPG"), b"aaaa").unwrap();
+
+    let library = Library::open(config.clone()).unwrap();
+    let deferred = library
+        .scan_with_options(crate::RecoveryOptions {
+            verification_scope: None,
+            automatic_verification_budget: Some(0),
+        })
+        .await
+        .unwrap();
+    assert_eq!(deferred.photos.len(), 1);
+    assert!(
+        deferred
+            .originals
+            .iter()
+            .all(|item| item.relative_path.as_str() != "incoming/new.JPG")
+    );
+    assert_eq!(
+        deferred.pending_folders,
+        [crate::PendingFolder {
+            relative_path: "incoming".to_owned(),
+            pending_files: 1,
+            pending_bytes: 4,
+        }]
+    );
+
+    let verified = library.scan().await.unwrap();
+    assert_eq!(verified.photos.len(), 2);
+    assert!(verified.pending_folders.is_empty());
+    assert!(
+        verified
+            .originals
+            .iter()
+            .any(|item| item.relative_path.as_str() == "incoming/new.JPG")
+    );
+    library.shutdown().unwrap();
+}

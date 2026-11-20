@@ -284,7 +284,7 @@ function mountPrivateLibraryBrowser(
       return;
     }
     if (coordination.kind === "load-file-location-root") {
-      await folders.load("", 0, false);
+      await sourceSurfaces.refreshFileLocations();
       return;
     }
     if (!fileLocations.publication && coordination.overview.published) {

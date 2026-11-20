@@ -127,19 +127,19 @@ pub fn plan_recovery_with_options(
         })
         .collect();
 
-    // Hash only where evidence can change an identity decision: candidate
-    // Locations for missing Originals, and fact-changed files for swap
+    // Hash only where evidence can change an identity decision: new
+    // Locations with an evidence shape, and fact-changed files for swap
     // detection. Everything else is enrolled by the background worker.
     let mut hash_targets: Vec<&DiscoveredOriginal> = Vec::new();
-    let need_new_paths = missing_with_evidence > 0;
+    let has_recovery_shapes = !recovery_shapes.is_empty();
     let need_changed =
         missing_with_evidence > 0 || changed_originals.len() >= SWAP_DETECTION_THRESHOLD;
-    if need_new_paths || !previous_pending_changed.is_empty() {
+    if has_recovery_shapes || !previous_pending_changed.is_empty() {
         for original in discovered {
             let path = original.path.as_str();
             let was_pending =
                 previous_pending_changed.contains(path) && !unchanged_paths.contains(path);
-            let is_new_candidate = need_new_paths
+            let is_new_candidate = has_recovery_shapes
                 && !previous_paths.contains(path)
                 && (original.error_category.is_some()
                     || recovery_shapes.contains(&(original.kind, original.facts.size)));

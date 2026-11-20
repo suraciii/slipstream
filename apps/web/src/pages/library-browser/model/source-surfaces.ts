@@ -7,7 +7,7 @@ import type { LibraryBrowserView } from "../ui/library-browser-view.js";
 import { folderPendingViewModel } from "./folder-pending-view.js";
 
 type SurfaceInput = Readonly<{
-  folders: Pick<FileLocationController, "tree" | "pending">;
+  folders: Pick<FileLocationController, "tree" | "pending" | "load">;
   source: Readonly<{
     kind: string;
     folder?: Readonly<{ location: string }> | undefined;
@@ -74,5 +74,17 @@ export const createSourceSurfaces = (input: SurfaceInput) => {
       }),
     );
   };
-  return { renderSources, renderFolderPending };
+  const refreshFileLocations = async (): Promise<void> => {
+    if (!input.alive()) return;
+    await input.folders.load("", 0, false);
+    if (!input.alive()) return;
+    // A completed scan clears cached windows. Reload the open Folder so its
+    // local pending strip survives until the Photographer navigates away.
+    const location =
+      input.source.kind === "folder"
+        ? input.source.folder?.location
+        : undefined;
+    if (location) await input.folders.load(location, 0, false);
+  };
+  return { renderSources, renderFolderPending, refreshFileLocations };
 };
