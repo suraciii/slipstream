@@ -31,8 +31,12 @@ use std::{
 #[cfg(test)]
 use std::sync::OnceLock;
 mod enrollment;
+#[cfg(test)]
+#[path = "tests/freshness.rs"]
+mod freshness_tests;
 mod processing;
 mod removal;
+mod scan;
 mod scanner;
 #[cfg(test)]
 mod tests;
@@ -306,6 +310,7 @@ impl Library {
             Mutex::new(ScanState {
                 open: true,
                 in_flight: None,
+                options: None,
             }),
             Condvar::new(),
         ));
@@ -449,37 +454,6 @@ impl Library {
             .await
             .unwrap_or(Err(crate::persistence::PersistenceError::OwnerStopped))
             .map_err(Into::into)
-    }
-
-    pub async fn scan(&self) -> Result<ScanSnapshot, LibraryError> {
-        let (reply, receive) = tokio::sync::oneshot::channel();
-        {
-            let _admission = self.admit()?;
-            let (lock, _) = &*self.scanner.state;
-            let mut state = lock.lock().unwrap();
-            if !state.open {
-                return Err(LibraryError::Closed);
-            }
-            let first = state.in_flight.is_none();
-            let waiters = state.in_flight.get_or_insert_with(Vec::new);
-            // Receiver cancellation releases waiter capacity without
-            // cancelling the physical scanner operation.
-            waiters.retain(|waiter| !waiter.is_closed());
-            if waiters.len() >= MAX_SCAN_WAITERS {
-                return Err(LibraryError::ScanBusy);
-            }
-            waiters.push(reply);
-            #[cfg(test)]
-            scanner_admitted(&self.root);
-            if first && self.scanner.sender.try_send(ScanCommand::Scan).is_err() {
-                state.in_flight.take();
-                return Err(LibraryError::ScanBusy);
-            }
-        }
-        receive
-            .await
-            .unwrap_or(Err(LibraryError::ScannerStopped))
-            .map(|snapshot| (*snapshot).clone())
     }
 
     pub fn original(

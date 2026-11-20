@@ -66,6 +66,7 @@ export type LibraryOverviewResponse = Readonly<{
       unavailablePhotos: number;
     }>;
     fingerprints?: Readonly<{ enrolled: number; pending: number }>;
+    scope?: string;
   }>;
   albums: ReadonlyArray<AlbumSummary>;
 }>;
@@ -139,6 +140,8 @@ export type FolderChild = Readonly<{
   name: string;
   photoCount: number;
   hasDescendantFolders: boolean;
+  pendingFiles?: number;
+  hasPendingDescendants?: boolean;
 }>;
 
 export type FileLocationsResponse = Readonly<{
@@ -148,4 +151,6 @@ export type FileLocationsResponse = Readonly<{
   limit: number;
   total: number;
   children: ReadonlyArray<FolderChild>;
+  pendingFiles?: number;
+  hasPendingDescendants?: boolean;
 }>;

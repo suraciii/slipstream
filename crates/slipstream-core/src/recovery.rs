@@ -7,16 +7,43 @@
 //! revalidates. It never writes user state and never modifies Originals.
 
 use crate::{
-    NativeWorkBudget, OriginalKind, OriginalRecord, ScanSnapshot,
-    domain::DiscoveredOriginal,
-    persistence::{DiscoveredFingerprint, ScanRecoveryPlan, ScanRelocationSource},
+    NativeWorkBudget, OriginalKind, OriginalRecord, ScanSnapshot, domain::DiscoveredOriginal,
 };
 use sha2::{Digest as _, Sha256};
 use std::collections::{HashMap, HashSet};
 
-/// Minimum number of fact-changed files that triggers hashing for
-/// location-swap detection even when nothing is missing.
-const SWAP_DETECTION_THRESHOLD: usize = 2;
+/// Candidate bytes one automatically started Library Check may verify.
+pub const AUTOMATIC_VERIFICATION_BUDGET_BYTES: u64 = 256 * 1024 * 1024;
+
+/// The verification scope and automatic-read budget for one scan.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RecoveryOptions {
+    /// A relative Folder Location whose candidate shapes the scan verifies.
+    pub verification_scope: Option<String>,
+    /// The maximum candidate bytes an automatic scan may read. `None` never
+    /// defers work.
+    pub automatic_verification_budget: Option<u64>,
+}
+
+impl RecoveryOptions {
+    pub fn automatic() -> Self {
+        Self {
+            verification_scope: None,
+            automatic_verification_budget: Some(AUTOMATIC_VERIFICATION_BUDGET_BYTES),
+        }
+    }
+
+    pub fn full() -> Self {
+        Self::default()
+    }
+
+    pub fn folder(folder: String) -> Self {
+        Self {
+            verification_scope: Some(folder),
+            automatic_verification_budget: None,
+        }
+    }
+}
 
 /// Progress counters the planner reports for the recovering phase.
 #[derive(Clone, Copy, Default)]
@@ -40,272 +67,15 @@ impl RecoveryReporter for () {
     fn recovery_progress(&mut self, _progress: RecoveryProgress) {}
 }
 
-/// Plans relocations and fresh fingerprints for one scan.
-///
-/// `persisted_fingerprints` must contain every stored fingerprint for the
-/// Originals whose identity could participate: the missing Originals and the
-/// owners of fact-changed Locations.
-///
-/// `excluded_original_ids` names Originals whose Photo was confirmed
-/// permanently deleted. They are not relocation candidates: their bytes were
-/// deleted, and a file that later occupies their reviewed Location is a new
-/// Original instead of a recovered identity.
-///
-/// Photos the Photographer moved into Trash are excluded as well, through
-/// [`ScanSnapshot`]'s removed markers: their Originals keep the Trash Restore
-/// contract and never follow a scan-discovered copy.
-pub fn plan_recovery(
-    root: &crate::LibraryRoot,
-    native_work: &NativeWorkBudget,
-    discovered: &[DiscoveredOriginal],
-    previous: &ScanSnapshot,
-    persisted_fingerprints: &[crate::OriginalFingerprint],
-    excluded_original_ids: &std::collections::HashSet<String>,
-    reporter: &mut dyn RecoveryReporter,
-) -> ScanRecoveryPlan {
-    let mut progress = RecoveryProgress::default();
-    let mut discovered_by_path = HashMap::with_capacity(discovered.len());
-    for original in discovered {
-        discovered_by_path.insert(original.path.as_str().to_owned(), original);
-    }
-
-    let mut fingerprints = HashMap::with_capacity(persisted_fingerprints.len());
-    for fingerprint in persisted_fingerprints {
-        fingerprints.insert(fingerprint.original_id.clone(), fingerprint);
-    }
-
-    // Classify every persisted Original against the complete discovery. The
-    // persisted-path index keeps the whole classification linear; a scan of
-    // a large Library must not rescan every persisted Original per file.
-    let previous_paths: HashSet<&str> = previous
-        .originals
-        .iter()
-        .map(|original| original.relative_path.as_str())
-        .collect();
-    let mut unchanged_paths = std::collections::HashSet::new();
-    let mut changed_originals = Vec::new();
-    let mut missing_originals = Vec::new();
-    for original in &previous.originals {
-        if excluded_original_ids.contains(&original.id) {
-            continue;
-        }
-        match discovered_by_path.get(original.relative_path.as_str()) {
-            Some(discovered) => {
-                if discovered.facts.size == original.facts.size
-                    && discovered.facts.mtime_ms == original.facts.mtime_ms
-                {
-                    unchanged_paths.insert(original.relative_path.as_str().to_owned());
-                } else {
-                    changed_originals.push(original);
-                }
-            }
-            None => missing_originals.push(original),
-        }
-    }
-
-    let missing_with_evidence = missing_originals
-        .iter()
-        .filter(|original| fingerprints.contains_key(&original.id))
-        .count();
-
-    // Hash only where evidence can change an identity decision: candidate
-    // Locations for missing Originals, and fact-changed files for swap
-    // detection. Everything else is enrolled by the background worker.
-    let mut hash_targets: Vec<&DiscoveredOriginal> = Vec::new();
-    let need_new_paths = missing_with_evidence > 0;
-    let need_changed =
-        missing_with_evidence > 0 || changed_originals.len() >= SWAP_DETECTION_THRESHOLD;
-    if need_new_paths {
-        for original in discovered {
-            if !previous_paths.contains(original.path.as_str()) {
-                hash_targets.push(original);
-            }
-        }
-    }
-    if need_changed {
-        for original in &changed_originals {
-            if let Some(discovered) = discovered_by_path.get(original.relative_path.as_str()) {
-                hash_targets.push(discovered);
-            }
-        }
-    }
-    hash_targets.sort_by(|left, right| {
-        left.path
-            .as_str()
-            .as_bytes()
-            .cmp(right.path.as_str().as_bytes())
-    });
-    hash_targets.dedup_by(|left, right| left.path.as_str() == right.path.as_str());
-
-    progress.hash_total = hash_targets.len() as u64;
-    reporter.recovery_progress(progress);
-    let mut hashed: HashMap<String, HashedFile> = HashMap::new();
-    let mut failed_kinds: Vec<crate::OriginalKind> = Vec::new();
-    for target in hash_targets {
-        let permit = native_work.acquire();
-        let result = root
-            .original(target.path.clone())
-            .and_then(|capability| capability.digest_file());
-        drop(permit);
-        match result {
-            Ok(checked) => {
-                hashed.insert(
-                    target.path.as_str().to_owned(),
-                    HashedFile {
-                        digest: checked.digest,
-                        kind: target.kind,
-                        size: checked.facts.size,
-                        owner_keeps_bytes: false,
-                    },
-                );
-            }
-            Err(_) => {
-                progress.failed_hashes += 1;
-                failed_kinds.push(target.kind);
-            }
-        }
-        progress.hashed += 1;
-        reporter.recovery_progress(progress);
-    }
-    reporter.recovery_progress(progress);
-
-    // A fact-changed file whose digest still equals its owner's fingerprint
-    // is a re-save of the same bytes: the owner keeps it as a revision, and
-    // the file must not become another Original's target.
-    for original in &changed_originals {
-        if let Some(fingerprint) = fingerprints.get(&original.id)
-            && let Some(file) = hashed.get_mut(original.relative_path.as_str())
-            && file.digest == fingerprint.digest
-        {
-            file.owner_keeps_bytes = true;
-        }
-    }
-
-    // A Photo the Photographer moved into Trash keeps its own Restore
-    // contract: its Original is never a relocation candidate, whatever the
-    // scan observes. The removed marker is Photo state, so it is read from
-    // the snapshot's Photos instead of inferred from availability.
-    let mut removed_original_ids = HashSet::with_capacity(previous.photos.len());
-    for photo in &previous.photos {
-        if photo.removed {
-            removed_original_ids.insert(photo.original_id.as_str());
-        }
-    }
-
-    // An Original is eligible for relocation when its bytes are not at its
-    // remembered Location: it is missing, or its Location now provably
-    // carries other bytes. An unchanged Location or a failed hash keeps the
-    // owner in place as a revision.
-    let mut eligible: Vec<&OriginalRecord> = Vec::new();
-    for original in &previous.originals {
-        if removed_original_ids.contains(original.id.as_str()) {
-            continue;
-        }
-        let eligible_now = match discovered_by_path.get(original.relative_path.as_str()) {
-            None => true,
-            Some(_) => {
-                !unchanged_paths.contains(original.relative_path.as_str())
-                    && hashed
-                        .get(original.relative_path.as_str())
-                        .is_some_and(|file| !file.owner_keeps_bytes)
-            }
-        };
-        if eligible_now {
-            eligible.push(original);
-        }
-    }
-
-    // Target files: hashed Locations whose owner (if any) does not keep its
-    // own bytes there.
-    let mut relocations: HashMap<String, String> = HashMap::new();
-    let mut by_digest: HashMap<String, (Vec<&OriginalRecord>, Vec<String>)> = HashMap::new();
-    let mut relocation_sources: HashMap<String, ScanRelocationSource> = HashMap::new();
-    for original in &eligible {
-        if let Some(fingerprint) = fingerprints.get(&original.id) {
-            by_digest
-                .entry(fingerprint.digest.clone())
-                .or_default()
-                .0
-                .push(original);
-        }
-    }
-    for (path, file) in &hashed {
-        if file.owner_keeps_bytes {
-            continue;
-        }
-        by_digest
-            .entry(file.digest.clone())
-            .or_default()
-            .1
-            .push(path.clone());
-    }
-    for (_digest, originals, files) in by_digest
-        .iter()
-        .map(|(digest, (originals, files))| (digest, originals, files))
-    {
-        if originals.len() != 1 || files.len() != 1 || failed_kinds.contains(&originals[0].kind) {
-            // Ambiguous or incomplete evidence: preserve records untouched.
-            // An unreadable candidate of the same kind could hold the same
-            // content, so a failed hash must not become proof of uniqueness.
-            continue;
-        }
-        let original = originals[0];
-        let path = &files[0];
-        let fingerprint = &fingerprints[&original.id];
-        let file = &hashed[path];
-        if file.kind == original.kind && fingerprint.size == file.size {
-            relocations.insert(path.clone(), original.id.clone());
-            relocation_sources.insert(
-                original.id.clone(),
-                ScanRelocationSource {
-                    relative_path: original.relative_path.as_str().to_owned(),
-                    facts: original.facts,
-                    available: original.available,
-                },
-            );
-        }
-    }
-
-    // Global consistency: a relocation may land on a Location owned by
-    // another Original only when that owner also relocates in this plan.
-    let relocating_ids: std::collections::HashSet<String> = relocations.values().cloned().collect();
-    let owner_by_path: HashMap<&str, &OriginalRecord> = previous
-        .originals
-        .iter()
-        .map(|original| (original.relative_path.as_str(), original))
-        .collect();
-    let blocked_targets: Vec<String> = relocations
-        .keys()
-        .filter(|path| match owner_by_path.get(path.as_str()) {
-            Some(owner) => !relocating_ids.contains(&owner.id),
-            None => false,
-        })
-        .cloned()
-        .collect();
-    for path in blocked_targets {
-        if let Some(original_id) = relocations.remove(&path) {
-            relocation_sources.remove(&original_id);
-        }
-    }
-
-    ScanRecoveryPlan {
-        fingerprints: hashed
-            .into_iter()
-            .map(|(path, file)| DiscoveredFingerprint {
-                path,
-                digest: file.digest,
-            })
-            .collect(),
-        relocations,
-        relocation_sources,
-    }
-}
-
-struct HashedFile {
-    digest: String,
-    kind: OriginalKind,
-    size: u64,
-    owner_keeps_bytes: bool,
+/// The borrowed inputs of one recovery plan.
+pub struct RecoveryPlanInput<'a> {
+    pub root: &'a crate::LibraryRoot,
+    pub native_work: &'a NativeWorkBudget,
+    pub discovered: &'a [DiscoveredOriginal],
+    pub previous: &'a ScanSnapshot,
+    pub persisted_fingerprints: &'a [crate::OriginalFingerprint],
+    pub excluded_original_ids: &'a HashSet<String>,
+    pub options: &'a RecoveryOptions,
 }
 
 /// Computes the digest of in-memory bytes. Used by tests and mirrors the

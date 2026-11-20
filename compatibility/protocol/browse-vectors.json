@@ -383,8 +383,10 @@
     "expected": {
       "body": {
         "children": [],
+        "hasPendingDescendants": false,
         "limit": 60,
         "parent": "",
+        "pendingFiles": 0,
         "publication": "$publication",
         "start": 0,
         "total": 0
@@ -401,8 +403,10 @@
     "expected": {
       "body": {
         "children": [],
+        "hasPendingDescendants": false,
         "limit": 60,
         "parent": "",
+        "pendingFiles": 0,
         "publication": "$publication",
         "start": 0,
         "total": 0

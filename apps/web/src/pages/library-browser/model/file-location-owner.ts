@@ -17,6 +17,8 @@ export type FileLocationWindow = Readonly<{
   page: number;
   children: ReadonlyArray<FolderChild>;
   total: number;
+  pendingFiles: number;
+  hasPendingDescendants: boolean;
 }>;
 
 export type FileLocationRequest = Readonly<{ page: number; expand: boolean }>;
@@ -76,6 +78,9 @@ export interface FileLocationOwner {
   accept(outcome: FileLocationOutcome): boolean;
   isCurrent(authority: FileLocationAuthority): boolean;
   window(parent: string): FileLocationWindow | undefined;
+  pending(
+    location: string,
+  ): Readonly<{ files: number; hasDescendants: boolean }> | undefined;
   isExpanded(parent: string): boolean;
   expandRetained(parent: string): boolean;
   prepareCountRefresh(): ReadonlyMap<string, FileLocationRequest>;
@@ -216,6 +221,8 @@ export function createFileLocationOwner(
             page,
             children: Object.freeze([...result.window.children]),
             total: result.window.total,
+            pendingFiles: result.window.pendingFiles ?? 0,
+            hasPendingDescendants: result.window.hasPendingDescendants ?? false,
           }),
         );
         if (request.expand) expanded.add(parent);
@@ -319,6 +326,25 @@ export function createFileLocationOwner(
     },
     isCurrent: (candidate) => !closed && candidate === authority,
     window: (parent) => windows.get(parent),
+    pending: (location) => {
+      const own = windows.get(location);
+      if (own)
+        return Object.freeze({
+          files: own.pendingFiles,
+          hasDescendants: own.hasPendingDescendants,
+        });
+      for (const window of windows.values()) {
+        const child = window.children.find(
+          (candidate) => candidate.location === location,
+        );
+        if (child)
+          return Object.freeze({
+            files: child.pendingFiles ?? 0,
+            hasDescendants: child.hasPendingDescendants ?? false,
+          });
+      }
+      return undefined;
+    },
     isExpanded: (parent) => expanded.has(parent),
     expandRetained: (parent) => {
       if (

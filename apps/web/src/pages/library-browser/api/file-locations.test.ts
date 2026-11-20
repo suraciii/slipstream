@@ -14,6 +14,8 @@ const windowBody = {
   limit: 60,
   total: 0,
   children: [],
+  pendingFiles: 0,
+  hasPendingDescendants: false,
 };
 
 describe("File Location window API", () => {

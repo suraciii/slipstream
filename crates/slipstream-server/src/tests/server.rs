@@ -252,6 +252,19 @@ async fn bearer_mutations_without_origin_work_but_foreign_origins_are_rejected()
             "{name}"
         );
     }
+    for invalid in [
+        serde_json::json!({"folder": "../outside"}),
+        serde_json::json!({"folder": 1}),
+        serde_json::json!({"folder": "ok", "other": true}),
+        serde_json::json!("folder"),
+    ] {
+        assert_eq!(
+            post_json(&router, "/api/scan", invalid, None)
+                .await
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
     assert_eq!(
         post_json(&router, "/api/scan", serde_json::json!(null), None)
             .await

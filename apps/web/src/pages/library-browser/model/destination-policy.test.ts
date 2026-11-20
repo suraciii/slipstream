@@ -221,6 +221,8 @@ describe("folder name", () => {
       name,
       photoCount: 1,
       hasDescendantFolders: false,
+      pendingFiles: 0,
+      hasPendingDescendants: false,
     });
     const windows = {
       window: (parent: string) =>
@@ -232,6 +234,8 @@ describe("folder name", () => {
                 loaded("shoot/roll-01", "Roll 01"),
                 loaded("shoot/roll-02", "Roll 02"),
               ],
+              pendingFiles: 0,
+              hasPendingDescendants: false,
             }
           : undefined,
     };

@@ -308,9 +308,9 @@ The browser uses that generation to revalidate an Overview immediately before co
 
 An unpublished Library omits it.
 
-`POST /api/scan` takes no semantic request fields; an empty JSON object is accepted.
+`POST /api/scan` accepts an optional semantic `folder` field. An omitted body, `null`, or an empty JSON object starts one full Library Check. A `folder` value starts one Folder Check scoped by [Folder Freshness](../photo-library/folder-checks/design.md).
 
-A same-service request admits one application-owned Scan Cycle and waits for its terminal Loading Status.
+A same-service request with the same verification scope admits one application-owned Scan Cycle and waits for its terminal Loading Status. A request with a different active scope is refused as busy.
 
 Concurrent accepted requests join the cycle within the bounded waiter capacity.
 

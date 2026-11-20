@@ -9,6 +9,8 @@ const windowResponse = (
     name: string;
     photoCount: number;
     hasDescendantFolders: boolean;
+    pendingFiles?: number;
+    hasPendingDescendants?: boolean;
   }> = [],
 ) =>
   new Response(
@@ -18,7 +20,13 @@ const windowResponse = (
       start: 0,
       limit: 60,
       total: children.length,
-      children,
+      children: children.map((child) => ({
+        pendingFiles: 0,
+        hasPendingDescendants: false,
+        ...child,
+      })),
+      pendingFiles: 0,
+      hasPendingDescendants: false,
     }),
     { status: 200 },
   );

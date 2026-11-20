@@ -25,6 +25,10 @@ _Avoid_: outdated folder, stale Library
 The user-triggered verification of Pending Candidates that can affect one Original Folder subtree. A Folder Check publishes the same atomic Library result as a Library Check but verifies only the candidates needed to resolve that Folder.
 _Avoid_: folder scan, partial import, repair
 
+**Automatic Verification Budget**:
+The candidate bytes one automatically started Library Check may verify before it defers every candidate to Folder Checks.
+_Avoid_: cache limit, scan timeout
+
 **Photo**:
 One independently managed supported Original File presented for browsing and selection. RAW and same-basename JPEG are independent Photos; their naming must not share decisions, Album membership, or Preview. A Photo keeps its identity when a supported operation changes its Original Location.
 _Avoid_: image pair, RAW/JPEG group

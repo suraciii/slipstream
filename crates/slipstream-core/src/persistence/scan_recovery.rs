@@ -776,6 +776,12 @@ pub struct ScanRecoveryPlan {
     /// while content inspection was in progress.
     pub relocation_sources: HashMap<String, ScanRelocationSource>,
     pub fingerprints: Vec<DiscoveredFingerprint>,
+    /// Discovered Locations whose identity work is deferred to a Folder Check.
+    pub deferred_paths: HashSet<String>,
+    /// Pending Folder summaries derived from `deferred_paths`.
+    pub pending_folders: Vec<crate::PendingFolder>,
+    /// Deferred paths whose prior persisted facts remain protected.
+    pub pending_changed_paths: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

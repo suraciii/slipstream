@@ -93,15 +93,23 @@ This makes safe additions visible while holding uncertain identities.
 
 ## Persistence
 
-The state store owns one `pending_folders` table.
+The state store owns one `pending_folders` metadata value and one
+`pending_changed_paths` metadata value in the existing library metadata store.
 
-Each row stores one Folder Location, its pending file count, and its pending byte count.
+`pending_folders` contains the complete pending Folder set. Each entry stores
+one Folder Location, its pending file count, and its pending byte count.
 
-Only pending Folders have rows.
+`pending_changed_paths` contains the deferred candidate Locations that already
+have persisted facts. A later check treats them as candidates even when the
+current evidence set no longer would, so an unresolved changed Original cannot
+publish new facts by omission.
 
-The `ScanSnapshot` exposes the complete pending Folder set.
+A deferred new Location needs no stored path: the missing evidence keeps
+classifying it until a check verifies it or the evidence disappears.
 
-The apply transaction replaces the set atomically with the scan result.
+The `ScanSnapshot` exposes both values.
+
+The apply transaction replaces both atomically with the scan result.
 
 ## Folder Projection
 
@@ -113,8 +121,8 @@ An ancestor of a pending Folder is also known.
 
 Each Folder child reports:
 
-- direct pending file count;
-- whether any descendant Folder is pending.
+- recursive pending file count for its subtree;
+- whether any strict descendant Folder is pending.
 
 A File Location window also reports the same facts for its parent.
 
@@ -122,7 +130,7 @@ A pending Folder marker appears only when pending state exists.
 
 ## Scan Lifecycle
 
-`ScanOptions` carries the verification scope and the automatic budget decision.
+`RecoveryOptions` carries the verification scope and the automatic budget decision.
 
 - Automatic startup: no scope, budget enabled.
 - Explicit full check: no scope, budget disabled.
@@ -149,7 +157,7 @@ No Library-wide pending warning exists.
 `POST /api/scan` accepts an optional JSON object:
 
 ```json literal
-{"folder": "2026/travel"}
+{ "folder": "2026/travel" }
 ```
 
 An empty object or omitted body starts an explicit full check.

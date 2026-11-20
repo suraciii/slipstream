@@ -10,10 +10,12 @@ import {
 } from "./model/browse-range-recovery-owner.js";
 import type {
   BrowseFilterConditions,
+  LibraryOverviewResponse,
   SelectionFilter,
   SelectionState,
 } from "./api/contracts.js";
 import { routeWorkspaceIntent } from "./model/workspace-intent-router.js";
+import { createSourceSurfaces } from "./model/source-surfaces.js";
 import { createPhotoDetailsOwner } from "./model/photo-details-owner.js";
 import { createMetadataPanel } from "./ui/external-metadata-panel.js";
 import { createRecoveryReviewOwner } from "./model/recovery-review-owner.js";
@@ -92,7 +94,6 @@ import { mountLibraryBrowserAccess } from "./ui/library-browser-access.js";
 import { createPageWorkspaceController } from "./ui/workspace-controller-composition.js";
 import { photoNavigationControls } from "./ui/photo-navigation-controls.js";
 import type { BrowserFetch } from "./api/browser-fetch.js";
-
 const SOURCE_ESTABLISHED = { kind: "established" } as const;
 const SOURCE_SUPERSEDED = { kind: "superseded" } as const;
 const SOURCE_FAILED = { kind: "failed" } as const;
@@ -111,6 +112,7 @@ function mountPrivateLibraryBrowser(
   releaseLease: (token: string) => Promise<void>,
 ): () => void {
   let applicationAlive = true;
+  let latestScan: LibraryOverviewResponse["scan"] | undefined;
   const recoveryGate = new RecoveryGate();
   const sourceGrid = createSourceGridOwner(fetcher, releaseLease);
   const navigation = createNavigationOwner(
@@ -228,6 +230,11 @@ function mountPrivateLibraryBrowser(
 
   const presentApplication = (presentation: ApplicationPresentation): void => {
     if (!applicationAlive) return;
+    if (presentation.kind === "scan-status") {
+      latestScan = presentation.scan;
+      renderFolderPending();
+      return;
+    }
     if (presentation.kind === "summary") {
       applicationPresentation.presentSummary(presentation.summary);
       return;
@@ -325,7 +332,9 @@ function mountPrivateLibraryBrowser(
   const handleApplicationEvent = (
     event: ApplicationEvent,
   ): void | Promise<void> =>
-    event.kind === "summary" || event.kind === "overview"
+    event.kind === "summary" ||
+    event.kind === "overview" ||
+    event.kind === "scan-status"
       ? presentApplication(event)
       : coordinateApplication(event);
 
@@ -698,6 +707,7 @@ function mountPrivateLibraryBrowser(
     onChanged: () => {
       syncConnection();
       renderSources();
+      renderFolderPending();
     },
     onReachable: () => setConnected(true),
   });
@@ -713,34 +723,20 @@ function mountPrivateLibraryBrowser(
       ),
   });
 
-  const renderSources = () => {
-    if (!applicationAlive) return;
-    const tree = folders.tree(
-      (location) =>
-        sourceGrid.kind === "folder" &&
-        sourceGrid.folder?.location === location,
-    );
-    view.renderSources({
-      libraryCount: application.overview?.photoCount ?? 0,
-      libraryActive: sourceGrid.kind === "library",
-      fileLocationsEnabled: tree.enabled,
-      fileLocationFailures: tree.failures,
-      rootExpanded: tree.rootExpanded,
-      rootLoading: tree.rootLoading,
-      rootActive: sourceGrid.folder?.location === "",
-      rootChildren: tree.rootChildren,
-      ...(tree.rootPager ? { rootPager: tree.rootPager } : {}),
-      albums: application.albums.map((album) => ({
-        id: album.id,
-        name: album.name,
-        photoCount: album.photoCount,
-        hasSavedPosition: album.hasSavedPosition,
-        active: sourceGrid.kind === "album" && sourceGrid.albumId === album.id,
-      })),
-    });
-    albumManagement.setAlbums(application.albums);
-    gridMulti.renderBatchAlbums();
-  };
+  const sourceSurfaces = createSourceSurfaces({
+    folders,
+    source: sourceGrid,
+    photoCount: () => application.overview?.photoCount ?? 0,
+    albums: () => application.albums,
+    view,
+    albumManagement: () => albumManagement,
+    gridMulti: () => gridMulti,
+    photoActive: () => photoOwner.active,
+    scan: () => latestScan,
+    alive: () => applicationAlive,
+  });
+  const renderSources = sourceSurfaces.renderSources;
+  const renderFolderPending = sourceSurfaces.renderFolderPending;
 
   const albumManagement = createAlbumManagementController({
     actions: albumActions,
@@ -1294,6 +1290,7 @@ function mountPrivateLibraryBrowser(
       },
       position,
     );
+    renderFolderPending();
     updateControls();
   };
 
@@ -1983,6 +1980,9 @@ function mountPrivateLibraryBrowser(
         return;
       case "folder-page":
         void folders.page(intent.location, intent.direction);
+        return;
+      case "folder-check":
+        application.requestFolderCheck(intent.location);
         return;
       case "folder-album-add":
         gridMulti.expireCompensation();

@@ -6,6 +6,7 @@ pub(crate) type ScanCycleOutcome = Result<ScanStatusWire, String>;
 pub(super) struct ScanCycleState {
     pub(super) closed: bool,
     pub(super) in_flight: bool,
+    pub(super) options: Option<slipstream_core::RecoveryOptions>,
     pub(super) waiters: Vec<oneshot::Sender<ScanCycleOutcome>>,
 }
 
@@ -20,6 +21,7 @@ impl ScanCycle {
             state: Mutex::new(ScanCycleState {
                 closed: false,
                 in_flight: false,
+                options: None,
                 waiters: Vec::new(),
             }),
             idle: Notify::new(),
@@ -295,11 +297,12 @@ impl SharedLibrary {
     pub(super) async fn run_scan(
         &self,
         library: &Library,
+        options: slipstream_core::RecoveryOptions,
         publish_gate: Option<oneshot::Receiver<()>>,
     ) -> Result<Vec<ReviewWarmupRequest>, LibraryError> {
         self.runs_started.fetch_add(1, Ordering::Relaxed);
         self.awaiting_scan.fetch_add(1, Ordering::Relaxed);
-        let outcome = match library.scan().await {
+        let outcome = match library.scan_with_options(options).await {
             Ok(_) => {
                 if let Some(gate) = publish_gate {
                     let _ = gate.await;

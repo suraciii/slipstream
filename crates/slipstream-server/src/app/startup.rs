@@ -256,7 +256,11 @@ impl Application {
         // Admit the startup cycle synchronously before returning the
         // Application, so an immediate explicit rescan joins this leader.
         let startup = application
-            .admit_scan_cycle(scan_gate, publish_gate)
+            .admit_scan_cycle(
+                slipstream_core::RecoveryOptions::automatic(),
+                scan_gate,
+                publish_gate,
+            )
             .expect("a new Application admits its startup scan");
         drop(startup);
         // Settle interrupted work and provisional input pins before new admission.

@@ -104,6 +104,7 @@ export type LibraryBrowserIntent =
   | Readonly<{ kind: "folder-toggle"; location: string; expanded: boolean }>
   | Readonly<{ kind: "folder-page"; location: string; direction: -1 | 1 }>
   | Readonly<{ kind: "folder-album-add"; albumId: string }>
+  | Readonly<{ kind: "folder-check"; location: string }>
   | Readonly<{ kind: "album-overview-retry" }>
   | Readonly<{ kind: "album-form-open"; form: AlbumFormReference }>
   | Readonly<{ kind: "album-form-close"; formId: string }>
@@ -210,6 +211,8 @@ export type FolderViewModel = Readonly<{
   name: string;
   photoCount: number;
   hasDescendantFolders: boolean;
+  pendingFiles: number;
+  hasPendingDescendants: boolean;
   expanded: boolean;
   loading: boolean;
   enabled: boolean;
@@ -223,6 +226,14 @@ export type FolderViewModel = Readonly<{
   }>;
 }>;
 
+export type FolderPendingViewModel = Readonly<{
+  location: string;
+  pendingFiles: number;
+  active: boolean;
+  progress?: string;
+  actionEnabled: boolean;
+}>;
+
 export type SourceListViewModel = Readonly<{
   libraryCount: number;
   libraryActive: boolean;
@@ -234,6 +245,8 @@ export type SourceListViewModel = Readonly<{
   rootLoading: boolean;
   rootActive: boolean;
   rootChildren: ReadonlyArray<FolderViewModel>;
+  rootPendingFiles: number;
+  rootHasPendingDescendants: boolean;
   rootPager?: FolderViewModel["pager"];
   albums: ReadonlyArray<
     Readonly<{

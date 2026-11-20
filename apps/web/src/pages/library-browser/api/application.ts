@@ -61,8 +61,17 @@ export type ScanCommandResult =
 
 export async function requestLibraryScan(
   fetcher: ApplicationFetch,
+  folder?: string,
 ): Promise<ScanCommandResult> {
-  const response = await fetcher("/api/scan", { method: "POST" });
+  const response = await fetcher("/api/scan", {
+    method: "POST",
+    ...(folder === undefined
+      ? {}
+      : {
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ folder }),
+        }),
+  });
   if (!response.ok) return { kind: "rejected", status: response.status };
   return {
     kind: "accepted",

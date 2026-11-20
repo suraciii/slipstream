@@ -6,6 +6,7 @@ mod preview;
 mod published;
 mod recovery;
 mod removal;
+mod scan_status;
 mod shared_library;
 mod shutdown;
 mod startup;
@@ -48,6 +49,7 @@ pub struct Application {
 impl Application {
     pub(crate) fn admit_scan_cycle(
         self: &Arc<Self>,
+        options: slipstream_core::RecoveryOptions,
         scan_gate: Option<oneshot::Receiver<()>>,
         publish_gate: Option<oneshot::Receiver<()>>,
     ) -> Result<oneshot::Receiver<ScanCycleOutcome>, ServerError> {
@@ -56,6 +58,9 @@ impl Application {
             let mut cycle = self.scan_cycle.state.lock().expect("scan cycle poisoned");
             if cycle.closed {
                 return Err(ServerError::Library(LibraryError::Closed));
+            }
+            if cycle.in_flight && cycle.options.as_ref() != Some(&options) {
+                return Err(ServerError::Library(LibraryError::ScanBusy));
             }
             // A dropped HTTP future closes its receiver immediately. Prune
             // those presentation waiters before enforcing the bounded live
@@ -69,6 +74,7 @@ impl Application {
                 false
             } else {
                 cycle.in_flight = true;
+                cycle.options = Some(options.clone());
                 true
             }
         };
@@ -78,24 +84,38 @@ impl Application {
                 if let Some(gate) = scan_gate {
                     let _ = gate.await;
                 }
-                let outcome = match application
+                let failure = match application
                     .shared
-                    .run_scan(&application.library, publish_gate)
+                    .run_scan(&application.library, options, publish_gate)
                     .await
                 {
                     Ok(warmup_ids) => {
                         application.schedule_review_warmup(warmup_ids);
-                        Ok(application.scan_status())
+                        None
                     }
                     Err(error) => {
                         application.shared.failed.store(true, Ordering::Relaxed);
-                        Err(error.to_string())
+                        Some(error.to_string())
                     }
                 };
+                // Clear the active scope before projecting the terminal
+                // status, so a completed Folder Check never reports itself as
+                // still active. Admission stays serialized until delivery.
                 {
-                    // Fan-out is non-blocking. Keep admission serialized until
-                    // every terminal outcome is delivered, then expose idle to
-                    // shutdown and the next cycle together.
+                    let mut cycle = application
+                        .scan_cycle
+                        .state
+                        .lock()
+                        .expect("scan cycle poisoned");
+                    cycle.options = None;
+                }
+                let outcome = match failure {
+                    Some(error) => Err(error),
+                    None => Ok(application.scan_status()),
+                };
+                {
+                    // Fan-out is non-blocking. Admission stays serialized
+                    // until every terminal outcome is delivered.
                     let mut cycle = application
                         .scan_cycle
                         .state
@@ -110,6 +130,21 @@ impl Application {
             });
         }
         Ok(receive)
+    }
+
+    /// Admits one explicit full Library Check. Startup uses its own automatic
+    /// budget; this wrapper keeps test callers on the full contract.
+    #[cfg(test)]
+    pub(crate) fn admit_full_scan_cycle(
+        self: &Arc<Self>,
+        scan_gate: Option<oneshot::Receiver<()>>,
+        publish_gate: Option<oneshot::Receiver<()>>,
+    ) -> Result<oneshot::Receiver<ScanCycleOutcome>, ServerError> {
+        self.admit_scan_cycle(
+            slipstream_core::RecoveryOptions::full(),
+            scan_gate,
+            publish_gate,
+        )
     }
 
     fn schedule_review_warmup(self: &Arc<Self>, warmup_requests: Vec<ReviewWarmupRequest>) {
@@ -229,118 +264,6 @@ impl Application {
         })
         .await
         .map_err(|error| ServerError::Join(error.to_string()))
-    }
-
-    /// Truthful Library status: the scanner owns measurable phases and
-    /// counters, and the shared flags decide idle, failed, or initializing.
-    pub(crate) fn scan_status(&self) -> ScanStatusWire {
-        let progress = self.library.scan_progress();
-        let publication = self.current_publication();
-        let last_recovery = self.library.scan_outcome().map(|outcome| ScanRecoveryWire {
-            relocated_photos: outcome.relocated_originals,
-            fingerprinted_originals: outcome.fingerprinted_originals,
-            unavailable_photos: outcome.unavailable_photos,
-        });
-        let counts = self.library.fingerprint_counts();
-        let fingerprints = Some(FingerprintProgressWire {
-            enrolled: counts.enrolled,
-            pending: counts.pending,
-        });
-        match progress.phase {
-            ScanPhase::Discovering => ScanStatusWire {
-                state: "discovering",
-                updated_at: (progress.updated_ms != 0).then_some(progress.updated_ms),
-                publication: publication.clone(),
-                completed: Some(usize::try_from(progress.discovered).unwrap_or(usize::MAX)),
-                total: None,
-                updated_ms: progress.updated_ms,
-                last_recovery,
-                fingerprints,
-            },
-            ScanPhase::Inspecting => ScanStatusWire {
-                state: "inspecting",
-                updated_at: (progress.updated_ms != 0).then_some(progress.updated_ms),
-                publication: publication.clone(),
-                completed: Some(usize::try_from(progress.inspected).unwrap_or(usize::MAX)),
-                total: progress
-                    .inspect_total
-                    .map(|total| usize::try_from(total).unwrap_or(usize::MAX)),
-                updated_ms: progress.updated_ms,
-                last_recovery,
-                fingerprints,
-            },
-            ScanPhase::Recovering => ScanStatusWire {
-                state: "recovering",
-                updated_at: (progress.updated_ms != 0).then_some(progress.updated_ms),
-                publication: publication.clone(),
-                completed: Some(usize::try_from(progress.hashed).unwrap_or(usize::MAX)),
-                total: progress
-                    .hash_total
-                    .map(|total| usize::try_from(total).unwrap_or(usize::MAX)),
-                updated_ms: progress.updated_ms,
-                last_recovery,
-                fingerprints,
-            },
-            ScanPhase::Applying => ScanStatusWire {
-                state: "applying",
-                updated_at: (progress.updated_ms != 0).then_some(progress.updated_ms),
-                publication: publication.clone(),
-                completed: None,
-                total: None,
-                updated_ms: progress.updated_ms,
-                last_recovery,
-                fingerprints,
-            },
-            ScanPhase::Idle => {
-                if self.shared.awaiting_scan.load(Ordering::Relaxed) > 0 {
-                    // The scan finished; its result is being published.
-                    ScanStatusWire {
-                        state: "applying",
-                        updated_at: (progress.updated_ms != 0).then_some(progress.updated_ms),
-                        publication: publication.clone(),
-                        completed: None,
-                        total: None,
-                        updated_ms: progress.updated_ms,
-                        last_recovery,
-                        fingerprints,
-                    }
-                } else if self.shared.failed.load(Ordering::Relaxed) {
-                    ScanStatusWire {
-                        state: "failed",
-                        updated_at: (progress.updated_ms != 0).then_some(progress.updated_ms),
-                        publication: publication.clone(),
-                        completed: None,
-                        updated_ms: progress.updated_ms,
-                        total: None,
-                        last_recovery,
-                        fingerprints,
-                    }
-                } else if self.shared.published.load(Ordering::Relaxed) {
-                    let photo_count = self.published_photo_count();
-                    ScanStatusWire {
-                        state: "idle",
-                        updated_at: (progress.updated_ms != 0).then_some(progress.updated_ms),
-                        publication: publication.clone(),
-                        completed: Some(photo_count),
-                        updated_ms: progress.updated_ms,
-                        total: Some(photo_count),
-                        last_recovery,
-                        fingerprints,
-                    }
-                } else {
-                    ScanStatusWire {
-                        state: "initializing",
-                        updated_at: (progress.updated_ms != 0).then_some(progress.updated_ms),
-                        publication,
-                        completed: None,
-                        total: None,
-                        updated_ms: progress.updated_ms,
-                        last_recovery,
-                        fingerprints,
-                    }
-                }
-            }
-        }
     }
 
     pub(crate) fn current_publication(&self) -> Option<String> {
@@ -495,6 +418,8 @@ impl Application {
             return Err(ServerError::FolderNotFound);
         }
         let (children, total) = index.window(parent, start, limit);
+        let pending_files = index.pending_files(parent);
+        let has_pending_descendants = index.has_pending_descendants(parent);
         drop(guard);
         Ok(FileLocationsResponse {
             publication: current,
@@ -509,8 +434,12 @@ impl Application {
                     name: child.name,
                     photo_count: child.photo_count,
                     has_descendant_folders: child.has_descendant_folders,
+                    pending_files: child.pending_files,
+                    has_pending_descendants: child.has_pending_descendants,
                 })
                 .collect(),
+            pending_files,
+            has_pending_descendants,
         })
     }
 
@@ -794,7 +723,20 @@ impl Application {
     }
 
     pub async fn rescan(self: &Arc<Self>) -> Result<ScanStatusWire, ServerError> {
-        let receive = self.admit_scan_cycle(None, None)?;
+        let receive =
+            self.admit_scan_cycle(slipstream_core::RecoveryOptions::full(), None, None)?;
+        Self::await_scan_cycle(receive).await
+    }
+
+    /// Runs one Folder Check. Candidate verification is scoped to the
+    /// requested Original Folder and every same-shape candidate that can
+    /// affect its uniqueness.
+    pub async fn rescan_folder(
+        self: &Arc<Self>,
+        folder: String,
+    ) -> Result<ScanStatusWire, ServerError> {
+        let receive =
+            self.admit_scan_cycle(slipstream_core::RecoveryOptions::folder(folder), None, None)?;
         Self::await_scan_cycle(receive).await
     }
 

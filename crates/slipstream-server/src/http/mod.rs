@@ -535,6 +535,19 @@ pub(crate) async fn read_json_body(request: Request<Body>) -> Result<Value, Resp
         .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Invalid JSON body"))
 }
 
+/// Reads an optional JSON body: an absent or whitespace-only body is `None`.
+pub(crate) async fn read_optional_json_body(
+    request: Request<Body>,
+) -> Result<Option<Value>, Response<Body>> {
+    let bytes = read_body_bytes(request).await?;
+    if bytes.iter().all(u8::is_ascii_whitespace) {
+        return Ok(None);
+    }
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Invalid JSON body"))
+}
+
 pub(crate) async fn read_json_object(
     request: Request<Body>,
     invalid_message: &'static str,
