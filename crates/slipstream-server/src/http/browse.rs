@@ -11,8 +11,8 @@ use std::time::SystemTime;
 
 use super::{
     ApiError, CLI_CONTRACT_HEADER, HttpState, api_error, cli_error, has_exact_keys, invalid_cli,
-    json_response, read_json_body, require_cli_contract, require_published, valid_id,
-    valid_removal_markers, valid_selection,
+    json_response, read_json_body, read_optional_json_body, require_cli_contract,
+    require_published, valid_id, valid_removal_markers, valid_selection,
 };
 use crate::{
     Application, BrowseSelectionFilter, BrowseSourceRequest, BrowseViewOrder, ServerError,
@@ -784,7 +784,28 @@ pub(crate) async fn scan(State(state): State<HttpState>, request: Request<Body>)
     if cli_request && let Err(response) = require_cli_contract(&request) {
         return *response;
     }
-    match state.application.rescan().await {
+    let folder = match read_optional_json_body(request).await {
+        Ok(None | Some(Value::Null)) => None,
+        Ok(Some(Value::Object(body))) => {
+            if !body.is_empty() && !has_exact_keys(&body, &["folder"]) {
+                return api_error(StatusCode::BAD_REQUEST, "Invalid scan request");
+            }
+            match body.get("folder") {
+                None => None,
+                Some(Value::String(folder)) if valid_folder_location(folder) => {
+                    Some(folder.clone())
+                }
+                Some(_) => return api_error(StatusCode::BAD_REQUEST, "Invalid Folder scope"),
+            }
+        }
+        Ok(Some(_)) => return api_error(StatusCode::BAD_REQUEST, "Invalid scan request"),
+        Err(response) => return response,
+    };
+    let result = match folder {
+        Some(folder) => state.application.rescan_folder(folder).await,
+        None => state.application.rescan().await,
+    };
+    match result {
         Ok(response) if cli_request => {
             json_response(StatusCode::OK, &CliScanStatusWire::from(response))
         }

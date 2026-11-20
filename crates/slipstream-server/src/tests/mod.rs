@@ -18,6 +18,7 @@ mod cli_preview;
 #[path = "cli_selection.rs"]
 mod cli_selection;
 mod export_routes;
+mod folder_freshness;
 mod lifecycle;
 mod metadata;
 mod preview;

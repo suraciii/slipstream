@@ -19,8 +19,12 @@ const folderWindow = (publication: string, parent: string) =>
         name: parent ? "leaf" : "child",
         photoCount: 1,
         hasDescendantFolders: !parent,
+        pendingFiles: 0,
+        hasPendingDescendants: false,
       },
     ],
+    pendingFiles: 0,
+    hasPendingDescendants: false,
   });
 
 const overview = () =>

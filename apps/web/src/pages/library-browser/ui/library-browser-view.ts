@@ -88,9 +88,9 @@ export type {
 } from "../model/recovery-view-models.js";
 export type { BatchAlbumsViewModel } from "../model/grid-batch-albums-contract.js";
 export type { WorkspaceIntent } from "../model/workspace-intent-contract.js";
-
 import type {
   FolderAlbumViewModel,
+  FolderPendingViewModel,
   GridFilterViewModel,
   GridProgressViewModel,
   GridSortViewModel,
@@ -116,7 +116,6 @@ export type {
   ViewSourceOrder,
 } from "./library-browser-view-contract.js";
 export type { WorkspaceViewModel } from "../model/workspace-controller-contract.js";
-
 type ControlsViewModel = Readonly<{
   gridEnabled: boolean;
   filmstripEnabled: boolean;
@@ -170,6 +169,7 @@ export interface LibraryBrowserView
   /// Presents the Folder source's Add-to-Album action, which View options
   /// holds for the open Original Folder.
   renderFolderAlbum(model: FolderAlbumViewModel): void;
+  renderFolderPending(model: FolderPendingViewModel | undefined): void;
   /// Presents the committed source order. View options holds the draft until
   /// an explicit Apply commits it.
   renderSort(model: GridSortViewModel): void;
@@ -1145,8 +1145,7 @@ export function createLibraryBrowserView(
       retryPhoto.hidden = !photoRetryVisible;
     },
     setSourceTitle(name, path) {
-      if (!alive) return;
-      presentSourceTitle(name, path);
+      if (alive) presentSourceTitle(name, path);
     },
     setGridStatus(text) {
       if (!alive) return;
@@ -1185,6 +1184,7 @@ export function createLibraryBrowserView(
     },
     renderSources,
     renderFolderAlbum,
+    renderFolderPending: sourcePresenter.renderFolderPending,
     renderBatchAlbums(model) {
       if (!alive) return;
       batchPresenter.renderAlbums(model);

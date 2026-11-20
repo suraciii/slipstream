@@ -2430,6 +2430,44 @@
   }
 }
 
+.folder-pending-marker {
+  display: inline-block;
+  flex: none;
+  width: 0.5rem;
+  height: 0.5rem;
+  margin-inline: 0.35rem 0.25rem;
+  border-radius: 50%;
+  background: var(--warning, #d28a24);
+  vertical-align: middle;
+}
+
+.folder-pending {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+  margin: 0 1rem 0.75rem;
+  padding: 0.65rem 0.85rem;
+  border: 1px solid var(--border);
+  border-inline-start: 3px solid var(--warning, #d28a24);
+  border-radius: 0.4rem;
+  background: var(--surface);
+}
+
+.folder-pending-text {
+  margin: 0;
+  color: var(--fg);
+}
+
+.folder-pending button {
+  flex: none;
+}
+
+.folder-pending[aria-busy="true"] .folder-pending-text {
+  color: var(--muted);
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

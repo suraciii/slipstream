@@ -17,6 +17,8 @@ export type FileLocationTreeNode = Readonly<{
   name: string;
   photoCount: number;
   hasDescendantFolders: boolean;
+  pendingFiles: number;
+  hasPendingDescendants: boolean;
   expanded: boolean;
   loading: boolean;
   enabled: boolean;
@@ -38,6 +40,8 @@ export type FileLocationTree = Readonly<{
   rootExpanded: boolean;
   rootLoading: boolean;
   rootChildren: ReadonlyArray<FileLocationTreeNode>;
+  rootPendingFiles: number;
+  rootHasPendingDescendants: boolean;
   rootPager?: FileLocationTreeNode["pager"];
 }>;
 
@@ -78,6 +82,9 @@ export interface FileLocationController {
   reveal(location: string): Promise<void>;
   page(parent: string, direction: -1 | 1): Promise<void>;
   tree(isActive: (location: string) => boolean): FileLocationTree;
+  pending(
+    location: string,
+  ): Readonly<{ files: number; hasDescendants: boolean }> | undefined;
   refreshCounts(): Promise<void>;
   dispose(): void;
 }
@@ -312,6 +319,8 @@ export function createFileLocationController(
         name: child.name,
         photoCount: child.photoCount,
         hasDescendantFolders: child.hasDescendantFolders,
+        pendingFiles: child.pendingFiles ?? 0,
+        hasPendingDescendants: child.hasPendingDescendants ?? false,
         expanded,
         loading: expansions.has(child.location),
         enabled: Boolean(owner.publication),
@@ -333,6 +342,8 @@ export function createFileLocationController(
       rootExpanded,
       rootLoading: expansions.has(""),
       rootChildren: root?.children.map(node) ?? [],
+      rootPendingFiles: root?.pendingFiles ?? 0,
+      rootHasPendingDescendants: root?.hasPendingDescendants ?? false,
       ...(rootExpanded && root && root.total > owner.pageSize
         ? {
             rootPager: {
@@ -386,6 +397,7 @@ export function createFileLocationController(
     reveal,
     page,
     tree,
+    pending: (location) => owner.pending(location),
     refreshCounts,
     dispose: () => {
       if (closed) return;

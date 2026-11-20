@@ -21,12 +21,18 @@ pub(crate) struct FolderChild {
     pub name: String,
     pub photo_count: usize,
     pub has_descendant_folders: bool,
+    pub pending_files: usize,
+    pub has_pending_descendants: bool,
 }
 
 /// A Folder index derived from one Published Library generation.
 pub(crate) struct FolderIndex {
     /// Recursive Photo count per Folder location.
     recursive_counts: HashMap<String, usize>,
+    /// Recursive Pending Candidate count per Folder location.
+    pending_counts: HashMap<String, usize>,
+    /// Folders with at least one Pending Folder strictly below them.
+    pending_descendants: std::collections::HashSet<String>,
     /// Sorted direct-child locations per parent location.
     children: HashMap<String, Vec<String>>,
 }
@@ -44,6 +50,7 @@ impl FolderIndex {
         photos: &[slipstream_core::PhotoRecord],
         originals_by_id: &HashMap<String, usize>,
         originals: &[slipstream_core::OriginalRecord],
+        pending_folders: &[slipstream_core::PendingFolder],
     ) -> Self {
         let mut direct_counts: HashMap<String, usize> = HashMap::new();
         let mut located: Vec<String> = Vec::new();
@@ -73,6 +80,24 @@ impl FolderIndex {
         }
         for location in known.clone() {
             let mut ancestor = parent_location(&location);
+            while let Some(current) = ancestor {
+                if seen.insert(current.clone()) {
+                    known.push(current.clone());
+                }
+                ancestor = parent_location(&current);
+            }
+        }
+        // A Pending Folder is a known Folder even without a published Photo,
+        // so its marker never depends on a surviving Photo in that subtree.
+        let mut pending_direct: HashMap<String, usize> = HashMap::new();
+        for pending in pending_folders {
+            *pending_direct
+                .entry(pending.relative_path.clone())
+                .or_insert(0) += pending.pending_files;
+            if seen.insert(pending.relative_path.clone()) {
+                known.push(pending.relative_path.clone());
+            }
+            let mut ancestor = parent_location(&pending.relative_path);
             while let Some(current) = ancestor {
                 if seen.insert(current.clone()) {
                     known.push(current.clone());
@@ -115,8 +140,22 @@ impl FolderIndex {
                 *recursive_counts.entry(parent.to_owned()).or_insert(0) += count;
             }
         }
+        let mut pending_counts: HashMap<String, usize> = HashMap::new();
+        let mut pending_descendants: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        for (location, count) in pending_direct {
+            *pending_counts.entry(location.clone()).or_insert(0) += count;
+            let mut ancestor = parent_location(&location);
+            while let Some(parent) = ancestor {
+                *pending_counts.entry(parent.clone()).or_insert(0) += count;
+                pending_descendants.insert(parent.clone());
+                ancestor = parent_location(&parent);
+            }
+        }
         Self {
             recursive_counts,
+            pending_counts,
+            pending_descendants,
             children,
         }
     }
@@ -126,6 +165,17 @@ impl FolderIndex {
         location.is_empty()
             || self.recursive_counts.contains_key(location)
             || self.children.contains_key(location)
+            || self.pending_counts.contains_key(location)
+    }
+
+    /// Recursive Pending Candidate count for one Folder subtree.
+    pub(crate) fn pending_files(&self, location: &str) -> usize {
+        self.pending_counts.get(location).copied().unwrap_or(0)
+    }
+
+    /// Whether at least one strict descendant Folder is Pending.
+    pub(crate) fn has_pending_descendants(&self, location: &str) -> bool {
+        self.pending_descendants.contains(location)
     }
 
     /// One bounded window of direct children, ordered by location bytes.
@@ -149,6 +199,8 @@ impl FolderIndex {
                     .children
                     .get(location)
                     .is_some_and(|descendants| !descendants.is_empty()),
+                pending_files: self.pending_files(location),
+                has_pending_descendants: self.has_pending_descendants(location),
                 location: location.clone(),
             })
             .collect();
@@ -229,4 +281,44 @@ fn parent_location(path: &str) -> Option<String> {
 /// Display name of one Folder Location: its final component.
 fn display_name(location: &str) -> String {
     location.rsplit('/').next().unwrap_or(location).to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pending_folder_without_photos_is_known_and_marks_its_ancestors() {
+        let index = FolderIndex::derive(
+            &[],
+            &HashMap::new(),
+            &[],
+            &[slipstream_core::PendingFolder {
+                relative_path: "shoot/roll".to_owned(),
+                pending_files: 2,
+                pending_bytes: 40,
+            }],
+        );
+        assert!(index.is_known(""));
+        assert!(index.is_known("shoot"));
+        assert!(index.is_known("shoot/roll"));
+        let (root, _) = index.window("", 0, 60);
+        assert_eq!(root[0].location, "shoot");
+        assert_eq!(root[0].pending_files, 2);
+        assert!(root[0].has_pending_descendants);
+        let (shoot, _) = index.window("shoot", 0, 60);
+        assert_eq!(shoot[0].location, "shoot/roll");
+        assert_eq!(shoot[0].pending_files, 2);
+        assert!(!shoot[0].has_pending_descendants);
+        assert_eq!(index.pending_files("shoot/roll"), 2);
+        assert!(!index.has_pending_descendants("shoot/roll"));
+    }
+
+    #[test]
+    fn normal_folders_have_no_pending_state() {
+        let index = FolderIndex::derive(&[], &HashMap::new(), &[], &[]);
+        assert_eq!(index.pending_files(""), 0);
+        assert!(!index.has_pending_descendants(""));
+        assert!(index.window("", 0, 60).0.is_empty());
+    }
 }

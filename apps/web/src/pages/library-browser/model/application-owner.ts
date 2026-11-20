@@ -41,6 +41,10 @@ export type ApplicationSummary = Readonly<{
 export type ApplicationPresentation =
   | Readonly<{ kind: "summary"; summary: ApplicationSummary }>
   | Readonly<{
+      kind: "scan-status";
+      scan: LibraryOverviewResponse["scan"];
+    }>
+  | Readonly<{
       kind: "overview";
       overview: LibraryOverviewResponse;
       albums: ReadonlyArray<AlbumSummary>;
@@ -98,6 +102,7 @@ export interface ApplicationOwner {
   loadOverview(): Promise<void>;
   refreshOverview(): Promise<boolean>;
   requestLibraryCheck(): void;
+  requestFolderCheck(folder: string): void;
   notePublicationConflict(): void;
   albumSummaryAuthority(albumId: string): AlbumSummaryAuthority;
   invalidateSavedPositionAuthority(albumId: string): boolean;
@@ -380,6 +385,7 @@ export function createApplicationOwner(
       );
       backgroundSettled = true;
       publishOverview();
+      void emit({ kind: "scan-status", scan: body.scan });
       if (refreshOptions?.markReachable?.()) markReachable();
       if (refreshOptions?.bootstrap) startBootstrap(body);
       return "committed";
@@ -519,6 +525,7 @@ export function createApplicationOwner(
             reportProbeReachability(outcome);
             if (outcome.kind !== "answered") return;
             const scan = outcome.scan;
+            void emit({ kind: "scan-status", scan });
             const active = scan.state !== "idle" && scan.state !== "failed";
             if (active) {
               releaseScanFailure();
@@ -582,16 +589,22 @@ export function createApplicationOwner(
     queueNext();
   };
 
-  const retryLibraryCheck = async (): Promise<void> => {
+  const retryLibraryCheck = async (folder?: string): Promise<void> => {
     const settlement = scanSettlements.begin({ admissionKey: "scan" });
     if (!settlement) return;
     const cycle: ScanCycle = { consumed: false, admission: "pending" };
     activeScanCycle = cycle;
     releaseScanFailure();
-    presentScanActive(summary("Starting Library check…", undefined, "active"));
+    presentScanActive(
+      summary(
+        folder === undefined ? "Starting Library check…" : "Checking folder…",
+        undefined,
+        "active",
+      ),
+    );
     ensureStatusMonitor();
     try {
-      const result = await requestLibraryScan(fetcher);
+      const result = await requestLibraryScan(fetcher, folder);
       if (closed || cycle.consumed || activeScanCycle !== cycle) return;
       if (result.kind === "rejected") {
         if (activeScanCycle === cycle) activeScanCycle = undefined;
@@ -603,6 +616,7 @@ export function createApplicationOwner(
         return;
       }
       cycle.admission = "admitted";
+      void emit({ kind: "scan-status", scan: result.scan });
       if (scanCommandRecovery) {
         recover(scanCommandRecovery);
         scanCommandRecovery = undefined;
@@ -792,6 +806,7 @@ export function createApplicationOwner(
       return { kind: "refresh-current-source" };
     },
     requestLibraryCheck: () => void retryLibraryCheck(),
+    requestFolderCheck: (folder) => void retryLibraryCheck(folder),
     dispose: () => {
       if (closed) return;
       closed = true;

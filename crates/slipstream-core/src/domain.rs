@@ -1,7 +1,7 @@
 use crate::capture::CaptureFact;
 use std::{fmt, sync::Arc};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum OriginalKind {
     Raw,
     Jpeg,
@@ -183,14 +183,6 @@ pub struct OriginalFingerprint {
     pub digest: String,
     pub size: u64,
     pub mtime_ms: f64,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct ScanSnapshot {
-    pub published: bool,
-    pub originals: Vec<OriginalRecord>,
-    pub photos: Vec<PhotoRecord>,
-    pub errors: Vec<OriginalScanError>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

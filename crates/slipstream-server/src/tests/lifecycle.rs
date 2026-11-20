@@ -684,7 +684,7 @@ async fn shutdown_drains_background_scan_before_closing() {
 }
 
 #[tokio::test]
-async fn startup_and_explicit_waiters_share_one_scan_cycle_and_terminal_status() {
+async fn startup_refuses_a_different_scope_then_releases_admission() {
     let (base, config) = prepare_fixture();
     capture_metadata_fixture(&config.library_root.join("a.jpg"), "2026:01:01 09:00:00");
     let (gate_sender, gate_receiver) = tokio::sync::oneshot::channel();
@@ -693,24 +693,11 @@ async fn startup_and_explicit_waiters_share_one_scan_cycle_and_terminal_status()
             .await
             .unwrap();
 
-    // Startup was admitted synchronously but its leader is parked. Every
-    // explicit waiter must join that same application-owned cycle.
-    let receivers = (0..8)
-        .map(|_| application.admit_scan_cycle(None, None).unwrap())
-        .collect::<Vec<_>>();
+    // The parked startup cycle uses the automatic budget, so an explicit full
+    // check cannot join it. It is refused before touching the leader.
+    assert!(application.admit_full_scan_cycle(None, None).is_err());
     gate_sender.send(()).unwrap();
-
-    let mut terminal = None;
-    for receiver in receivers {
-        let status = receiver.await.unwrap().unwrap();
-        let facts = (status.state, status.completed, status.total);
-        if let Some(expected) = terminal {
-            assert_eq!(facts, expected);
-        } else {
-            terminal = Some(facts);
-        }
-    }
-    assert_eq!(terminal, Some(("idle", Some(1), Some(1))));
+    wait_for_scan_settled(&application).await;
     assert_eq!(application.shared.runs_started.load(Ordering::Relaxed), 1);
     assert_eq!(application.shared.runs_completed.load(Ordering::Relaxed), 1);
     assert_eq!(application.shared.awaiting_scan.load(Ordering::Relaxed), 0);
@@ -737,17 +724,17 @@ async fn dropped_scan_waiters_do_not_cancel_the_leader_or_leak_applying_status()
 
     let (gate_sender, gate_receiver) = tokio::sync::oneshot::channel();
     let first = application
-        .admit_scan_cycle(Some(gate_receiver), None)
+        .admit_full_scan_cycle(Some(gate_receiver), None)
         .unwrap();
     let mut abandoned = vec![first];
     for _ in 1..64 {
-        abandoned.push(application.admit_scan_cycle(None, None).unwrap());
+        abandoned.push(application.admit_full_scan_cycle(None, None).unwrap());
     }
     // These receivers model HTTP request futures dropped after admission.
     drop(abandoned);
     // Cancellation must release bounded waiter capacity before the physical
     // cycle completes; this live caller joins the same leader.
-    let live = application.admit_scan_cycle(None, None).unwrap();
+    let live = application.admit_full_scan_cycle(None, None).unwrap();
     gate_sender.send(()).unwrap();
     assert_eq!(live.await.unwrap().unwrap().state, "idle");
 
@@ -779,7 +766,7 @@ async fn shutdown_returns_only_after_live_scan_waiters_receive_terminal_status()
 
     let (gate_sender, gate_receiver) = tokio::sync::oneshot::channel();
     let mut receive = application
-        .admit_scan_cycle(Some(gate_receiver), None)
+        .admit_full_scan_cycle(Some(gate_receiver), None)
         .unwrap();
     let closing = {
         let application = Arc::clone(&application);

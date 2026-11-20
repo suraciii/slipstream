@@ -27,6 +27,7 @@ mod queries;
 mod removal;
 mod retained_record;
 mod scan;
+mod scan_pending;
 mod scan_recovery;
 mod schema;
 #[cfg(test)]
@@ -36,6 +37,7 @@ mod trash_cleanup;
 mod write_session;
 mod xmp;
 
+pub use crate::ScanSnapshot;
 pub use crate::domain::{
     AlbumBrowseMember, AlbumBrowseTarget, AlbumCreationResult, AlbumMember,
     AlbumMembershipMutation, AlbumMembershipResult, AlbumMutation, AlbumMutationResult,
@@ -44,8 +46,7 @@ pub use crate::domain::{
     CheckedPhotoDecisionMutation, CheckedPhotoDecisionOutcome, EditRecipe, EditRecipeRead,
     EditRecipeSettings, PhotoDecisionFacts, PhotoDecisionSnapshot, PhotoQuery, PhotoQueryError,
     PhotoRead, PhotoStateField, PhotoStateMutation, PhotoStateMutationResult, PhotoStateUndo,
-    PhotoStateValue, PreviewSeed, PreviewSeedResult, ScanSnapshot, SelectionState,
-    WhiteBalanceIntent,
+    PhotoStateValue, PreviewSeed, PreviewSeedResult, SelectionState, WhiteBalanceIntent,
 };
 pub use admission::{
     DatabaseName, StateDatabaseLock, StateDirectory, StateError, StateFileIdentity,

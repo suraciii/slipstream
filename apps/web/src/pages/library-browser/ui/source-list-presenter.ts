@@ -1,23 +1,27 @@
 import { formatPhotoCount } from "./photo-count.js";
+import { createFolderPendingPresenter } from "./folder-pending-presenter.js";
 import type {
   FolderAlbumViewModel,
   FolderViewModel,
   SourceListViewModel,
   SourceReference,
 } from "./library-browser-view.js";
+import type { FolderPendingViewModel } from "./library-browser-view-contract.js";
 
 type SourceIntent =
   | Readonly<{ kind: "folder-page"; location: string; direction: -1 | 1 }>
   | Readonly<{ kind: "folder-toggle"; location: string; expanded: boolean }>
   | Readonly<{ kind: "source-open"; source: SourceReference }>
   | Readonly<{ kind: "file-location-retry"; key: string }>
-  | Readonly<{ kind: "folder-album-add"; albumId: string }>;
+  | Readonly<{ kind: "folder-album-add"; albumId: string }>
+  | Readonly<{ kind: "folder-check"; location: string }>;
 
 type SourceElement = HTMLAnchorElement | HTMLButtonElement;
 
 export type SourceListPresenter = Readonly<{
   render(model: SourceListViewModel): void;
   renderFolderAlbum(model: FolderAlbumViewModel): void;
+  renderFolderPending(model: FolderPendingViewModel | undefined): void;
   sourceModel(): SourceListViewModel | undefined;
   folderAlbumSelection(): string;
   dispose(): void;
@@ -67,6 +71,10 @@ export const createSourceListPresenter = (
     addFolderToAlbum,
     folderAlbumStatus,
   } = options;
+  const folderPendingPresenter = createFolderPendingPresenter(
+    sourceList.closest(".app-shell") ?? sourceList.ownerDocument,
+    (location) => options.send({ kind: "folder-check", location }),
+  );
   const sourcePanel = sourceList.closest<HTMLElement>(".source-panel");
   const interceptDestination = (
     element: SourceElement,
@@ -154,6 +162,24 @@ export const createSourceListPresenter = (
     parent.append(status);
   };
   let folderControlId = 0;
+  const appendPendingMarker = (
+    parent: HTMLElement,
+    pendingFiles: number,
+    hasPendingDescendants: boolean,
+  ): void => {
+    if (pendingFiles === 0 && !hasPendingDescendants) return;
+    const marker = document.createElement("span");
+    marker.className = "folder-pending-marker";
+    marker.setAttribute("role", "img");
+    marker.setAttribute(
+      "aria-label",
+      pendingFiles > 0
+        ? `${pendingFiles} files need checking`
+        : "Subfolders have files that need checking",
+    );
+    marker.title = marker.getAttribute("aria-label") ?? "";
+    parent.append(marker);
+  };
   const appendFolder = (
     parent: HTMLUListElement,
     folder: FolderViewModel,
@@ -208,6 +234,11 @@ export const createSourceListPresenter = (
       options.send({ kind: "source-open", source }),
     );
     row.append(button);
+    appendPendingMarker(
+      button.querySelector("span") ?? button,
+      folder.pendingFiles,
+      folder.hasPendingDescendants,
+    );
     addFolderKeyboardNavigation(row);
     item.append(row);
     if (folder.loading) appendLoading(item, folder.name);
@@ -384,6 +415,11 @@ export const createSourceListPresenter = (
     });
     if (next.rootChildren.length) rootRow.append(rootExpand);
     rootRow.append(rootCard);
+    appendPendingMarker(
+      rootCard.querySelector("span") ?? rootCard,
+      next.rootPendingFiles,
+      next.rootHasPendingDescendants,
+    );
     addFolderKeyboardNavigation(rootRow);
     rootItem.append(rootRow);
     if (next.rootChildren.length) {
@@ -573,6 +609,7 @@ export const createSourceListPresenter = (
   return {
     render,
     renderFolderAlbum,
+    renderFolderPending: folderPendingPresenter.render,
     sourceModel: () => model,
     folderAlbumSelection: () => folderAlbumSelection,
     dispose: () => {

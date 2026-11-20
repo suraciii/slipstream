@@ -102,11 +102,14 @@ pub(super) fn snapshot(connection: &Connection) -> Result<ScanSnapshot, Persiste
         PersistenceError::Storage
     })?
     .is_some_and(|value| value == "1");
+    let (pending_folders, pending_changed_paths) = super::scan_pending::read(connection)?;
     Ok(ScanSnapshot {
         published,
         originals,
         photos,
         errors: Vec::new(),
+        pending_folders,
+        pending_changed_paths,
     })
 }
 
@@ -127,6 +130,8 @@ pub(super) fn apply_scan(
     recovery: &ScanRecoveryPlan,
     failure_after_first: bool,
 ) -> Result<ScanApplication, PersistenceError> {
+    let deferred_paths = &recovery.deferred_paths;
+    let pending_folders = &recovery.pending_folders;
     write_transaction(state, database_name, connection, |transaction| {
         let before = snapshot(transaction)?;
         let previous_originals = before
@@ -349,20 +354,40 @@ pub(super) fn apply_scan(
                    camera_model=excluded.camera_model",
             ).map_err(|_| PersistenceError::Storage)?;
         for (index, original) in discovered.iter().enumerate() {
+            // A deferred changed path keeps every persisted fact. The scanner
+            // supplies the remembered revision; the transaction decides the
+            // stored availability and error state from that prior record.
+            let preserved_prior = deferred_paths
+                .contains(original.path.as_str())
+                .then(|| previous_originals.get(original.path.as_str()))
+                .flatten()
+                .filter(|prior| prior.kind == original.kind);
             let published_prior = original
                 .error_category
                 .is_some()
                 .then(|| previous_originals.get(original.path.as_str()))
                 .flatten()
                 .filter(|prior| prior.kind == original.kind);
-            let facts = published_prior.map_or(original.facts, |prior| prior.facts);
-            let (identity_make, identity_model) = match &original.capture.identity {
+            let facts = preserved_prior.map_or_else(
+                || published_prior.map_or(original.facts, |prior| prior.facts),
+                |prior| prior.facts,
+            );
+            let capture = preserved_prior.map_or(&original.capture, |prior| &prior.capture);
+            let error_category =
+                preserved_prior.map_or(original.error_category, |prior| prior.error_category);
+            let error_message = preserved_prior
+                .map_or(original.error_message.as_deref(), |prior| {
+                    prior.error_message.as_deref()
+                });
+            let available =
+                preserved_prior.map_or(error_category.is_none(), |prior| prior.available);
+            let (identity_make, identity_model) = match &capture.identity {
                 crate::CameraIdentity::Observed { make, model } => {
                     (make.as_deref(), model.as_deref())
                 }
                 crate::CameraIdentity::Pending => (None, None),
             };
-            validate_capture_fact(&original.capture).map_err(|_| PersistenceError::Storage)?;
+            validate_capture_fact(capture).map_err(|_| PersistenceError::Storage)?;
             let id = original_ids
                 .get(original.path.as_str())
                 .expect("assigned Original identity");
@@ -376,21 +401,18 @@ pub(super) fn apply_scan(
                     },
                     i64::try_from(facts.size).map_err(|_| PersistenceError::Storage)?,
                     facts.mtime_ms,
-                    i64::from(original.error_category.is_none()),
-                    original
-                        .error_category
-                        .as_ref()
-                        .map(|category| match category {
-                            OriginalErrorCategory::Unreadable => "unreadable",
-                            OriginalErrorCategory::Changed => "changed",
-                        }),
-                    original.error_message.as_deref(),
-                    capture_state_name(original.capture.state),
-                    original.capture.order_key.as_deref(),
-                    original.capture.field.map(CaptureTimeField::database_name),
-                    original.capture.offset_minutes.map(i64::from),
-                    original.capture.source_revision.as_deref(),
-                    camera_identity_name(&original.capture.identity),
+                    i64::from(available),
+                    error_category.as_ref().map(|category| match category {
+                        OriginalErrorCategory::Unreadable => "unreadable",
+                        OriginalErrorCategory::Changed => "changed",
+                    }),
+                    error_message,
+                    capture_state_name(capture.state),
+                    capture.order_key.as_deref(),
+                    capture.field.map(CaptureTimeField::database_name),
+                    capture.offset_minutes.map(i64::from),
+                    capture.source_revision.as_deref(),
+                    camera_identity_name(&capture.identity),
                     identity_make,
                     identity_model,
                 ])
@@ -494,6 +516,11 @@ pub(super) fn apply_scan(
                 return Err(PersistenceError::InvalidRecovery);
             }
         }
+        super::scan_pending::write(
+            transaction,
+            pending_folders,
+            &recovery.pending_changed_paths,
+        )?;
         super::metadata_store::upsert(transaction, "published_once", "1", |_| {
             PersistenceError::Storage
         })?;
@@ -580,6 +607,8 @@ pub(super) fn seed_preview(
     })
 }
 
+#[cfg(test)]
+mod scan_freshness_tests;
 #[cfg(test)]
 mod tests {
     use super::super::scan_recovery::{
@@ -799,6 +828,7 @@ mod tests {
                 path: "moved/two.JPG".to_owned(),
                 digest: crate::recovery::digest_bytes(&[]),
             }],
+            ..ScanRecoveryPlan::default()
         };
         let relocated = persistence
             .apply_scan_recovered(
@@ -844,6 +874,7 @@ mod tests {
                             path: "moved/two.JPG".to_owned(),
                             digest: crate::recovery::digest_bytes(&[]),
                         }],
+                        ..ScanRecoveryPlan::default()
                     },
                 )
                 .await

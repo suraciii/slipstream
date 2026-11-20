@@ -24,6 +24,8 @@ mod preview_retry;
 pub mod processing;
 pub mod reconcile;
 mod recovery;
+mod recovery_planner;
+mod scan_state;
 pub mod xmp;
 
 #[cfg(test)]
@@ -73,10 +75,10 @@ pub use domain::{
     PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateField, PhotoStateMutation,
     PhotoStateMutationResult, PhotoStateUndo, PhotoStateValue, PreviewSeed, PreviewSeedResult,
     PreviewSource, PreviewState, RelativeOriginalPath, RemovedPhotoRecord, ScanResult,
-    ScanSnapshot, SelectionState, TRASH_CLEANUP_MAX, TrashAbsence, TrashCleanupBlocker,
-    TrashCleanupCounts, TrashCleanupItemResult, TrashCleanupItemState, TrashCleanupPreview,
-    TrashCleanupPreviewItem, TrashCleanupResult, TrashCleanupTarget, TrashInspectionRecord,
-    TrashSelection, WhiteBalanceIntent, export_submission_payload_digest,
+    SelectionState, TRASH_CLEANUP_MAX, TrashAbsence, TrashCleanupBlocker, TrashCleanupCounts,
+    TrashCleanupItemResult, TrashCleanupItemState, TrashCleanupPreview, TrashCleanupPreviewItem,
+    TrashCleanupResult, TrashCleanupTarget, TrashInspectionRecord, TrashSelection,
+    WhiteBalanceIntent, export_submission_payload_digest,
 };
 pub use export::{
     ArtifactWriter, ExportError, ExportTarget, ExportWorkspace, MAXIMUM_EXPORT_BYTES,
@@ -125,10 +127,13 @@ pub use processing::{
 };
 pub use reconcile::{ReconciledPhoto, preview_should_preserve, reconcile, selected_source};
 pub use recovery::{
-    AppliedRelocations, ManualOutcome, ManualProposal, MappingBlock, RecoveryProgress,
-    RecoveryRecord, RecoverySurvey, RelocationSet, RequestedRelocation, RetireSummary,
-    count_prefix_scope, digest_bytes, evaluate_relocation, evidence_original_ids,
-    parse_location_prefix, plan_manual_relocations, plan_recovery, plan_single_relocation,
+    AUTOMATIC_VERIFICATION_BUDGET_BYTES, AppliedRelocations, ManualOutcome, ManualProposal,
+    MappingBlock, RecoveryOptions, RecoveryPlanInput, RecoveryProgress, RecoveryRecord,
+    RecoverySurvey, RelocationSet, RequestedRelocation, RetireSummary, count_prefix_scope,
+    digest_bytes, evaluate_relocation, evidence_original_ids, parse_location_prefix,
+    plan_manual_relocations, plan_single_relocation,
 };
+pub use recovery_planner::{plan_recovery, plan_recovery_with_options};
+pub use scan_state::{PendingFolder, ScanSnapshot};
 pub use slipstream_preview_capability::{PreviewCapability, REVIEW_LONG_EDGE};
 pub use xmp::{XMP_CONTENT_TYPE, XMP_RETENTION_SECONDS, XmpExportRecord};

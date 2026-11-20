@@ -235,6 +235,7 @@ impl Published {
             &self.snapshot.photos,
             &self.originals_by_id,
             &self.snapshot.originals,
+            &self.snapshot.pending_folders,
         ));
         Arc::clone(
             self.folder_index

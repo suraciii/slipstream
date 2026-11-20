@@ -13,7 +13,7 @@ use std::{
 
 static NEXT_TEMP_TREE: AtomicU64 = AtomicU64::new(0);
 
-struct TempTree(PathBuf);
+pub(super) struct TempTree(PathBuf);
 
 impl TempTree {
     fn new() -> Self {
@@ -46,7 +46,7 @@ fn config(base: &TempTree) -> LibraryConfig {
     }
 }
 
-fn fixture() -> (TempTree, LibraryConfig) {
+pub(super) fn fixture() -> (TempTree, LibraryConfig) {
     let base = TempTree::new();
     fs::create_dir(base.0.join("originals")).unwrap();
     let config = config(&base);

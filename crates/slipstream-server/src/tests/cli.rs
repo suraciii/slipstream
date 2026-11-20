@@ -90,7 +90,7 @@ async fn cli_direct_photo_metadata_stays_with_its_published_revision() {
 
     let (publish_sender, publish_receiver) = tokio::sync::oneshot::channel();
     let scan = application
-        .admit_scan_cycle(None, Some(publish_receiver))
+        .admit_full_scan_cycle(None, Some(publish_receiver))
         .unwrap();
     for _ in 0..400 {
         let persisted = application.library.snapshot().await.unwrap();
@@ -1947,10 +1947,10 @@ async fn cli_folder_cursor_maps_publication_replacement_and_query_expiry() {
     let _ = fs::remove_dir_all(base);
 }
 
-/// A dropped CLI check response cannot cancel an application-owned scan cycle,
-/// and a later status query reports the service state, not the caller's fate.
+/// A CLI full check cannot join the automatic startup scope, and a later
+/// status query reports the service state instead of pretending to answer.
 #[tokio::test]
-async fn cli_scan_check_reports_service_state_after_an_interrupted_request() {
+async fn cli_scan_check_reports_busy_while_startup_uses_another_scope() {
     let (base, config) = prepare_fixture();
     jpeg_fixture(
         &config.library_root.join("photo.jpg"),
@@ -1971,35 +1971,32 @@ async fn cli_scan_check_reports_service_state_after_an_interrupted_request() {
     );
     assert_eq!(application.scan_status().state, "initializing");
 
-    // The CLI check joins the parked application-owned cycle, then the caller
-    // disconnects before any answer exists. The cycle only completes when the
-    // application releases it, so the caller's departure is what interrupts it.
-    let interrupted = tokio::time::timeout(
-        std::time::Duration::from_millis(50),
-        send(
-            &router,
-            authenticated_request()
-                .method("POST")
-                .uri("https://camera.local/api/scan")
-                .header("Slipstream-CLI-Contract", "2")
-                .header(header::ORIGIN, "https://camera.local")
-                .body(Body::empty())
-                .unwrap(),
-        ),
+    // The CLI full check cannot join the automatic startup scope. The
+    // application refuses it without disturbing the parked leader.
+    let busy = send(
+        &router,
+        authenticated_request()
+            .method("POST")
+            .uri("https://camera.local/api/scan")
+            .header("Slipstream-CLI-Contract", "2")
+            .header(header::ORIGIN, "https://camera.local")
+            .body(Body::empty())
+            .unwrap(),
     )
     .await;
-    assert!(
-        interrupted.is_err(),
-        "no scan answer may reach an interrupted caller"
+    assert_eq!(busy.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response_json(busy).await["error"]["code"],
+        "library_unavailable"
     );
 
-    // The cycle is application-owned, so releasing the gate completes it.
+    // The startup cycle is application-owned, so releasing the gate completes it.
     gate_sender.send(()).unwrap();
     wait_for_scan_runs(&application, 1).await;
     assert_eq!(
         application.shared.runs_started.load(Ordering::Relaxed),
         1,
-        "the interrupted check joined the one application-owned cycle"
+        "the refused check started no second cycle"
     );
     let status = response_json(
         send(

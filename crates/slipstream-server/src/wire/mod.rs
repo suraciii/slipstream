@@ -1,9 +1,11 @@
 use super::*;
 mod browse_filters;
 mod cli;
+mod folders;
 
 pub use browse_filters::{BrowseFilterConditions, valid_browse_filters};
 pub(crate) use cli::*;
+pub use folders::{FileLocationsResponse, FolderChildWire};
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -70,6 +72,9 @@ pub struct ScanStatusWire {
     /// Truthful background fingerprint enrollment counters.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fingerprints: Option<FingerprintProgressWire>,
+    /// Present while the active check is scoped to one Folder.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
 }
 
 /// Recovery facts from the most recent committed scan.
@@ -418,26 +423,6 @@ pub struct PhotoAlbumMembershipWire {
 }
 
 /// One bounded File Location window response.
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FileLocationsResponse {
-    pub publication: String,
-    pub parent: String,
-    pub start: usize,
-    pub limit: usize,
-    pub total: usize,
-    pub children: Vec<FolderChildWire>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FolderChildWire {
-    pub location: String,
-    pub name: String,
-    pub photo_count: usize,
-    pub has_descendant_folders: bool,
-}
-
 /// Bounded Album mutation response: the same summaries the Library
 /// Overview exposes, never member lists.
 #[derive(Clone, Debug, Serialize)]

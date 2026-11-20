@@ -3,13 +3,14 @@ use super::*;
 pub(super) type ScanReply = tokio::sync::oneshot::Sender<Result<Arc<ScanSnapshot>, LibraryError>>;
 
 pub(super) enum ScanCommand {
-    Scan,
+    Scan(crate::recovery::RecoveryOptions),
     Stop,
 }
 
 pub(super) struct ScanState {
     pub(super) open: bool,
     pub(super) in_flight: Option<Vec<ScanReply>>,
+    pub(super) options: Option<crate::recovery::RecoveryOptions>,
 }
 pub(super) struct Scanner {
     pub(super) sender: std::sync::mpsc::SyncSender<ScanCommand>,
@@ -121,7 +122,7 @@ pub(super) fn scanner_main(
     while let Ok(command) = receiver.recv() {
         match command {
             ScanCommand::Stop => break,
-            ScanCommand::Scan => {
+            ScanCommand::Scan(options) => {
                 {
                     enrollment.0.lock().unwrap().scan_running = true;
                     let mut progress = progress.lock().unwrap();
@@ -182,15 +183,48 @@ pub(super) fn scanner_main(
                         let mut reporter = ScanProgressReporter {
                             progress: progress.clone(),
                         };
-                        let recovery = crate::recovery::plan_recovery(
-                            &root,
-                            &native_work,
-                            &result.originals,
-                            &previous,
-                            &fingerprints,
-                            &deleted_originals,
+                        let recovery = crate::plan_recovery_with_options(
+                            crate::recovery::RecoveryPlanInput {
+                                root: &root,
+                                native_work: &native_work,
+                                discovered: &result.originals,
+                                previous: &previous,
+                                persisted_fingerprints: &fingerprints,
+                                excluded_original_ids: &deleted_originals,
+                                options: &options,
+                            },
                             &mut reporter,
                         );
+                        let previous_by_path = previous
+                            .originals
+                            .iter()
+                            .map(|original| (original.relative_path.as_str().to_owned(), original))
+                            .collect::<std::collections::HashMap<_, _>>();
+                        let deferred_paths = recovery.deferred_paths.clone();
+                        let mut effective_originals = Vec::with_capacity(result.originals.len());
+                        for original in result.originals {
+                            if deferred_paths.contains(original.path.as_str()) {
+                                if let Some(prior) =
+                                    previous_by_path.get(original.path.as_str()).copied()
+                                {
+                                    effective_originals.push(crate::DiscoveredOriginal {
+                                        path: original.path,
+                                        kind: prior.kind,
+                                        facts: prior.facts,
+                                        error_category: prior.error_category,
+                                        error_message: prior.error_message.clone(),
+                                        capture: prior.capture.clone(),
+                                    });
+                                }
+                                continue;
+                            }
+                            effective_originals.push(original);
+                        }
+                        let effective_errors = result
+                            .errors
+                            .into_iter()
+                            .filter(|error| !deferred_paths.contains(error.path.as_str()))
+                            .collect();
                         {
                             let mut progress = progress.lock().unwrap();
                             progress.phase = ScanPhase::Applying;
@@ -198,8 +232,8 @@ pub(super) fn scanner_main(
                         }
                         let applied = persistence
                             .apply_scan_recovered_blocking(
-                                result.originals,
-                                result.errors,
+                                effective_originals,
+                                effective_errors,
                                 recovery,
                             )
                             .map_err(LibraryError::from)?;
@@ -235,6 +269,7 @@ pub(super) fn scanner_main(
                 }
                 let (lock, signal) = &*state;
                 let mut guard = lock.lock().unwrap();
+                guard.options = None;
                 if let Some(waiters) = guard.in_flight.take() {
                     for waiter in waiters {
                         let _ = waiter.send(result.clone());
@@ -246,6 +281,7 @@ pub(super) fn scanner_main(
     }
     let (lock, signal) = &*state;
     let mut guard = lock.lock().unwrap();
+    guard.options = None;
     if let Some(waiters) = guard.in_flight.take() {
         for waiter in waiters {
             let _ = waiter.send(Err(LibraryError::ScannerStopped));
