@@ -27,7 +27,7 @@ Topic contracts own exact behavior within their scope. Web Frontend Architecture
 
 ## Command-Line
 
-- [Command-Line Use](command-line/spec.md): delegated workflows, layered `--help`, raw Markdown Agent Skills, external-tool boundary, shared state, Preview delivery, effects, and recovery.
+- [Command-Line Use](command-line/spec.md): delegated workflows, layered `--help`, raw Markdown Agent Skills, external-tool boundary, shared state, Preview delivery and visual handoff, effects, and recovery.
 - [Command-Line Design](command-line/design.md): CLI-only Agent interface, embedded natural-language skills, thin client, bounded queries, mutation guards, transport uncertainty, and Web handoff.
 - [CLI Reference](command-line/reference.md): command semantics, layered Command Manual, raw Markdown Agent Skills, input boundaries, results, errors, and composition.
 - [Agent Skills](command-line/skills.md): bundled natural-language guides, authority, catalog, content boundaries, and offline delivery.

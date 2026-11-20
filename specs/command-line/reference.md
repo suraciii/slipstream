@@ -397,6 +397,8 @@ Size defaults to `review`. The command obtains the current supported derivative 
 
 The result identifies `photoId`, `path`, `source`, `sourceRevision`, `width`, `height`, `detailLimited`, and `webUrl`. `source` is `jpeg-original` or `raw-embedded-jpeg`. These facts MUST describe the downloaded image; arbitrary remote URLs are not accepted.
 
+`path` is the caller-local JPEG for Agent inspection or presentation. `webUrl` is the browser [Destination](../library-browser/experience/spec.md#destinations-and-browser-history) for interactive review.
+
 `detailLimited` reports source capability, not viewport or zoom state. It is `true` when delivered dimensions are below the review target for the requested size, and `false` when they reach it.
 
 The CLI MUST NOT invent a viewport or zoom condition. No CLI command accepts viewport, window, or zoom parameters. The Web MAY report a separate local display condition, which is not a CLI result.

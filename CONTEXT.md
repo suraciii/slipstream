@@ -153,6 +153,10 @@ Magnified Preview inspection for focus, motion, or expression. It is a Preview Z
 The external software that interprets a Photographer's request, composes Slipstream and external-tool operations, and reports its work. An Agent is not part of Slipstream and owns its model, prompts, and conversation.
 _Avoid_: assistant, bot, internal agent
 
+**MCP App**:
+An interactive interface rendered by a Model Context Protocol host. It is an optional integration for an Agent host, not a required Slipstream surface.
+_Avoid_: Agent UI, embedded app
+
 **Command Manual**:
 The layered offline `--help` text at the top level, command group, and leaf command. It owns exact command names, options, defaults, effects, limits, and result inspection. It is the CLI syntax authority; there is no separate `help` command.
 _Avoid_: documentation site, skill text

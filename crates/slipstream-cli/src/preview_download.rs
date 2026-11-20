@@ -601,7 +601,12 @@ mod tests {
                 ),
                 web_path: "/?photoId=photo".into(),
             };
-            assert!(admitted_metadata(&metadata, "photo", size, &client).is_ok());
+            let (url, web_url) = admitted_metadata(&metadata, "photo", size, &client).unwrap();
+            assert_eq!(web_url, "https://example.test/?photoId=photo");
+            assert_eq!(
+                url.as_str(),
+                format!("https://example.test{}", metadata.url)
+            );
             metadata.detail_limited = !limited;
             assert!(admitted_metadata(&metadata, "photo", size, &client).is_err());
         }

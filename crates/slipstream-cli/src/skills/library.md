@@ -32,7 +32,9 @@ slipstream photos preview PHOTO_ID --file NEW_PATH --size review
 ```
 
 A Preview is a display rendition, not a full-resolution Original. Check its
-`sourceRevision`, `source`, and dimensions. Originals stay read-only.
+`sourceRevision`, `source`, and dimensions. `path` and `webUrl` identify the
+same Photo. Present the local JPEG when the Agent can display images. Offer
+`webUrl` for interactive Web review. Originals stay read-only.
 
 ## Decide
 

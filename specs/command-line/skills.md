@@ -29,7 +29,7 @@ The shipped catalog MUST include these skills.
 | Skill       | Required coverage                                                                                                                                |
 | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `core`      | Authentication, output, failure handling, layered help discovery, workspace handoff, External Tool boundary, and advanced `processing` boundary. |
-| `library`   | Status, Photo queries, Preview download, decisions, Albums, pagination, and conflict inspection.                                                 |
+| `library`   | Status, Photo queries, Preview download and visual handoff, decisions, Albums, pagination, and conflict inspection.                              |
 | `recovery`  | Trash, Photo removal, Restore, Location Recovery, review rules, and uncertain outcomes.                                                          |
 | `workspace` | Open, show, file inventory, download, External Tool setup and output discovery, and safe removal.                                                |
 | `darktable` | Edit inspection, Preview render, Export create, and download through the Slipstream darktable integration.                                       |
@@ -43,6 +43,8 @@ A Skill SHOULD read as a short natural-language guide. It SHOULD state when to u
 A Skill SHOULD include at least one end-to-end example. Examples SHOULD use real command names and placeholder values for caller data.
 
 A Skill SHOULD make clear which steps read, which mutate, and which write local files. It SHOULD identify the result to inspect before a mutation.
+
+A Skill that downloads a Preview SHOULD direct the Agent to offer the browser Destination for interactive review. When the Agent can display images, it SHOULD also present the local image.
 
 A Skill MUST NOT define a flag, default, limit, command, or result field that the Command Manual does not expose.
 
