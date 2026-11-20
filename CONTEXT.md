@@ -10,8 +10,20 @@ The configured filesystem directory whose supported descendant files belong to t
 _Avoid_: Library Root, source root
 
 **Library Check**:
-The product operation that inspects the configured Library Folder for added, changed, and removed files and publishes a replacement Photo Library. The empty-Library action is **Check Library**; a published Library may offer **Refresh Current Source** for its open view.
+The product operation that inspects the configured Library Folder for added, changed, and removed files and publishes a replacement Photo Library. The empty-Library action is **Check Library**; a published Library may offer **Refresh Current Source** for its open view. An automatic Library Check may defer expensive identity work to Folder Checks.
 _Avoid_: scan, rescan, or inspect in user-facing language
+
+**Pending Candidate**:
+A discovered Original File whose kind and size could match a remembered Content Fingerprint, so its identity needs content verification before publication. A Pending Candidate is not yet a Photo and does not overwrite remembered facts.
+_Avoid_: dirty file, unverified Photo, duplicate
+
+**Pending Folder**:
+An Original Folder that contains Pending Candidates or other deferred identity work. A Pending Folder remains browsable and reports its local pending work; it is not a global Library state.
+_Avoid_: outdated folder, stale Library
+
+**Folder Check**:
+The user-triggered verification of Pending Candidates that can affect one Original Folder subtree. A Folder Check publishes the same atomic Library result as a Library Check but verifies only the candidates needed to resolve that Folder.
+_Avoid_: folder scan, partial import, repair
 
 **Photo**:
 One independently managed supported Original File presented for browsing and selection. RAW and same-basename JPEG are independent Photos; their naming must not share decisions, Album membership, or Preview. A Photo keeps its identity when a supported operation changes its Original Location.

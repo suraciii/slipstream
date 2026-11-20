@@ -46,6 +46,8 @@ Topic contracts own exact behavior within their scope. Web Frontend Architecture
 
 - [Photo Library and Albums](photo-library/spec.md): indexing, read-only Original Folders, virtual Albums, independent RAW and JPEG Photos, and Location Recovery.
 - [Photo Library Design](photo-library/design.md): physical Folder projection, Album ownership, source semantics, navigation, and recovery application.
+- [Folder Freshness](photo-library/folder-checks/spec.md): automatic candidate deferral, Pending Folders, folder-scoped verification, and local progress.
+- [Folder Freshness Design](photo-library/folder-checks/design.md): candidate shapes, verification budget, scope expansion, partial apply, and pending Folder projection.
 - [Library Identity](photo-library/identity.md): stable Original File and Photo identity, fingerprints, exact-content recovery, and Library Folder expansion.
 - [Capture-Time Ordering](photo-library/ordering.md): metadata authority, deterministic source and Album order, persistence, and rescan lifecycle.
 
